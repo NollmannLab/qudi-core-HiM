@@ -1,1 +1,1 @@
-# qudi_core_cbs
+# qudi_core-HiM
