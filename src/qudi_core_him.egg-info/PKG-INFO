@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: qudi-core-him
+Version: 0.1.0
+Summary: Custom qudi-core modules for Nollmann lab setups
+Project-URL: Homepage, https://github.com/NollmannLab/qudi_core_cbs
+Project-URL: Documentation, https://github.com/NollmannLab/qudi_core_cbs/docs
+Project-URL: Repository, https://github.com/NollmannLab/qudi_core_cbs.git
+Project-URL: Changelog, https://github.com/NollmannLab/qudi_core_cbs/docs/changelog.md
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: qudi-core
+Provides-Extra: dev-lint-format
+Requires-Dist: ruff==0.7.0; extra == "dev-lint-format"
+Dynamic: license-file
+
+# qudi_core_cbs

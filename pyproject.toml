@@ -1,94 +1,19 @@
 [build-system]
-requires = [
-    "setuptools>=61.0",
-    "setuptools-scm>=8.0",
-    "wheel"
-]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qudi-core_cbs"
-dynamic = ["0.1.0"]
-description = "Qudi-core framework applied to Nollmann's lab setups"
+name = "qudi-core-him"
+version = "0.1.0"
+description = "Custom qudi-core modules for Nollmann lab setups"
 readme = "README.md"
-keywords = [
-    "qudi",
-    "automation",
-    "experiment",
-    "measurement",
-    "framework",
-    "lab",
-    "laboratory",
-    "instrumentation",
-    "instrument",
-    "modular",
-]
-classifiers = [
-    "Development Status :: 5 - Production/Stable",
-
-    "Environment :: Win64 (MS Windows)",
-
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
-    "Intended Audience :: End Users/Desktop",
-
-    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
-
-    "Natural Language :: English",
-
-    "Operating System :: Microsoft :: Windows :: Windows 11",
-    "Operating System :: Unix",
-
-    "Programming Language :: Python :: 3.10",
-
-    "Topic :: Scientific/Engineering",
-    "Topic :: Software Development :: Libraries :: Application Frameworks",
-    "Topic :: Software Development :: User Interfaces",
-]
-requires-python = ">=3.10, <3.11"
+requires-python = ">=3.10"
 dependencies = [
-    "cycler>=0.10.0",
-    "entrypoints>=0.3",
-    "fysom>=2.1.6",
-    "GitPython>=3.1.24",
-    "jupyter>=1.0.0",
-    "jupytext>=1.13.0",
-    "lmfit>=1.0.3",
-    "matplotlib>=3.4.3",
-    "numpy>=1.21.3, < 2",
-    "pyqtgraph>=0.13.0",
-    "PySide2==5.15.2.1",
-    "rpyc>=5.0.1, <6",
-    "ruamel.yaml>=0.17.16",
-    "scipy>=1.7.1",
-    "jsonschema>=4.2.1",
-    "qtconsole>=5.5.0",
+    "qudi-core"
 ]
 
 [project.optional-dependencies]
-dev-lint-format = ["ruff==0.7.0",]
-
-[tool.ruff]
-line-length = 120
-
-[tool.ruff.format]
-quote-style = "preserve"
-skip-magic-trailing-comma = true
-
-[tool.ruff.lint]
-ignore = [
-    "ERA001",  # Commented-out code
-    "SLF001",  # Private member accessed
-    "N803",  # Argument name should be lowercase
-    "N806",  # Variable in function should be lowercase
-    "C901",  # Init method too complex
-]
-
-[project.scripts]
-qudi = "qudi.runnable:main"
-qudi-config-editor = "qudi.tools.config_editor.config_editor:main"
-qudi-uninstall-kernel = "qudi.core.qudikernel:uninstall_kernel"
-qudi-install-kernel = "qudi.core.qudikernel:install_kernel"
+dev-lint-format = ["ruff==0.7.0"]
 
 [project.urls]
 Homepage = "https://github.com/NollmannLab/qudi_core_cbs"
@@ -96,5 +21,9 @@ Documentation = "https://github.com/NollmannLab/qudi_core_cbs/docs"
 Repository = "https://github.com/NollmannLab/qudi_core_cbs.git"
 Changelog = "https://github.com/NollmannLab/qudi_core_cbs/docs/changelog.md"
 
-[tool.setuptools.dynamic]
-version = {file = "VERSION"}
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["qudi*"]

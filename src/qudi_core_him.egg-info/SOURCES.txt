@@ -1,0 +1,8 @@
+LICENSE
+README.md
+pyproject.toml
+src/qudi_core_him.egg-info/PKG-INFO
+src/qudi_core_him.egg-info/SOURCES.txt
+src/qudi_core_him.egg-info/dependency_links.txt
+src/qudi_core_him.egg-info/requires.txt
+src/qudi_core_him.egg-info/top_level.txt

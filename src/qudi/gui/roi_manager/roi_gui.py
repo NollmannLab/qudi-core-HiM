@@ -15,7 +15,6 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 from qtpy import QtCore, QtWidgets
-
 from qudi.core.connector import Connector
 from qudi.core.module import GuiBase
 
@@ -49,7 +48,7 @@ class RoiMainWindow(QtWidgets.QMainWindow):
 
 
 class RoiGui(GuiBase):
-    roi_logic = Connector(name="roi_logic")
+    roi_logic = Connector(interface='RoiLogic', name='roi_logic')
 
     def on_activate(self):
         self._logic = self.roi_logic()
@@ -68,6 +67,7 @@ class RoiGui(GuiBase):
         self._refresh_position()
 
         self._restore_window_geometry(self._mw)
+        self.show()
 
     def on_deactivate(self):
         self._save_window_geometry(self._mw)
@@ -83,8 +83,8 @@ class RoiGui(GuiBase):
 
     def show(self):
         self._mw.show()
-        self._mw.raise_()
         self._mw.activateWindow()
+        self._mw.raise_()
 
     @QtCore.Slot()
     def _refresh_position(self):

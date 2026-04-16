@@ -1,0 +1,4 @@
+qudi-core
+
+[dev-lint-format]
+ruff==0.7.0
