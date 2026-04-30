@@ -29,56 +29,56 @@ from qudi.core.module import Base
 class RoiStageInterface(Base):
     """Minimal stage interface for ROI management."""
 
-    @abstractmethod
-    def get_constraints(self):
-        """Return axis constraints, e.g. limits and available axes."""
-        pass
-
-    @abstractmethod
-    def move_abs(self, pos):
-        """Move to an absolute position given as a dict."""
-        pass
-
-    @abstractmethod
-    def move_rel(self, delta):
-        """Move by a relative offset given as a dict."""
-        pass
-
-    @abstractmethod
-    def abort(self):
-        """ Abort current action or movement """
-        pass
-
-    @abstractmethod
-    def get_pos(self, param_list=None):
-        """ Get current position of the stage arms"""
-        pass
-
-    @abstractmethod
-    def get_status(self, param_list=None):
-        """ Get current status of the stage """
-        pass
-
-    @abstractmethod
-    def calibrate(self, param_list=None):
-        """ optional : if required calibrate an axis of the stage """
-        pass
-
-    @abstractmethod
-    def get_velocity(self, param_list=None):
-        """ Get current setting for the velocity of one of the axis arm """
-        pass
-
-    @abstractmethod
-    def set_velocity(self, param_dict=None):
-        """ Set the velocity """
-        pass
-
-    @abstractmethod
-    def wait_for_idle(self):
-        """ Set a delay between two successive commands"""
-        pass
-
-    def _make_wait_after_movement(self):
-        """ Set a delay after a movement """
-        pass
+    # @abstractmethod
+    # def get_constraints(self):
+    #     """Return axis constraints, e.g. limits and available axes."""
+    #     pass
+    #
+    # @abstractmethod
+    # def move_abs(self, pos):
+    #     """Move to an absolute position given as a dict."""
+    #     pass
+    #
+    # @abstractmethod
+    # def move_rel(self, delta):
+    #     """Move by a relative offset given as a dict."""
+    #     pass
+    #
+    # @abstractmethod
+    # def abort(self):
+    #     """ Abort current action or movement """
+    #     pass
+    #
+    # @abstractmethod
+    # def get_pos(self, param_list=None):
+    #     """ Get current position of the stage arms"""
+    #     pass
+    #
+    # @abstractmethod
+    # def get_status(self, param_list=None):
+    #     """ Get current status of the stage """
+    #     pass
+    #
+    # @abstractmethod
+    # def calibrate(self, param_list=None):
+    #     """ optional : if required calibrate an axis of the stage """
+    #     pass
+    #
+    # @abstractmethod
+    # def get_velocity(self, param_list=None):
+    #     """ Get current setting for the velocity of one of the axis arm """
+    #     pass
+    #
+    # @abstractmethod
+    # def set_velocity(self, param_dict=None):
+    #     """ Set the velocity """
+    #     pass
+    #
+    # @abstractmethod
+    # def wait_for_idle(self):
+    #     """ Set a delay between two successive commands"""
+    #     pass
+    #
+    # def _make_wait_after_movement(self):
+    #     """ Set a delay after a movement """
+    #     pass
