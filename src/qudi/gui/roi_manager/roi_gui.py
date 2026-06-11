@@ -447,8 +447,10 @@ class RoiGUI(GuiBase):
         """ Establish the connections of signals emitted with slots in logic module. """
         # roi toolbar actions
         self._mw.new_roi_Action.triggered.connect(self._roi_logic.add_roi, QtCore.Qt.QueuedConnection)
-        self._mw.go_to_roi_Action.triggered.connect(self._roi_logic.go_to_roi, QtCore.Qt.QueuedConnection)
-        self._mw.delete_roi_Action.triggered.connect(self._roi_logic.delete_roi, QtCore.Qt.QueuedConnection)
+        # self._mw.go_to_roi_Action.triggered.connect(self._roi_logic.go_to_roi, QtCore.Qt.QueuedConnection)
+        self._mw.go_to_roi_Action.triggered.connect(self.go_to_roi_clicked)
+        # self._mw.delete_roi_Action.triggered.connect(self._roi_logic.delete_roi, QtCore.Qt.QueuedConnection)
+        self._mw.delete_roi_Action.triggered.connect(self.delete_roi_clicked)
         # roi list toolbar actions
         self._mw.new_list_Action.triggered.connect(self._roi_logic.reset_roi_list, QtCore.Qt.QueuedConnection)
 
@@ -629,6 +631,14 @@ class RoiGUI(GuiBase):
             self._mw.roi_distance_Label.setText('? (?, ?)')
         pass
 
+    @QtCore.Slot()
+    def go_to_roi_clicked(self):
+        self._roi_logic.go_to_roi()
+
+    @QtCore.Slot()
+    def delete_roi_clicked(self):
+        self. _roi_logic.delete_roi()
+
 # toolbar actions ------------------------------------------------------------------------------------------------------
     @QtCore.Slot()
     def add_interpolation_clicked(self):
@@ -800,14 +810,17 @@ class RoiGUI(GuiBase):
         if 'rois' in roi_dict:
             self._update_rois(roi_dict=roi_dict['rois'])
 
-    @QtCore.Slot(np.ndarray)
+    @QtCore.Slot(object)
     def update_stage_position(self, position):
         """ Callback of signals sigStageMoved and sigUpdateStagePosition sent from logic module. Updates the textlabel
         with the current stage position and moves the stage marker.
         @param: np.ndarray[3] position: new position
         """
-        self._mw.stage_position_Label.setText('x={0}, y={1}, z={2}'.format(position[0], position[1], position[2]))
-        self.stagemarker.set_position(position)
+        position = np.array(position, dtype=float)
+        self._mw.stage_position_Label.setText(
+            f'x={position[0]}, y={position[1]}, z={position[2]}'
+        )
+        self.stagemarker.set_position(position[:2])
 
     @QtCore.Slot()
     def reset_tracking_mode_button(self):
