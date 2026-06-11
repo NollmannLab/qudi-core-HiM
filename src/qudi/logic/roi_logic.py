@@ -448,11 +448,15 @@ class RoiLogic(LogicBase):
     _mosaic_number_x = 0  # width
     _mosaic_number_y = 0  # height
 
+    # threads initialization
+    threadpool = None
+
     # class attributes
     tracking = False
 
     def on_activate(self):
         self._stage = self.stage()
+        self.threadpool = QtCore.QThreadPool.globalInstance()
         self.sigRoiListUpdated.emit({'name': self.roi_list_name,
                                      'rois': self.roi_positions,
                                      'cam_image': self.roi_list_cam_image,
@@ -944,6 +948,7 @@ class RoiLogic(LogicBase):
 
     def start_tracking(self):
         """ Start the tracking loop of the stage position. """
+        self.log.info("start_tracking called")
         self.tracking = True
         # monitor the current stage position, using a worker thread
         worker = Worker()
@@ -952,6 +957,7 @@ class RoiLogic(LogicBase):
 
     def stop_tracking(self):
         """ Stop the tracking loop of the stage position. """
+        self.log.info("stop_tracking called")
         self.tracking = False
         # get once again the latest position
         position = self.stage_position
