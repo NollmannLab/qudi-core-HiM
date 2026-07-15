@@ -35,9 +35,9 @@ from qtpy import uic
 from functools import partial
 import numpy as np
 
-from gui.guibase import GUIBase
-from core.connector import Connector
-from core.configoption import ConfigOption
+from qudi.core.module import GuiBase
+from qudi.core.connector import Connector
+from qudi.core.configoption import ConfigOption
 
 
 # ======================================================================================================================
@@ -89,7 +89,7 @@ class FluidicsWindowCE(FluidicsWindow):
 # ======================================================================================================================
 
 
-class FluidicsGUI(GUIBase):
+class FluidicsGUI(GuiBase):
     """ Class for the GUI that allows to control the fluidics devices.
 
     Example config for copy-paste:
@@ -103,13 +103,14 @@ class FluidicsGUI(GUIBase):
         connect:
             valve_logic: 'valve_logic'
             flowcontrol_logic: 'flowcontrol_logic'
-            positioning_logic: 'positioning_logic'
+            # Optional while stage/positioning logic is unavailable:
+            # positioning_logic: 'positioning_logic'
     """
 
     # connector to logic modules
-    valve_logic = Connector(interface='ValveLogic')
-    flowcontrol_logic = Connector(interface='FlowcontrolLogic')
-    positioning_logic = Connector(interface='PositioningLogic')
+    valve_logic = Connector(interface='FluidicsValveLogic', name='valve_logic')
+    flowcontrol_logic = Connector(interface='FluidicsFlowLogic', name='flowcontrol_logic')
+    positioning_logic = Connector(interface='PositioningLogic', name='positioning_logic', optional=True)
 
     # config options
     tube_types = ConfigOption('tube_type', '')
@@ -144,6 +145,8 @@ class FluidicsGUI(GUIBase):
         self._flow_logic = None
         self._positioning_logic = None
         self._mw = None
+        self._pos1_sd = None
+        self.valve_IDs = []
 
     def on_activate(self):
         """ Required initialization steps.
@@ -151,7 +154,7 @@ class FluidicsGUI(GUIBase):
         # connectors to the logic
         self._valve_logic = self.valve_logic()
         self._flow_logic = self.flowcontrol_logic()
-        self._positioning_logic = self.positioning_logic()
+        self._positioning_logic = self._get_optional_logic(self.positioning_logic, "positioning")
 
         # create an instance of the Main Window
         self._mw = FluidicsWindowCE(self.close_function)
@@ -160,17 +163,19 @@ class FluidicsGUI(GUIBase):
         # menu actions
         self._mw.close_MenuAction.triggered.connect(self._mw.close)
 
-        # initialize settings dialog
-        self.init_position1_settings_ui()
-
         # initialize the valve control dockwidget
         self.init_valve_control()
 
         # initialize the flow control dockwidget and its toolbar
         self.init_flowcontrol()
 
-        # initialize the positioning dockwidget and its toolbar
-        self.init_positioning()
+        if self.has_positioning:
+            # initialize settings dialog and positioning controls only when
+            # positioning logic is connected and active.
+            self.init_position1_settings_ui()
+            self.init_positioning()
+        else:
+            self.disable_positioning_ui()
 
         # open a message box to validate that needle cover has been removed
         text = 'Please check if needle cover has been removed!'
@@ -179,7 +184,8 @@ class FluidicsGUI(GUIBase):
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
         """
-        self._mw.close()
+        if self._mw is not None:
+            self._mw.close()
 
     def show(self):
         """Make window visible and put it above all other windows.
@@ -187,6 +193,41 @@ class FluidicsGUI(GUIBase):
         QtWidgets.QMainWindow.show(self._mw)
         self._mw.activateWindow()
         self._mw.raise_()
+
+    @property
+    def has_positioning(self):
+        """Return whether positioning logic is available."""
+        return self._positioning_logic is not None
+
+    def _get_optional_logic(self, connector, name):
+        """Return a connected logic module, or ``None`` if unavailable.
+
+        Args:
+            connector: qudi connector descriptor to resolve.
+            name (str): Human-readable connector name for logging.
+
+        Returns:
+            object | None: Connected logic module or ``None``.
+        """
+        try:
+            return connector()
+        except Exception as exc:
+            self.log.warning(
+                f"Fluidics GUI started without {name} logic. "
+                f"Related controls will be disabled. Reason: {exc}"
+            )
+            return None
+
+    def disable_positioning_ui(self):
+        """Disable positioning controls when no positioning logic is connected."""
+        self._mw.positioning_DockWidget.setEnabled(False)
+        self._mw.positioning_DockWidget.hide()
+        self._mw.positioning_dockwidget_view_Action.setChecked(False)
+        self._mw.positioning_dockwidget_view_Action.setEnabled(False)
+        self._mw.move_stage_Action.setEnabled(False)
+        self._mw.set_position1_Action.setEnabled(False)
+        self._mw.go_to_position_Action.setEnabled(False)
+        self._pos1_sd = None
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods to initialize the dockwidgets and their toolbars
@@ -200,19 +241,32 @@ class FluidicsGUI(GUIBase):
         # create widgets according to number of valves configured.
         self.valve_Labels = []
         self.valve_ComboBoxes = []
-        for i in range(len(self._valve_logic.valve_names)):
-            valve_label = QtWidgets.QLabel(self._valve_logic.valve_names[i])
+        self.valve_IDs = list(self._valve_logic.valve_dict)
+        valve_names = [
+            self._valve_logic.valve_dict[valve_id]['name']
+            for valve_id in self.valve_IDs
+        ]
+        max_positions = [
+            int(self._valve_logic.valve_dict[valve_id]['number_outputs'])
+            for valve_id in self.valve_IDs
+        ]
+        valve_position_labels = self._valve_logic.valve_position_labels
+
+        for i, valve_id in enumerate(self.valve_IDs):
+            valve_label = QtWidgets.QLabel(valve_names[i])
             self.valve_Labels.append(valve_label)
             valve_combobox = QtWidgets.QComboBox()
             self.valve_ComboBoxes.append(valve_combobox)
-            if not self._valve_logic.valve_positions:
-                self.valve_ComboBoxes[i].addItems([str(n+1) for n in range(self._valve_logic.max_positions[i])])
+            if not valve_position_labels or i >= len(valve_position_labels):
+                self.valve_ComboBoxes[i].addItems([str(n+1) for n in range(max_positions[i])])
             else:  # using the optional list of valve positions containing information where each valve port goes to
-                self.valve_ComboBoxes[i].addItems(self._valve_logic.valve_positions[i])
+                self.valve_ComboBoxes[i].addItems(valve_position_labels[i])
             self._mw.formLayout.addRow(self.valve_Labels[i], self.valve_ComboBoxes[i])
 
             # set current index according to actual position of valve on start
-            valve_combobox.setCurrentIndex(self._valve_logic.get_valve_position(self._valve_logic.valve_IDs[i])-1)
+            valve_position = self._valve_logic.get_valve_position(valve_id)
+            if valve_position is not None:
+                valve_combobox.setCurrentIndex(valve_position - 1)
 
         # internal signals
         for i in range(len(self.valve_ComboBoxes)):
@@ -222,9 +276,7 @@ class FluidicsGUI(GUIBase):
         self.sigSetValvePosition.connect(self._valve_logic.set_valve_position)
 
         # signals from logic
-        self._valve_logic.sigPositionChanged.connect(self.update_combobox_index)
-        self._valve_logic.sigDisableValvePositioning.connect(self.disable_valve_positioning)
-        self._valve_logic.sigEnableValvePositioning.connect(self.enable_valve_positioning)
+        self._valve_logic.sigValvePositionChanged.connect(self.update_combobox_index)
 
     def init_flowcontrol(self):
         """ This method initializes the flowcontrol dockwidget.
@@ -343,6 +395,9 @@ class FluidicsGUI(GUIBase):
         """ Definition, configuration and initialization of the settings dialog that allows to calibrate the position
         of the first probe (= position 1).
         """
+        if not self.has_positioning:
+            return
+
         # Create the settings window
         self._pos1_sd = Position1SettingDialog()
 
@@ -365,11 +420,16 @@ class FluidicsGUI(GUIBase):
     def select_tube_type(self):
         """ Update the default value according to the selected tube type
         """
+        if self._pos1_sd is None:
+            return
         self.sd_set_default_values()
 
     def set_position1(self):
         """ Callback of the settings dialog ok button.
         Transfers the new defined coordinates of the position 1 to the logic module."""
+        if not self.has_positioning or self._pos1_sd is None:
+            return
+
         x_pos = self._pos1_sd.x_pos_DSpinBox.value()
         y_pos = self._pos1_sd.y_pos_DSpinBox.value()
         z_pos = self._pos1_sd.z_pos_DSpinBox.value()
@@ -379,6 +439,9 @@ class FluidicsGUI(GUIBase):
     def sd_set_default_values(self):
         """ Callback of the settings dialog cancel button.
         Resets default values. """
+        if self._pos1_sd is None:
+            return
+
         idx = self._pos1_sd.Tube_comboBox.currentIndex()
         self._pos1_sd.x_pos_DSpinBox.setValue(self.pos1_x_default)
         self._pos1_sd.y_pos_DSpinBox.setValue(self.pos1_y_default)
@@ -395,6 +458,9 @@ class FluidicsGUI(GUIBase):
         """ Callback of move_stage toolbutton. Handles the state of the toolbutton and sends a signal to the logic
         to either do a movement or to stop it depending on the current state.
         """
+        if not self.has_positioning:
+            return
+
         if self._positioning_logic.moving:  # stage already in movement, will be stopped by clicking the toolbutton
             self._mw.move_stage_Action.setText('Move Stage')
             if self._positioning_logic.origin is not None:  # allow access to go to target toolbutton when position 1 has been defined
@@ -415,6 +481,9 @@ class FluidicsGUI(GUIBase):
         to either do a movement to a target position (position of a probe) or to stop the movement depending on the
         current state.
         """
+        if not self.has_positioning:
+            return
+
         if self._positioning_logic.moving:  # stage already in movement
             self._mw.go_to_position_Action.setText('Go to Target')
             self._mw.move_stage_Action.setDisabled(False)
@@ -432,6 +501,9 @@ class FluidicsGUI(GUIBase):
 
         :param: tuple (float, float, float) position: current position of the stage
         """
+        if not self.has_positioning:
+            return
+
         self._mw.move_stage_Action.setChecked(False)
         self._mw.move_stage_Action.setText('Move Stage')
         if self._positioning_logic.origin is not None:
@@ -445,6 +517,9 @@ class FluidicsGUI(GUIBase):
 
         :param: tuple (float, float, float) position: current position of the stage
         """
+        if not self.has_positioning:
+            return
+
         self._mw.move_stage_Action.setDisabled(False)
         self._mw.move_stage_Action.setText('Move Stage')
         self._mw.move_stage_Action.setChecked(False)
@@ -461,6 +536,9 @@ class FluidicsGUI(GUIBase):
 
         :param: tuple (float, float, float) position: current position of the stage
         """
+        if not self.has_positioning:
+            return
+
         self._mw.x_axis_position_LineEdit.setText('{:.3f}'.format(position[0]))
         self._mw.y_axis_position_LineEdit.setText('{:.3f}'.format(position[1]))
         self._mw.z_axis_position_LineEdit.setText('{:.3f}'.format(position[2]))
@@ -481,6 +559,9 @@ class FluidicsGUI(GUIBase):
         :param: tuple (float, float, float) position: current position of the stage
         :param: int target_position: current target position (=number of the probe) corresponding to the stage position
         """
+        if not self.has_positioning:
+            return
+
         self._mw.go_to_position_Action.setChecked(False)
         self._mw.go_to_position_Action.setText('Go to Target')
         self._mw.move_stage_Action.setDisabled(False)
@@ -497,6 +578,8 @@ class FluidicsGUI(GUIBase):
     @QtCore.Slot()
     def open_calibration_settings(self):
         """ Callback of set_position1 toolbutton. Opens a dialog to set position 1 as origin. """
+        if not self.has_positioning or self._pos1_sd is None:
+            return
         self._pos1_sd.exec_()
 
     @QtCore.Slot()
@@ -504,6 +587,9 @@ class FluidicsGUI(GUIBase):
         """ Callback of the signal sigOriginDefined in the logic module. Enables the functionality that can only be used
         when an origin is defined (addressing stage positions via the probe number).
         """
+        if not self.has_positioning:
+            return
+
         self._mw.go_to_position_Action.setDisabled(False)
         position = self._positioning_logic.get_position()
         xy_pos = (position[0], position[1])
@@ -517,6 +603,9 @@ class FluidicsGUI(GUIBase):
     def disable_positioning_actions(self):
         """ Callback of the signal sigDisablePositioningActions in the logic module. Disables positioning toolbuttons.
         """
+        if not self.has_positioning:
+            return
+
         self._mw.move_stage_Action.setDisabled(True)
         self._mw.set_position1_Action.setDisabled(True)
         self._mw.go_to_position_Action.setDisabled(True)
@@ -525,6 +614,9 @@ class FluidicsGUI(GUIBase):
     def enable_positioning_actions(self):
         """ Callback of the signal sigEnablePositioningActions in the logic module. Enables positioning toolbuttons.
         """
+        if not self.has_positioning:
+            return
+
         self._mw.move_stage_Action.setDisabled(False)
         self._mw.set_position1_Action.setDisabled(False)
         if self._positioning_logic.origin is not None:
@@ -612,7 +704,7 @@ class FluidicsGUI(GUIBase):
             self.sigStartVolumeMeasurement.emit(target_volume)
             # self.sigStartVolumeMeasurement.emit(target_volume, sampling_interval)
 
-    @QtCore.Slot(int, int, int, int)
+    @QtCore.Slot(float, float, float, float)
     def update_volume_and_time(self, total_volume, time, flow_rate, pressure):
         """ Callback of a signal emitted from logic informing the GUI about the new total volume
         and time since start of the measurement.
@@ -676,16 +768,13 @@ class FluidicsGUI(GUIBase):
         if exp_setup == 'RAMM':
             if self._valve_logic.get_valve_position('b') != 1:
                 self._valve_logic.set_valve_position('b', 1)
-                self._valve_logic.wait_for_idle()
 
         elif exp_setup == 'Airyscan':
             if self._valve_logic.get_valve_position('a') != 3:
                 self._valve_logic.set_valve_position('a', 3)
-                self._valve_logic.wait_for_idle()
 
             if self._valve_logic.get_valve_position('b') != 2:
                 self._valve_logic.set_valve_position('b', 2)
-                self._valve_logic.wait_for_idle()
 
         else:
             pass
@@ -722,7 +811,7 @@ class FluidicsGUI(GUIBase):
         """
         index = self.valve_ComboBoxes[valve_num].currentIndex()
         valve_pos = index + 1  # zero indexing
-        valve_id = self._valve_logic.valve_IDs[valve_num]
+        valve_id = self.valve_IDs[valve_num]
         self.sigSetValvePosition.emit(valve_id, valve_pos)
 
     @QtCore.Slot(str, int)
@@ -733,19 +822,9 @@ class FluidicsGUI(GUIBase):
         :param str valve_ID: letter designating the valve_id in the daisychain (see hardware modules), 'a', 'b', 'c', ..
         :param int valve_pos: current position of the valve at valve_ID
         """
-        if valve_ID == 'a':
-            self.valve_ComboBoxes[0].setCurrentIndex(valve_pos-1)  # zero indexing
-        elif valve_ID == 'b':
-            self.valve_ComboBoxes[1].setCurrentIndex(valve_pos-1)
-        elif valve_ID == 'c':
-            self.valve_ComboBoxes[2].setCurrentIndex(valve_pos-1)
-        elif valve_ID == 'd':
-            self.valve_ComboBoxes[3].setCurrentIndex(valve_pos-1)
-        elif valve_ID == 'e':
-            self.valve_ComboBoxes[4].setCurrentIndex(valve_pos - 1)
-        # extend if more valve positioners needed. Or define a mapping from letters to elements in valve_ComboBoxes list.
-        else:
-            pass
+        if valve_ID in self.valve_IDs:
+            valve_index = self.valve_IDs.index(valve_ID)
+            self.valve_ComboBoxes[valve_index].setCurrentIndex(valve_pos - 1)
 
 # Disable/Enable user interface actions --------------------------------------------------------------------------------
     @QtCore.Slot()
@@ -767,6 +846,9 @@ class FluidicsGUI(GUIBase):
     def close_function(self):
         """ This method serves as a reimplementation of the close event. Continuous measurement modes are stopped
         when the main window is closed. """
+        if self._flow_logic is None:
+            return
+
         if self._flow_logic.measuring_flowrate:
             self.sigStopFlowMeasure.emit()
             self._mw.start_flow_measurement_Action.setText('Start flowrate measurement')
