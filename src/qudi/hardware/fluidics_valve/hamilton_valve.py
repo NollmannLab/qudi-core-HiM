@@ -18,15 +18,15 @@ You should have received a copy of the GNU General Public License along with Qud
 import serial
 from time import sleep, time
 
-from qudi.core.module import Base
 from qudi.core.configoption import ConfigOption
+from qudi.interface.valve_positioner_interface import ValvePositionerInterface
 
 # from core.module import Base
 # from interface.valvepositioner_interface import ValvePositionerInterface
 # from core.configoption import ConfigOption
 
 
-class HamiltonValve(Base):
+class HamiltonValve(ValvePositionerInterface):
     """ Class representing the Hamilton MVP
 
     Example config :
