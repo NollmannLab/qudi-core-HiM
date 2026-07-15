@@ -10,16 +10,16 @@ discovered on development machines where the hardware SDK is absent.
 from importlib import import_module
 
 from qudi.core.configoption import ConfigOption
-from qudi.core.module import Base
+from qudi.interface.fluidics_interface import FluidicsInterface
 
 
-class FluigentFlowboard(Base):
+class FluigentFlowboard(FluidicsInterface):
     """Hardware class representing a Fluigent microfluidics controller.
 
     Example config:
 
     fluigent_flowboard:
-      module.Class: 'fluidics_pump.fluidgent_flowboard.FluigentFlowboard'
+      module.Class: 'fluidics_pump.fluigent_flowboard.FluigentFlowboard'
       options:
         pressure_channel_IDs:
           - 0
@@ -52,10 +52,48 @@ class FluigentFlowboard(Base):
         try:
             serial_numbers, controller_types = self._fgt.fgt_detect()
             self.log.info(f"Detected {len(serial_numbers)} Fluigent controller(s).")
-            self.log.debug(f"Fluigent controller serial numbers: {serial_numbers}")
-            self.log.debug(f"Fluigent controller types: {controller_types}")
+            self.log.info(f"Fluigent controller serial numbers: {serial_numbers}")
+            self.log.info(f"Fluigent controller types: {controller_types}")
 
-            self._fgt.fgt_init()
+            init_result = self._fgt.fgt_init()
+            self.log.info(f"Fluigent SDK init result: {init_result}")
+
+            controllers_info = self._fgt.fgt_get_controllersInfo()
+            self.log.info(f"Initialized Fluigent controllers: {controllers_info}")
+            self.log.info(
+                f"Initialized Fluigent controllers with status: "
+                f"{self._call_noarg_get_with_error('fgt_get_controllersInfo')}"
+            )
+
+            num_pressure_channels = self._fgt.fgt_get_pressureChannelCount()
+            num_sensor_channels = self._fgt.fgt_get_sensorChannelCount()
+            self.log.info(f"Pressure channels : {num_pressure_channels}")
+            self.log.info(
+                f"Pressure channel count with status: "
+                f"{self._call_noarg_get_with_error('fgt_get_pressureChannelCount')}"
+            )
+            self.log.info(f"Sensor channels : {num_sensor_channels}")
+            self.log.info(
+                f"Sensor channel count with status: "
+                f"{self._call_noarg_get_with_error('fgt_get_sensorChannelCount')}"
+            )
+            # if num_pressure_channels > 0:
+            #     self.log.info(self._fgt.fgt_get_pressure(0))
+            #     self.log.info(
+            #         f"Initialized pressure channels: "
+            #         f"{self._call_noarg_get_with_error('fgt_get_pressureChannelsInfo')}"
+            #     )
+            # if num_sensor_channels > 0:
+            #     self.log.info(
+            #         f"Initialized sensor channels: "
+            #         f"{self._call_noarg_get_with_error('fgt_get_sensorChannelsInfo')}"
+            #     )
+            if num_pressure_channels == 0 and num_sensor_channels == 0:
+                self.log.warning(
+                    "No Fluigent channels were initialized. The controller can "
+                    "be detected over USB, but the SDK did not expose any "
+                    "pressure or sensor channel in the initialized session."
+                )
             self._initialized = True
         except Exception as exc:
             self._initialized = False
@@ -145,9 +183,19 @@ class FluigentFlowboard(Base):
         if self._fgt is None or not self._initialized:
             raise RuntimeError("Fluigent flowboard is not initialized.")
 
+    def _call_noarg_get_with_error(self, function_name):
+        func = getattr(self._fgt, function_name)
+        try:
+            return func(get_error=True)
+        except TypeError:
+            return func()
+
     def _check_configured_channels(self):
         pressure_count = self._fgt.fgt_get_pressureChannelCount()
         sensor_count = self._fgt.fgt_get_sensorChannelCount()
+
+        self.log.info(pressure_count)
+        self.log.info(sensor_count)
 
         missing_pressure = [
             channel
