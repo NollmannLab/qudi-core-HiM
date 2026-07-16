@@ -34,7 +34,7 @@ class HamiltonValve(ValvePositionerInterface):
   hamilton_valve:
     module.Class: 'fluidics_valve.hamilton_valve.HamiltonValve'
     options :
-        com_port: '/dev/ttyUSB0'
+        com_port: ''
         num_valves: 3
         daisychain_ID:
             - 'a'
@@ -163,7 +163,8 @@ class HamiltonValve(ValvePositionerInterface):
             pos = self.read()
             return int(pos)
         else:
-            self.log.warn(f'Valve {valve_address} not available.')
+            self.log.warning(f'Valve {valve_address} not available.')
+            return None
 
     def set_valve_position(self, valve_address, target_position):
         """ This method sets the valve position for the valve specified by valve_address.
@@ -187,9 +188,7 @@ class HamiltonValve(ValvePositionerInterface):
                 self.write(cmd)
                 self.log.info(f'Set {self.get_valve_dict()[valve_address]["name"]} to position {target_position}')
         else:
-            self.log.warn(f'Valve {valve_address} not available.')
-
-    from time import sleep, time
+            self.log.warning(f'Valve {valve_address} not available.')
 
     def wait_for_idle(self, poll_interval=0.2):
         """Wait until all valves are idle.
@@ -232,5 +231,4 @@ class HamiltonValve(ValvePositionerInterface):
         self._serial_connection.read()
         output = self._serial_connection.read()
         output = output.decode('utf-8')
-        # output = self._serial_connection.read().decode('utf-8')
         return output
