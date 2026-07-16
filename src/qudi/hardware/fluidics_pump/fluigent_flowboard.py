@@ -1,10 +1,23 @@
 # -*- coding: utf-8 -*-
 """
+Author: F Barho - adapted for qudi-core-HiM by JB Fiche
+Created: 2026-07-15
+
 Qudi-core-HiM hardware module for a Fluigent flowboard.
 
 The Fluigent SDK is provided by the vendor package and is usually installed
 only on acquisition computers. Import it lazily so this module can still be
 discovered on development machines where the hardware SDK is absent.
+
+-----------------------------------------------------------------------------------
+qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+Qudi is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
+-----------------------------------------------------------------------------------
 """
 
 from importlib import import_module
