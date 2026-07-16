@@ -29,11 +29,37 @@ import PyDAQmx as daq
 import numpy as np
 
 from qudi.core.configoption import ConfigOption
-from qudi.core.module import Base
+from qudi.interface.daq_interface import DaqInterface
 
 
-class NIDAQ(Base):
-    """Generic NI DAQ hardware driver."""
+class NIDAQ(DaqInterface):
+    """Generic NI DAQ hardware driver.
+
+    The driver exposes only low-level DAQ functionality. It does not encode
+    experiment semantics such as laser control, pump logic, or trigger
+    sequencing. Those belong in logic modules.
+
+    Configuration expects named channel mappings so the logic layer can refer
+    to channels semantically instead of hard-coding physical NI channel strings.
+    Example:
+
+    .. code-block:: yaml
+
+        nidaq:
+          module.Class: 'daq.NI_daq.NIDAQ'
+          options:
+            read_write_timeout: 10
+            ao_voltage_range: [0, 10]
+            ao_channels:
+              laser_405: '/Dev1/AO0'
+              pump: '/Dev1/AO1'
+            ai_channels:
+              trigger_read: '/Dev1/AI0'
+            do_channels:
+              trigger_write: '/Dev1/port0/line2'
+            di_channels:
+              acquisition_done: '/Dev1/port0/line8'
+    """
 
     _rw_timeout = ConfigOption("read_write_timeout", default=10)
     _ao_voltage_range = ConfigOption("ao_voltage_range", default=(0, 10))
@@ -43,12 +69,8 @@ class NIDAQ(Base):
     _do_channels = ConfigOption("do_channels", default={})
     _di_channels = ConfigOption("di_channels", default={})
 
-    def __init__(self, config, **kwargs):
-        super().__init__(config=config, **kwargs)
-        self._tasks = {}
-        self._channel_data = {}
-
     def on_activate(self):
+        """Create and configure all tasks declared in the configuration."""
         if daq is None:
             raise RuntimeError("PyDAQmx is not available on this system.")
 
@@ -78,6 +100,7 @@ class NIDAQ(Base):
         self.log.info("NI DAQ activated.")
 
     def on_deactivate(self):
+        """Close all tasks and release the internal task registry."""
         for task_name, taskhandle in list(self._tasks.items()):
             try:
                 self.close_task(taskhandle)
@@ -87,12 +110,18 @@ class NIDAQ(Base):
         self._channel_data = {}
 
     def get_taskhandle(self, task_name):
+        """Return the DAQ task handle registered under ``task_name``."""
         if task_name not in self._tasks:
             raise KeyError(f"Unknown DAQ task '{task_name}'.")
         return self._tasks[task_name]
 
     @staticmethod
     def create_taskhandle():
+        """Create a new DAQmx task handle.
+
+        The helper mirrors the legacy code style so the setup methods can stay
+        close to the original PyDAQmx usage.
+        """
         taskhandle = daq.TaskHandle()
         if taskhandle.value is not None:
             daq.DAQmxStopTask(taskhandle)
@@ -102,6 +131,7 @@ class NIDAQ(Base):
 
     @staticmethod
     def set_up_ao_channel(taskhandle, channel, voltage_range):
+        """Create and configure one analog-output virtual channel."""
         daq.DAQmxCreateTask('', daq.byref(taskhandle))
         daq.DAQmxCreateAOVoltageChan(
             taskhandle,
@@ -114,6 +144,7 @@ class NIDAQ(Base):
         )
 
     def write_to_ao_channel(self, taskhandle, voltage, timeout=None, autostart=True):
+        """Write a scalar voltage to an analog-output task."""
         if timeout is None:
             timeout = self._rw_timeout
         daq.WriteAnalogScalarF64(taskhandle, autostart, timeout, float(voltage), None)
@@ -122,6 +153,7 @@ class NIDAQ(Base):
 
     @staticmethod
     def set_up_ai_channel(taskhandle, channel, voltage_range):
+        """Create and configure one analog-input virtual channel."""
         daq.DAQmxCreateTask('', daq.byref(taskhandle))
         daq.DAQmxCreateAIVoltageChan(
             taskhandle,
@@ -135,6 +167,7 @@ class NIDAQ(Base):
         )
 
     def read_ai_channel(self, taskhandle):
+        """Read one scalar voltage from an analog-input task."""
         data = np.zeros((1,), dtype=np.float64)
         read = daq.c_int32()
         daq.DAQmxStartTask(taskhandle)
@@ -153,10 +186,12 @@ class NIDAQ(Base):
 
     @staticmethod
     def set_up_do_channel(taskhandle, channel):
+        """Create and configure one digital-output virtual channel."""
         daq.DAQmxCreateTask('DigitalOut', daq.byref(taskhandle))
         daq.DAQmxCreateDOChan(taskhandle, channel, '', daq.DAQmx_Val_ChanForAllLines)
 
     def write_to_do_channel(self, taskhandle, num_samp, digital_write):
+        """Write one or more digital values to a digital-output task."""
         num_samples_per_channel = daq.c_int32(num_samp)
         digital_read = daq.c_int32()
         daq.DAQmxStartTask(taskhandle)
@@ -175,10 +210,12 @@ class NIDAQ(Base):
 
     @staticmethod
     def set_up_di_channel(taskhandle, channel):
+        """Create and configure one digital-input virtual channel."""
         daq.DAQmxCreateTask('DigitalIn', daq.byref(taskhandle))
         daq.DAQmxCreateDIChan(taskhandle, channel, '', daq.DAQmx_Val_ChanPerLine)
 
     def read_di_channel(self, taskhandle, num_samp):
+        """Read one or more digital values from a digital-input task."""
         num_samples_per_channel = daq.c_int32(num_samp)
         samps_per_chan_read = daq.c_int32()
         num_bytes_per_samp = daq.c_int32()
@@ -200,30 +237,36 @@ class NIDAQ(Base):
 
     @staticmethod
     def close_task(taskhandle):
+        """Stop and clear a DAQ task, then reset the handle to ``None``."""
         daq.DAQmxStopTask(taskhandle)
         daq.DAQmxClearTask(taskhandle)
         taskhandle.value = None
 
     def write_named_ao(self, task_name, voltage):
+        """Write a scalar voltage to the named analog-output task."""
         self._channel_data[task_name] = float(voltage)
         self.write_to_ao_channel(self.get_taskhandle(task_name), voltage)
 
     def read_named_ai(self, task_name):
+        """Read and cache the latest scalar voltage from the named AI task."""
         value = self.read_ai_channel(self.get_taskhandle(task_name))
         self._channel_data[task_name] = float(value)
         return value
 
     def write_named_do(self, task_name, value):
+        """Write a single digital value to the named DO task."""
         digital_value = np.array([np.uint8(value)], dtype=np.uint8)
         self._channel_data[task_name] = np.uint8(value)
         return self.write_to_do_channel(self.get_taskhandle(task_name), 1, digital_value)
 
     def read_named_di(self, task_name, num_samp=1):
+        """Read and cache one or more digital values from the named DI task."""
         value = self.read_di_channel(self.get_taskhandle(task_name), num_samp)
         self._channel_data[task_name] = value
         return value
 
     def pulse_named_do(self, task_name, low=0, high=1, pulse_time=0.001):
+        """Emit a low-high-low pulse on the named DO task."""
         self.write_named_do(task_name, low)
         sleep(pulse_time)
         self.write_named_do(task_name, high)
