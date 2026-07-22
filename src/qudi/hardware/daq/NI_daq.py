@@ -43,27 +43,34 @@ class NIDAQ(DaqInterface):
     to channels semantically instead of hard-coding physical NI channel strings.
     Example:
 
-    .. code-block:: yaml
+    code-block:: yaml
 
         nidaq:
-          module.Class: 'daq.NI_daq.NIDAQ'
-          options:
-            read_write_timeout: 10
-            ao_voltage_range: [0, 10]
-            ao_channels:
-              laser_405: '/Dev1/AO0'
-              pump: '/Dev1/AO1'
-            ai_channels:
-              trigger_read: '/Dev1/AI0'
-            do_channels:
-              trigger_write: '/Dev1/port0/line2'
-            di_channels:
+           module.Class: 'daq.NI_daq.NIDAQ'
+           options:
+               read_write_timeout: 10
+
+          ao_channels:
+              piezo_write:
+                - '/Dev1/AO1'
+                - [0, 10]
+              pump_write:
+                - '/Dev1/AO0'
+                - [0, 10]
+
+          ai_channels:
+              piezo_read:
+                - '/Dev1/AI0'
+                - [0, 10]
+
+          do_channels:
+              start_acquisition: '/Dev1/port0/line7'
+
+          di_channels:
               acquisition_done: '/Dev1/port0/line8'
     """
 
     _rw_timeout = ConfigOption("read_write_timeout", default=10)
-    _ao_voltage_range = ConfigOption("ao_voltage_range", default=(0, 10))
-
     _ao_channels = ConfigOption("ao_channels", default={})
     _ai_channels = ConfigOption("ai_channels", default={})
     _do_channels = ConfigOption("do_channels", default={})
@@ -76,15 +83,19 @@ class NIDAQ(DaqInterface):
 
         self._tasks = {}
         self._channel_data = {}
+        self._ao_voltage_ranges = {}
 
-        for task_name, channel in dict(self._ao_channels).items():
+        for task_name, ao_spec in dict(self._ao_channels).items():
+            channel, voltage_range = ao_spec
             self._tasks[task_name] = self.create_taskhandle()
-            self.set_up_ao_channel(self._tasks[task_name], channel, self._ao_voltage_range)
+            self.set_up_ao_channel(self._tasks[task_name], channel, voltage_range)
+            self._ao_voltage_ranges[task_name] = tuple(voltage_range)
             self._channel_data[task_name] = 0.0
 
-        for task_name, channel in dict(self._ai_channels).items():
+        for task_name, ai_spec in dict(self._ai_channels).items():
+            channel, voltage_range = ai_spec
             self._tasks[task_name] = self.create_taskhandle()
-            self.set_up_ai_channel(self._tasks[task_name], channel, self._ao_voltage_range)
+            self.set_up_ai_channel(self._tasks[task_name], channel, voltage_range)
             self._channel_data[task_name] = 0.0
 
         for task_name, channel in dict(self._do_channels).items():
@@ -108,6 +119,7 @@ class NIDAQ(DaqInterface):
                 self.log.warning(f"Could not close DAQ task '{task_name}': {exc}")
         self._tasks = {}
         self._channel_data = {}
+        self._ao_voltage_ranges = {}
 
     def get_taskhandle(self, task_name):
         """Return the DAQ task handle registered under ``task_name``."""
@@ -143,10 +155,18 @@ class NIDAQ(DaqInterface):
             None,
         )
 
-    def write_to_ao_channel(self, taskhandle, voltage, timeout=None, autostart=True):
+    def write_to_ao_channel(self, taskhandle, voltage, voltage_range=None, timeout=None, autostart=True):
         """Write a scalar voltage to an analog-output task."""
         if timeout is None:
             timeout = self._rw_timeout
+        if voltage_range is not None:
+            min_voltage, max_voltage = voltage_range
+            if not (min_voltage <= float(voltage) <= max_voltage):
+                raise ValueError(
+                    f"AO voltage {voltage} V is outside the allowed range "
+                    f"[{min_voltage}, {max_voltage}] V."
+                )
+
         daq.WriteAnalogScalarF64(taskhandle, autostart, timeout, float(voltage), None)
         daq.DAQmxStartTask(taskhandle)
         daq.DAQmxStopTask(taskhandle)
@@ -245,7 +265,11 @@ class NIDAQ(DaqInterface):
     def write_named_ao(self, task_name, voltage):
         """Write a scalar voltage to the named analog-output task."""
         self._channel_data[task_name] = float(voltage)
-        self.write_to_ao_channel(self.get_taskhandle(task_name), voltage)
+        self.write_to_ao_channel(
+            self.get_taskhandle(task_name),
+            voltage,
+            self._ao_voltage_ranges.get(task_name, self._ao_voltage_range),
+        )
 
     def read_named_ai(self, task_name):
         """Read and cache the latest scalar voltage from the named AI task."""

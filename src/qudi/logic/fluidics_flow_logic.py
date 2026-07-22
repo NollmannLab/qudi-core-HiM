@@ -1,10 +1,22 @@
 # -*- coding: utf-8 -*-
 """
+Author: F Barho - adapted for qudi-core-HiM by JB Fiche with codex
+Created: 2021-03-04 -> translated into qudi-core-HiM on 2026-0<è-11
 Logic module for pressure and flow-rate control.
 
 This is the qudi-core adaptation of the original HiM flowcontrol logic.  The
 logic talks to a hardware module implementing ``FluidicsInterface`` and keeps
 GUI-facing signals and method names close to the original module.
+
+-----------------------------------------------------------------------------------
+qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+Qudi is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
+-----------------------------------------------------------------------------------
 """
 
 from math import inf
@@ -18,6 +30,9 @@ from qudi.core.module import LogicBase
 from qudi.core.statusvariable import StatusVar
 from simple_pid import PID
 
+# ======================================================================================================================
+# Worker classes
+# ======================================================================================================================
 
 class WorkerSignals(QtCore.QObject):
     sigFinished = QtCore.Signal()
@@ -69,6 +84,9 @@ class VolumeCountWorker(QtCore.QRunnable):
         sleep(self.sampling_interval)
         self.signals.sigIntegrationIntervalFinished.emit(self.sampling_interval)
 
+# ======================================================================================================================
+# Logic class
+# ======================================================================================================================
 
 class FluidicsFlowLogic(LogicBase):
     """Logic class for pressure control, flow monitoring, and volume counting.
@@ -85,6 +103,7 @@ class FluidicsFlowLogic(LogicBase):
     """
 
     flowboard = Connector(interface="FluidicsInterface", name="flowboard")
+    rinsing_pump = Connector(interface="PumpInterface", name="rinsing_pump")
 
     p_gain = ConfigOption("p_gain", 0.005, missing="warn")
     i_gain = ConfigOption("i_gain", 0.01, missing="warn")
@@ -136,43 +155,14 @@ class FluidicsFlowLogic(LogicBase):
             self.log.warning(f"Could not reset pressure during deactivation: {exc}")
         self._flowboard = None
 
-    @property
-    def total_volume(self):
-        """Return the current integrated volume."""
-        return float(self._total_volume)
-
-    @total_volume.setter
-    def total_volume(self, value):
-        """Cache the current integrated volume.
-
-        Args:
-            value (float): Integrated volume.
-        """
-        self._total_volume = float(value)
-
-    @property
-    def time_since_start(self):
-        """Return the elapsed volume-counting time in seconds."""
-        return float(self._time_since_start)
-
-    @time_since_start.setter
-    def time_since_start(self, value):
-        """Cache the elapsed volume-counting time.
-
-        Args:
-            value (float): Elapsed time in seconds.
-        """
-        self._time_since_start = float(value)
+    # ----------------------------------------------------------------------------------------------------------------------
+    # Low level methods for pressure settings
+    # ----------------------------------------------------------------------------------------------------------------------
 
     @property
     def latest_pressure(self):
         """Return the latest cached pressure values."""
         return list(self._latest_pressure)
-
-    @property
-    def latest_flowrate(self):
-        """Return the latest cached flow-rate values."""
-        return list(self._latest_flowrate)
 
     @property
     def pressure_setpoint(self):
@@ -252,6 +242,43 @@ class FluidicsFlowLogic(LogicBase):
         pressure_unit = self._flowboard.get_pressure_unit(self._normalize_channels(channels))
         return self._dict_values(pressure_unit)
 
+    # ----------------------------------------------------------------------------------------------------------------------
+    # Low level methods for flowrate measurement
+    # ----------------------------------------------------------------------------------------------------------------------
+
+    @property
+    def total_volume(self):
+        """Return the current integrated volume."""
+        return float(self._total_volume)
+
+    @total_volume.setter
+    def total_volume(self, value):
+        """Cache the current integrated volume.
+
+        Args:
+            value (float): Integrated volume.
+        """
+        self._total_volume = float(value)
+
+    @property
+    def time_since_start(self):
+        """Return the elapsed volume-counting time in seconds."""
+        return float(self._time_since_start)
+
+    @time_since_start.setter
+    def time_since_start(self, value):
+        """Cache the elapsed volume-counting time.
+
+        Args:
+            value (float): Elapsed time in seconds.
+        """
+        self._time_since_start = float(value)
+
+    @property
+    def latest_flowrate(self):
+        """Return the latest cached flow-rate values."""
+        return list(self._latest_flowrate)
+
     # Flow-rate API
     def get_flowrate(self, channels=None):
         """Read flow-rate values from selected sensor channels.
@@ -294,7 +321,11 @@ class FluidicsFlowLogic(LogicBase):
         flowrate_unit = self._flowboard.get_sensor_unit(self._normalize_channels(channels))
         return self._dict_values(flowrate_unit)
 
-    # Continuous flow measurement
+    # ----------------------------------------------------------------------------------------------------------------------
+    # Methods for continuous processes (flowrate measurement loop, pressure regulation loop, volume count, needle rinsing)
+    # ----------------------------------------------------------------------------------------------------------------------
+
+    # Flowrate measurement loop --------------------------------------------------------------------------------------------
     def start_flow_measurement(self):
         """Start continuous pressure and flow-rate measurement."""
         if self.measuring_flowrate:
@@ -325,7 +356,8 @@ class FluidicsFlowLogic(LogicBase):
         self.sigUpdateFlowMeasurement.emit(pressure, flowrate)
         return pressure, flowrate
 
-    # PID pressure regulation
+    # Pressure regulation loop ----------------------------------------------------------------------------------------------
+
     def init_pid(self, setpoint):
         """Create and configure the PID controller.
 
@@ -381,7 +413,8 @@ class FluidicsFlowLogic(LogicBase):
         if self.regulating:
             self._schedule_pressure_regulation(target_flowrate)
 
-    # Volume counting
+    # Volume count ---------------------------------------------------------------------------------------------------------
+
     def start_volume_measurement(self, target_volume=inf):
         """Start integrating injected volume from the flow-rate signal.
 
@@ -441,18 +474,16 @@ class FluidicsFlowLogic(LogicBase):
         self.measuring_volume = False
         self.target_volume_reached = True
 
-    # Rinsing hooks retained for API compatibility.  A DAQ logic module can be
-    # reintroduced later through a dedicated interface when it exists locally.
+    # Rinse needle ---------------------------------------------------------------------------------------------------------
+
     def start_rinsing(self, duration):
         """Start needle rinsing.
 
         Args:
             duration (float): Rinsing duration in seconds.
-
-        Raises:
-            NotImplementedError: Rinsing requires a DAQ logic connector.
         """
-        raise NotImplementedError("Rinsing requires a DAQ logic connector.")
+        self.rinsing_enabled = True
+        self.rinsing_pump.rinsing(duration)
 
     def stop_rinsing(self):
         """Stop needle rinsing and notify listeners."""
@@ -464,7 +495,10 @@ class FluidicsFlowLogic(LogicBase):
         self.rinsing_enabled = False
         self.sigRinsingFinished.emit()
 
-    # UI state helpers
+    # ----------------------------------------------------------------------------------------------------------------------
+    # Methods to handle the user interface state
+    # ----------------------------------------------------------------------------------------------------------------------
+
     def disable_flowcontrol_actions(self):
         """Disable GUI flow actions and stop active continuous operations."""
         self.sigDisableFlowActions.emit()
