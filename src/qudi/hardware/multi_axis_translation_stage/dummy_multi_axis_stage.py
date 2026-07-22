@@ -15,7 +15,7 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 from qudi.core.module import Base
 from qudi.core.configoption import ConfigOption
-from qudi.interface.roi_stage_interface import RoiStageInterface
+from qudi.interface.multi_axis_stage_interface import RoiStageInterface
 import time
 
 

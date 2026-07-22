@@ -31,7 +31,7 @@ class PIPipettingRobot(Base):
     Example config for copy-paste:
 
   pi_stage:
-    module.Class: 'translation_stage.PI_3_axis_stage.PIMotorStage'
+    module.Class: 'multi_axis_translation_stage.PI_3_axis_stage.PIMotorStage'
     options:
         daisychain_connection: True
         serialnumber_master:  '0019550121'
