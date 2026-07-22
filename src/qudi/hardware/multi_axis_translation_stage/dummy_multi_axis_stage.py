@@ -13,19 +13,44 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 """
-from qudi.core.module import Base
 from qudi.core.configoption import ConfigOption
-from qudi.interface.multi_axis_stage_interface import RoiStageInterface
+from qudi.interface.multi_axis_stage_interface import MultiAxisStageInterface
 import time
 
 
 class DummySingleAxisStage:
-    """ Generic dummy motor representing one axis. """
+    """Generic dummy motor representing one translation axis."""
+
     def __init__(self, label):
         self.label = label
+        self.pos = 0.0
+        self.vel = 1000.0
+        self.status = True
 
 
-class DummyXYStage(RoiStageInterface):
+class DummyMultiAxisStage(MultiAxisStageInterface):
+    """Dummy implementation of a two- or three-axis translation stage.
+
+    Positions are expressed in micrometres and velocities in micrometres
+    per second. The third axis is optional and, when configured, is always a
+    translation axis.
+
+    Example configuration::
+
+        dummy_stage:
+          module.Class: 'translation_stage.dummy_multi_axis_stage.DummyMultiAxisStage'
+          options:
+            first_axis_label: 'x'
+            second_axis_label: 'y'
+            third_axis_label: 'z'
+            x_min: 0.0
+            x_max: 100000.0
+            y_min: 0.0
+            y_max: 100000.0
+            z_min: 0.0
+            z_max: 1000.0
+            delay_after_move: 0.0
+    """
 
     _x_min = ConfigOption(name='x_min', default=0.0)
     _x_max = ConfigOption(name='x_max', default=100000.0)
@@ -33,469 +58,269 @@ class DummyXYStage(RoiStageInterface):
     _y_max = ConfigOption(name='y_max', default=100000.0)
     _z_min = ConfigOption(name='z_min', default=0.0)
     _z_max = ConfigOption(name='z_max', default=1000.0)
-    _wait_after_movement = ConfigOption(name='delay_after_move', default=1000.0) # in seconds
-    _first_axis_label = ConfigOption(name='first_axis_label', missing='error')
-    _second_axis_label = ConfigOption(name='second_axis_label', missing='error')
-    _third_axis_label = ConfigOption(name='third_axis_label', missing='error')
-    _position: dict = {}
-    _x_axis: object = None
-    _y_axis: object = None
-    _z_axis: object = None
-    _phi_axis: object = None
+    _wait_after_movement = ConfigOption(name='delay_after_move', default=0.0)  # in seconds
+    _first_axis_label = ConfigOption(name='first_axis_label', default='x', missing='warn')
+    _second_axis_label = ConfigOption(name='second_axis_label', default='y', missing='warn')
+    _third_axis_label = ConfigOption(name='third_axis_label', default=None)
+
+    axis_list = None
+    _axes = None
 
     def on_activate(self):
-        self._position = {'x': 0.0, 'y': 0.0, 'z': 0.0}
-        self._x_axis = DummySingleAxisStage(self._first_axis_label)
-        self._y_axis = DummySingleAxisStage(self._second_axis_label)
-        self._z_axis = DummySingleAxisStage(self._third_axis_label)
-        self._phi_axis = DummySingleAxisStage('phi')
+        """Initialize the configured dummy translation axes."""
+        axis_labels = [
+            self._first_axis_label,
+            self._second_axis_label,
+            self._third_axis_label,
+        ]
+        self.axis_list = [label for label in axis_labels if isinstance(label, str)]
 
-        self._x_axis.pos = 0.0
-        self._y_axis.pos = 0.0
-        self._z_axis.pos = 0.0
-        self._phi_axis.pos = 0.0
+        if len(self.axis_list) != len(set(self.axis_list)):
+            raise ValueError('Dummy stage axis labels must be unique.')
 
-        self._x_axis.vel = 1.0
-        self._y_axis.vel = 1.0
-        self._z_axis.vel = 1.0
-        self._phi_axis.vel = 1.0
-
-        self._x_axis.status = True   # 0
-        self._y_axis.status = True   # 0
-        self._z_axis.status = True   # 0
-        self._phi_axis.status = 0
+        self._axes = {
+            axis_label: DummySingleAxisStage(axis_label)
+            for axis_label in self.axis_list
+        }
 
     def on_deactivate(self):
+        """Deactivate the dummy stage."""
         pass
 
+    # ------------------------------------------------------------------------------------------------------------------
+    # Motor interface functions
+    # ------------------------------------------------------------------------------------------------------------------
+
     def get_constraints(self):
-        """ Retrieve the hardware constraints from the motor device.
+        """Retrieve the simulated constraints of all configured axes.
 
-        @return dict: dict with constraints for the magnet hardware. These constraints will be passed via the logic to
-        the GUI so that proper display elements with boundary conditions could be made.
+        All axes are translations. Positions are expressed in micrometres and
+        velocities in micrometres per second.
 
-        Provides all the constraints for each axis of a motorized stage (like total travel distance, velocity, ...).
-        Each axis has its own dictionary, where the label is used as the identifier throughout the whole module. The
-        dictionaries for each axis are again grouped together in a constraint dictionary in the form
-        {'<label_axis0>': axis0 } where axis0 is again a dict with the possible values defined below. The possible keys
-        in the constraint are defined here in the interface file. If the hardware does not support the values for the
-        constraints, then insert just None. If you are not sure about the meaning, look in other hardware files to get
-         an impression.
+        :return: Constraint dictionaries indexed by axis label.
+        :rtype: dict
         """
+        limits = {
+            self._first_axis_label: (self._x_min, self._x_max),
+            self._second_axis_label: (self._y_min, self._y_max),
+        }
+        if self._third_axis_label:
+            limits[self._third_axis_label] = (self._z_min, self._z_max)
+
         constraints = {}
-
-        axis0 = {'label': self._first_axis_label,
-                 'unit': 'm',
-                 'ramp': ['Sinus', 'Linear'],
-                 'pos_min': -1000,
-                 'pos_max': 1000,
-                 'pos_step': 0.001,
-                 'max_step': 1,  # added for compatibility with focus_logic
-                 'vel_min': 0,
-                 'vel_max': 100,
-                 'vel_step': 0.01,
-                 'acc_min': 0.1,
-                 'acc_max': 0.0,
-                 'acc_step': 0.0}
-
-        axis1 = {'label': self._second_axis_label,
-                 'unit': 'm',
-                 'ramp': ['Sinus', 'Linear'],
-                 'pos_min': -1000,
-                 'pos_max': 1000,
-                 'pos_step': 0.001,
-                 'max_step': 1,  # added for compatibility with focus_logic
-                 'vel_min': 0,
-                 'vel_max': 100,
-                 'vel_step': 0.01,
-                 'acc_min': 0.1,
-                 'acc_max': 0.0,
-                 'acc_step': 0.0}
-
-        axis2 = {'label': self._third_axis_label,
-                 'unit': 'm',
-                 'ramp': ['Sinus', 'Linear'],
-                 'pos_min': -1000,
-                 'pos_max': 1000,
-                 'pos_step': 0.001,
-                 'max_step': 1,  # added for compatibility with focus_logic
-                 'vel_min': 0,
-                 'vel_max': 100,
-                 'vel_step': 0.01,
-                 'acc_min': 0.1,
-                 'acc_max': 0.0,
-                 'acc_step': 0.0}
-
-        # assign the parameter container for x to a name which will identify it
-        constraints[axis0['label']] = axis0
-        constraints[axis1['label']] = axis1
-        constraints[axis2['label']] = axis2
+        for axis_label in self.axis_list:
+            pos_min, pos_max = limits[axis_label]
+            constraints[axis_label] = {
+                'label': axis_label,
+                'type': 'linear',
+                'unit': 'um',
+                'velocity_unit': 'um/s',
+                'ramp': None,
+                'pos_min': float(pos_min),
+                'pos_max': float(pos_max),
+                'pos_step': 0.001,
+                'max_step': 1.0,  # retained for compatibility with focus_logic
+                'vel_min': 0.0,
+                'vel_max': 100000.0,
+                'vel_step': 1.0,
+                'acc_min': None,
+                'acc_max': None,
+                'acc_step': None,
+            }
         return constraints
 
     def move_rel(self, param_dict):
-        """ Moves stage in given direction (relative movement)
+        """Move selected dummy axes by relative distances.
 
-        @param dict param_dict: dictionary, which passes all the relevant parameters, which should be changed. With
-        get_constraints() you can obtain all possible parameters of that stage. According to this parameter set you have
-        to pass a dictionary with keys that are called like the parameters from get_constraints() and assign a SI value
-        to that. For a movement in x the dict should e.g. have the form: dict = { 'x' : 23 } where the label 'x'
-        corresponds to the chosen axis label.
-
-        todo : A smart idea would be to ask the position after the movement.
+        :param dict param_dict: Relative movements in micrometres, indexed by
+            axis label.
+        :return: ``True`` if at least one movement was applied.
+        :rtype: bool
         """
-        curr_pos_dict = self.get_pos()
+        moved = False
         constraints = self.get_constraints()
 
-        if param_dict.get(self._first_axis_label) is not None:
-            move_x = param_dict[self._first_axis_label]
-            curr_pos_x = curr_pos_dict[self._first_axis_label]
+        for axis_label, movement in param_dict.items():
+            if axis_label not in self._axes:
+                self.log.warning(f'Specified axis not available: {axis_label}')
+                continue
 
-            if (curr_pos_x + move_x > constraints[self._first_axis_label]['pos_max']) or \
-                    (curr_pos_x + move_x < constraints[self._first_axis_label]['pos_min']):
+            current_position = self._axes[axis_label].pos
+            target_position = current_position + movement
+            axis_constraints = constraints[axis_label]
 
-                self.log.warning(f'Cannot make further movement of the axis {self._first_axis_label} '
-                                 f'with the step {move_x}, since the border '
-                                 f'[{constraints[self._first_axis_label]["pos_min"]},'
-                                 f'{constraints[self._first_axis_label]["pos_max"]}] '
-                                 f'was reached! Ignore command!')
-            else:
-                self._make_wait_after_movement()
-                self._x_axis.pos = self._x_axis.pos + move_x
+            if not axis_constraints['pos_min'] <= target_position <= axis_constraints['pos_max']:
+                self.log.warning(
+                    f'Cannot move axis {axis_label} by {movement}: target {target_position} '
+                    f'is outside [{axis_constraints["pos_min"]}, {axis_constraints["pos_max"]}].'
+                )
+                continue
 
-        if param_dict.get(self._second_axis_label) is not None:
-            move_y = param_dict[self._second_axis_label]
-            curr_pos_y = curr_pos_dict[self._second_axis_label]
+            self._axes[axis_label].status = False
+            self._make_wait_after_movement()
+            self._axes[axis_label].pos = target_position
+            self._axes[axis_label].status = True
+            moved = True
 
-            if (curr_pos_y + move_y > constraints[self._second_axis_label]['pos_max']) or \
-                    (curr_pos_y + move_y < constraints[self._second_axis_label]['pos_min']):
-
-                self.log.warning('Cannot make further movement of the axis '
-                                 '"{0}" with the step {1}, since the border [{2},{3}] '
-                                 'was reached! Ignore command!'.format(self._second_axis_label, move_y,
-                                                                       constraints[self._second_axis_label]['pos_min'],
-                                                                       constraints[self._second_axis_label]['pos_max']))
-            else:
-                self._make_wait_after_movement()
-                self._y_axis.pos = self._y_axis.pos + move_y
-
-        if param_dict.get(self._third_axis_label) is not None:
-            move_z = param_dict[self._third_axis_label]
-            curr_pos_z = curr_pos_dict[self._third_axis_label]
-
-            if (curr_pos_z + move_z > constraints[self._third_axis_label]['pos_max']) or \
-                    (curr_pos_z + move_z < constraints[self._third_axis_label]['pos_min']):
-
-                self.log.warning('Cannot make further movement of the axis '
-                                 '"{0}" with the step {1}, since the border [{2},{3}] '
-                                 'was reached! Ignore command!'.format(self._third_axis_label, move_z,
-                                                                       constraints[self._third_axis_label]['pos_min'],
-                                                                       constraints[self._third_axis_label]['pos_max']))
-            else:
-                self._make_wait_after_movement()
-                self._z_axis.pos = self._z_axis.pos + move_z
-
-        if param_dict.get(self._phi_axis.label) is not None:
-            move_phi = param_dict[self._phi_axis.label]
-            curr_pos_phi = curr_pos_dict[self._phi_axis.label]
-
-            if (curr_pos_phi + move_phi > constraints[self._phi_axis.label]['pos_max']) or \
-                    (curr_pos_phi + move_phi < constraints[self._phi_axis.label]['pos_min']):
-
-                self.log.warning('Cannot make further movement of the axis '
-                                 '"{0}" with the step {1}, since the border [{2},{3}] '
-                                 'was reached! Ignore command!'.format(
-                    self._phi_axis.label, move_phi,
-                    constraints[self._phi_axis.label]['pos_min'],
-                    constraints[self._phi_axis.label]['pos_max']))
-            else:
-                self._make_wait_after_movement()
-                self._phi_axis.pos = self._phi_axis.pos + move_phi
+        return moved
 
     def move_abs(self, param_dict):
-        """ Moves stage to absolute position (absolute movement)
+        """Move selected dummy axes to absolute positions.
 
-        @param dict param_dict: dictionary, which passes all the relevant
-                                parameters, which should be changed. Usage:
-                                 {'axis_label': <a-value>}.
-                                 'axis_label' must correspond to a label given
-                                 to one of the axis.
-        A smart idea would be to ask the position after the movement.
+        :param dict param_dict: Absolute targets in micrometres, indexed by
+            axis label.
+        :return: ``True`` if at least one movement was applied.
+        :rtype: bool
         """
+        moved = False
         constraints = self.get_constraints()
 
-        if param_dict.get(self._first_axis_label) is not None:
-            desired_pos = param_dict[self._first_axis_label]
-            constr = constraints[self._first_axis_label]
+        for axis_label, target_position in param_dict.items():
+            if axis_label not in self._axes:
+                self.log.warning(f'Specified axis not available: {axis_label}')
+                continue
 
-            if not (constr['pos_min'] <= desired_pos <= constr['pos_max']):
-                self.log.warning('Cannot make absolute movement of the axis '
-                                 '"{0}" to possition {1}, since it exceeds the limits '
-                                 '[{2},{3}] ! Command is ignored!'.format(
-                    self._first_axis_label, desired_pos,
-                    constr['pos_min'],
-                    constr['pos_max']))
-            else:
-                self._make_wait_after_movement()
-                self._x_axis.pos = desired_pos
+            axis_constraints = constraints[axis_label]
+            if not axis_constraints['pos_min'] <= target_position <= axis_constraints['pos_max']:
+                self.log.warning(
+                    f'Cannot move axis {axis_label} to {target_position}: target is outside '
+                    f'[{axis_constraints["pos_min"]}, {axis_constraints["pos_max"]}].'
+                )
+                continue
 
-        if param_dict.get(self._second_axis_label) is not None:
-            desired_pos = param_dict[self._second_axis_label]
-            constr = constraints[self._second_axis_label]
+            self._axes[axis_label].status = False
+            self._make_wait_after_movement()
+            self._axes[axis_label].pos = target_position
+            self._axes[axis_label].status = True
+            moved = True
 
-            if not (constr['pos_min'] <= desired_pos <= constr['pos_max']):
-                self.log.warning('Cannot make absolute movement of the axis '
-                                 '"{0}" to possition {1}, since it exceeds the limits '
-                                 '[{2},{3}] ! Command is ignored!'.format(
-                    self._second_axis_label, desired_pos,
-                    constr['pos_min'],
-                    constr['pos_max']))
-            else:
-                self._make_wait_after_movement()
-                self._y_axis.pos = desired_pos
-
-        if param_dict.get(self._third_axis_label) is not None:
-            desired_pos = param_dict[self._third_axis_label]
-            constr = constraints[self._third_axis_label]
-
-            if not (constr['pos_min'] <= desired_pos <= constr['pos_max']):
-                self.log.warning('Cannot make absolute movement of the axis '
-                                 '"{0}" to possition {1}, since it exceeds the limits '
-                                 '[{2},{3}] ! Command is ignored!'.format(
-                    self._third_axis_label, desired_pos,
-                    constr['pos_min'],
-                    constr['pos_max']))
-            else:
-                self._make_wait_after_movement()
-                self._z_axis.pos = desired_pos
-
-        if param_dict.get(self._phi_axis.label) is not None:
-            desired_pos = param_dict[self._phi_axis.label]
-            constr = constraints[self._phi_axis.label]
-
-            if not (constr['pos_min'] <= desired_pos <= constr['pos_max']):
-                self.log.warning('Cannot make absolute movement of the axis '
-                                 '"{0}" to possition {1}, since it exceeds the limits '
-                                 '[{2},{3}] ! Command is ignored!'.format(
-                    self._phi_axis.label, desired_pos,
-                    constr['pos_min'],
-                    constr['pos_max']))
-            else:
-                self._make_wait_after_movement()
-                self._phi_axis.pos = desired_pos
+        return moved
 
     def abort(self):
-        """Stops movement of the stage
+        """Abort all simulated movements.
 
-        @return int: error code (0:OK, -1:error)
+        Dummy movements are synchronous, so aborting only restores every axis
+        to its idle/on-target state.
+
+        :return: ``True`` because the abort request is always handled.
+        :rtype: bool
         """
-        self.log.info('MotorDummy: Movement stopped!')
-        return 0
+        for axis in self._axes.values():
+            axis.status = True
+        self.log.info('Dummy stage movement stopped.')
+        return True
 
     def get_pos(self, param_list=None):
-        """ Gets current position of the stage arms
+        """Get current positions of selected axes.
 
-        @param list param_list: optional, if a specific position of an axis
-                                is desired, then the labels of the needed
-                                axis should be passed as the param_list.
-                                If nothing is passed, then from each axis the
-                                position is asked.
-
-        @return dict: with keys being the axis labels and item the current
-                      position.
+        :param list param_list: Optional axis labels. All configured axes are
+            returned when omitted.
+        :return: Positions in micrometres, indexed by axis label.
+        :rtype: dict
         """
-        pos = {}
-        if param_list is not None:
-            if self._first_axis_label in param_list:
-                pos[self._first_axis_label] = self._x_axis.pos
-
-            if self._second_axis_label in param_list:
-                pos[self._second_axis_label] = self._y_axis.pos
-
-            if self._third_axis_label in param_list:
-                pos[self._third_axis_label] = self._z_axis.pos
-
-            if self._phi_axis.label in param_list:
-                pos[self._phi_axis.label] = self._phi_axis.pos
-
-        else:
-            pos[self._first_axis_label] = self._x_axis.pos
-            pos[self._second_axis_label] = self._y_axis.pos
-            pos[self._third_axis_label] = self._z_axis.pos
-            pos[self._phi_axis.label] = self._phi_axis.pos
-
-        return pos
+        return {
+            axis_label: self._axes[axis_label].pos
+            for axis_label in self._selected_axes(param_list)
+        }
 
     def get_status(self, param_list=None):
-        """ Get the status of the position
+        """Get on-target states of selected axes.
 
-        @param list param_list: optional, if a specific status of an axis
-                                is desired, then the labels of the needed
-                                axis should be passed in the param_list.
-                                If nothing is passed, then from each axis the
-                                status is asked.
-
-        @return dict: with the axis label as key and the status number as item.
+        :param list param_list: Optional axis labels. All configured axes are
+            returned when omitted.
+        :return: On-target states indexed by axis label.
+        :rtype: dict
         """
-
-        status = {}
-        if param_list is not None:
-            if self._first_axis_label in param_list:
-                status[self._first_axis_label] = self._x_axis.status
-
-            if self._second_axis_label in param_list:
-                status[self._second_axis_label] = self._y_axis.status
-
-            if self._third_axis_label in param_list:
-                status[self._third_axis_label] = self._z_axis.status
-
-            if self._phi_axis.label in param_list:
-                status[self._phi_axis.label] = self._phi_axis.status
-
-        else:
-            status[self._first_axis_label] = self._x_axis.status
-            status[self._second_axis_label] = self._y_axis.status
-            status[self._third_axis_label] = self._z_axis.status
-            status[self._phi_axis.label] = self._phi_axis.status
-
-        return status
+        return {
+            axis_label: self._axes[axis_label].status
+            for axis_label in self._selected_axes(param_list)
+        }
 
     def calibrate(self, param_list=None):
-        """ Calibrates the stage.
+        """Calibrate selected dummy axes by setting their positions to zero.
 
-        @param dict param_list: param_list: optional, if a specific calibration
-                                of an axis is desired, then the labels of the
-                                needed axis should be passed in the param_list.
-                                If nothing is passed, then all connected axis
-                                will be calibrated.
-
-        @return int: error code (0:OK, -1:error)
-
-        After calibration the stage moves to home position which will be the
-        zero point for the passed axis. The calibration procedure will be
-        different for each stage.
+        :param list param_list: Optional axis labels. All configured axes are
+            calibrated when omitted.
+        :return: ``0`` if at least one axis was calibrated, otherwise ``-1``.
+        :rtype: int
         """
-        if param_list is not None:
-            if self._first_axis_label in param_list:
-                self._x_axis.pos = 0.0
-
-            if self._second_axis_label in param_list:
-                self._y_axis.pos = 0.0
-
-            if self._third_axis_label in param_list:
-                self._z_axis.pos = 0.0
-
-            if self._phi_axis.label in param_list:
-                self._phi_axis.pos = 0.0
-
-        else:
-            self._x_axis.pos = 0.0
-            self._y_axis.pos = 0.0
-            self._z_axis.pos = 0.0
-            self._phi_axis.pos = 0.0
-
-        return 0
+        selected_axes = self._selected_axes(param_list)
+        for axis_label in selected_axes:
+            self._axes[axis_label].pos = 0.0
+            self._axes[axis_label].status = True
+        return 0 if selected_axes else -1
 
     def get_velocity(self, param_list=None):
-        """ Gets the current velocity for all connected axes.
+        """Get current velocities of selected axes.
 
-        @param dict param_list: optional, if a specific velocity of an axis
-                                is desired, then the labels of the needed
-                                axis should be passed as the param_list.
-                                If nothing is passed, then from each axis the
-                                velocity is asked.
-
-        @return dict : with the axis label as key and the velocity as item.
+        :param list param_list: Optional axis labels. All configured axes are
+            returned when omitted.
+        :return: Velocities in micrometres per second, indexed by axis label.
+        :rtype: dict
         """
-        vel = {}
-        if param_list is not None:
-            if self._first_axis_label in param_list:
-                vel[self._first_axis_label] = self._x_axis.vel
-            if self._second_axis_label in param_list:
-                vel[self._first_axis_label] = self._y_axis.vel
-            if self._third_axis_label in param_list:
-                vel[self._first_axis_label] = self._z_axis.vel
-            if self._phi_axis.label in param_list:
-                vel[self._phi_axis.label] = self._phi_axis.vel
+        return {
+            axis_label: self._axes[axis_label].vel
+            for axis_label in self._selected_axes(param_list)
+        }
 
-        else:
-            vel[self._first_axis_label] = self._x_axis.get_vel
-            vel[self._second_axis_label] = self._y_axis.get_vel
-            vel[self._third_axis_label] = self._z_axis.get_vel
-            vel[self._phi_axis.label] = self._phi_axis.vel
+    def set_velocity(self, param_dict):
+        """Set velocities of selected axes.
 
-        return vel
-
-    def set_velocity(self, param_dict=None):
-        """ Write new value for velocity.
-
-        @param dict param_dict: dictionary, which passes all the relevant
-                                parameters, which should be changed. Usage:
-                                 {'axis_label': <the-velocity-value>}.
-                                 'axis_label' must correspond to a label given
-                                 to one of the axis.
+        :param dict param_dict: Velocities in micrometres per second, indexed by
+            axis label.
+        :return: ``0`` if at least one velocity was set, otherwise ``-1``.
+        :rtype: int
         """
+        changed = False
         constraints = self.get_constraints()
 
-        if param_dict.get(self._first_axis_label) is not None:
-            desired_vel = param_dict[self._first_axis_label]
-            constr = constraints[self._first_axis_label]
+        for axis_label, target_velocity in param_dict.items():
+            if axis_label not in self._axes:
+                self.log.warning(f'Specified axis not available: {axis_label}')
+                continue
 
-            if not (constr['vel_min'] <= desired_vel <= constr['vel_max']):
-                self.log.warning('Cannot make absolute movement of the axis '
-                                 '"{0}" to possition {1}, since it exceeds the limits '
-                                 '[{2},{3}] ! Command is ignored!'.format(
-                    self._first_axis_label, desired_vel,
-                    constr['vel_min'],
-                    constr['vel_max']))
+            axis_constraints = constraints[axis_label]
+            if not axis_constraints['vel_min'] <= target_velocity <= axis_constraints['vel_max']:
+                self.log.warning(
+                    f'Cannot set velocity of axis {axis_label} to {target_velocity}: value is outside '
+                    f'[{axis_constraints["vel_min"]}, {axis_constraints["vel_max"]}].'
+                )
+                continue
+
+            self._axes[axis_label].vel = target_velocity
+            changed = True
+
+        return 0 if changed else -1
+
+    def wait_for_idle(self):
+        """Wait until the dummy stage is idle.
+
+        Dummy movements finish synchronously, therefore this method returns
+        immediately.
+
+        :return: ``True`` because the dummy stage is idle after each command.
+        :rtype: bool
+        """
+        return True
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # Helper functions
+    # ------------------------------------------------------------------------------------------------------------------
+
+    def _selected_axes(self, param_list=None):
+        """Return configured axes selected by an optional axis list."""
+        if not param_list:
+            return list(self.axis_list)
+
+        selected_axes = []
+        for axis_label in param_list:
+            if axis_label in self._axes:
+                selected_axes.append(axis_label)
             else:
-                self._x_axis.vel = desired_vel
-
-        if param_dict.get(self._second_axis_label) is not None:
-            desired_vel = param_dict[self._second_axis_label]
-            constr = constraints[self._second_axis_label]
-
-            if not (constr['vel_min'] <= desired_vel <= constr['vel_max']):
-                self.log.warning('Cannot make absolute movement of the axis '
-                                 '"{0}" to possition {1}, since it exceeds the limits '
-                                 '[{2},{3}] ! Command is ignored!'.format(
-                    self._second_axis_label, desired_vel,
-                    constr['vel_min'],
-                    constr['vel_max']))
-            else:
-                self._y_axis.vel = desired_vel
-
-        if param_dict.get(self._third_axis_label) is not None:
-            desired_vel = param_dict[self._third_axis_label]
-            constr = constraints[self._third_axis_label]
-
-            if not (constr['vel_min'] <= desired_vel <= constr['vel_max']):
-                self.log.warning('Cannot make absolute movement of the axis '
-                                 '"{0}" to possition {1}, since it exceeds the limits '
-                                 '[{2},{3}] ! Command is ignored!'.format(
-                    self._third_axis_label, desired_vel,
-                    constr['pos_min'],
-                    constr['pos_max']))
-            else:
-                self._z_axis.vel = desired_vel
-
-        if param_dict.get(self._phi_axis.label) is not None:
-            desired_vel = param_dict[self._phi_axis.label]
-            constr = constraints[self._phi_axis.label]
-
-            if not (constr['vel_min'] <= desired_vel <= constr['vel_max']):
-                self.log.warning('Cannot make absolute movement of the axis '
-                                 '"{0}" to possition {1}, since it exceeds the limits '
-                                 '[{2},{3}] ! Command is ignored!'.format(
-                    self._phi_axis.label, desired_vel,
-                    constr['pos_min'],
-                    constr['pos_max']))
-            else:
-                self._phi_axis.vel = desired_vel
-
-    @staticmethod
-    def wait_for_idle():
-        time.sleep(0.1)
+                self.log.warning(f'Specified axis not available: {axis_label}')
+        return selected_axes
 
     def _make_wait_after_movement(self):
-        """ Define a time which the dummy should wait after each movement. """
-        time.sleep(self._wait_after_movement)
+        """Wait for the configured simulated movement delay."""
+        if self._wait_after_movement > 0:
+            time.sleep(self._wait_after_movement)

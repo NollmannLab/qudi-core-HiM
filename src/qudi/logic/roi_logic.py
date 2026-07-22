@@ -22,9 +22,8 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-# src/qudi/logic/roi_logic.py
-
 from qtpy import QtCore
+from qudi.core.configoption import ConfigOption
 from qudi.core.module import LogicBase
 from qudi.core.connector import Connector
 from qudi.core.statusvariable import StatusVar
@@ -33,7 +32,6 @@ import os
 import json
 import numpy as np
 from time import sleep
-from itertools import product
 from math import ceil
 from datetime import datetime
 
@@ -419,7 +417,7 @@ class RoiLogic(LogicBase):
           stage: 'dummy_translation_stage'
     """
     # declare the connector
-    stage = Connector(interface='RoiStageInterface', name='stage')
+    stage = Connector(interface='MultiAxisStageInterface', name='stage')
     _stage = None
 
     # declare the status variable
@@ -427,6 +425,13 @@ class RoiLogic(LogicBase):
     _active_roi = StatusVar(name='_active_roi', default=None)
     _roi_width = StatusVar(name='_roi_width', default=50)
     _roi_starting_digit = StatusVar(name='_roi_starting_digit', default=0)
+
+    # Axis-role mapping used by the ROI logic. The connected stage may expose
+    # two or three axes, but ROI positions are always represented as (x, y, z).
+    _x_axis_label = ConfigOption(name='x_axis_label', default='x')
+    _y_axis_label = ConfigOption(name='y_axis_label', default='y')
+    _z_axis_label = ConfigOption(name='z_axis_label', default='z')
+    _stage_axis_labels = None
 
     # declare the signals
     sigRoiUpdated = QtCore.Signal(str, str, np.ndarray)  # old_name, new_name, current_position
@@ -456,6 +461,10 @@ class RoiLogic(LogicBase):
 
     def on_activate(self):
         self._stage = self.stage()
+
+        constraints = self._stage.get_constraints()
+        self._stage_axis_labels = tuple(constraints)
+
         self.threadpool = QtCore.QThreadPool.globalInstance()
         self.sigRoiListUpdated.emit({'name': self.roi_list_name,
                                      'rois': self.roi_positions,
@@ -566,14 +575,23 @@ class RoiLogic(LogicBase):
     @property
     def stage_position(self):
         """ Get the current stage position.
+        X and Y are read from the configured stage-axis mappings. If the
+        connected stage has no configured Z axis, an artificial Z coordinate
+        of zero is returned so ROI positions remain three-dimensional.
+
         :return tuple of floats: x y z coordinates of the stage (z is set to 0 in case of 2 axes stage)
         """
-        pos = self._stage.get_pos()  # this returns a dictionary of the format {'x': pos_x, 'y': pos_y}
-        if len(pos) == 2 and 'z' not in pos.keys():  # case for the 2 axes stage
-            pos[
-                'z'] = 0  # add an artificial z component so that add_roi method can be called which expects a tuple (x, y, z)
-        return tuple(pos.values())[:3]  # get only the dictionary values as a tuple.
-        # [:3] as safety to get only the x y axis and (eventually empty) z value, in case more axis are configured (such as for the motor_dummy)
+        requested_axes = [self._x_axis_label, self._y_axis_label]
+        has_z_axis = self._z_axis_label in self._stage_axis_labels
+        if has_z_axis:
+            requested_axes.append(self._z_axis_label)
+
+        pos = self._stage.get_pos(requested_axes)
+        return (
+            pos[self._x_axis_label],
+            pos[self._y_axis_label],
+            pos[self._z_axis_label] if has_z_axis else 0.0,
+        )
 
     def get_roi_position(self, name=None):
         """
@@ -995,15 +1013,30 @@ class RoiLogic(LogicBase):
     def _move_stage(self, position):
         """
         Move the translation stage to position.
-        @param: float tuple[3] position: target position for stage
+        X and Y are always sent to the connected stage. Z is sent only when a
+        corresponding translation axis is configured; it is ignored for a
+        two-axis stage.
+
+        :param position: Target position in ROI order ``(x, y, z)``.
+        :return: ``True`` if the stage accepted at least one movement command.
         """
         if len(position) != 3:
             self.log.error('Stage position to set must be iterable of length 3.')
-            return None
-        axis_label = ('x', 'y', 'z')
-        pos_dict = dict([*zip(axis_label, position)])
-        self._stage.move_abs(pos_dict)
-        self.sigStageMoved.emit(position)
+            return False
+
+        pos_dict = {
+            self._x_axis_label: position[0],
+            self._y_axis_label: position[1],
+        }
+        if self._z_axis_label in self._stage_axis_labels:
+            pos_dict[self._z_axis_label] = position[2]
+
+        moved = self._stage.move_abs(pos_dict)
+        if moved:
+            self.sigStageMoved.emit(np.asarray(position, dtype=float))
+        else:
+            self.log.warning('The connected stage rejected the ROI movement command.')
+        return moved
 
     def set_stage_velocity(self, param_dict):
         """ Set the stage velocity. This method is needed for tasks to make the method in the hardware module
@@ -1015,10 +1048,11 @@ class RoiLogic(LogicBase):
     def stage_wait_for_idle(self):  # needed in tasks
         """ Wait until the stage status is idle. This method is needed for tasks to make the corresponding method
         in the hardware module accessible from the logic layer.
-        @return timeout (bool) indicate whether the timeout limit was reach while waiting for the movement to stop
+
+        :return timeout (bool) ``True`` when the stage reaches idle state, or ``False`` when
+        the hardware reports a timeout or communication failure.
         """
-        timeout = self._stage.wait_for_idle()
-        return timeout
+        return self._stage.wait_for_idle()
 
     # ----------------------------------------------------------------------------------------------------------------------
     # Methods to handle the user interface state
