@@ -140,22 +140,12 @@ class FluidicsRobotLogic(LogicBase):
           connect:
             stage: 'pi_pipetting_robot'
           options:
-            z_safety_position: 0.0
-            first_axis: 'x'
-            second_axis: 'y'
-            third_axis: 'z'
-            grid: 'cartesian'
             movement_poll_interval: 0.5
     """
     # declare connectors
     robot = Connector(interface='MultiAxisStageInterface', name='robot')
 
     # config options
-    z_safety_pos = ConfigOption('z_safety_position', 0, missing='warn')
-    first_axis_label = ConfigOption('first_axis', 'X axis')
-    second_axis_label = ConfigOption('second_axis', 'Y axis')
-    third_axis_label = ConfigOption('third_axis', 'Z axis')
-    grid = ConfigOption('grid', missing='warn')  # either 'cartesian' or 'polar'
     poll_interval = ConfigOption('movement_poll_interval', 0.5, missing='warn')
 
     # signals
@@ -167,16 +157,23 @@ class FluidicsRobotLogic(LogicBase):
     sigDisablePositioningActions = QtCore.Signal()
     sigEnablePositioningActions = QtCore.Signal()
 
-    # attributes
+    # attributes for the robot
+    _robot = None
+    grid = None
+    first_axis_label = None
+    second_axis_label = None
+    third_axis_label = None
+    z_safety_pos = 0
+    num_probes = 0
+    target_position = 0  # overwritten when movement is started using the start_move_to_target method  (target is the probe number)
+
+    # attributes for actions
+    threadpool = None
     move_stage = False  # flag
     go_to_target = False  # flag
-    target_position = 0  # overwritten when movement is started using the start_move_to_target method  (target is the probe number)
-    origin = None
     moving = False
-    num_probes = 0
+    origin = None
     _movement_id = 0
-    threadpool = None
-    _robot = None
 
     delta_x = 14.9  # in mm # to be defined by config later
     delta_y = 14.9  # in mm # to be defined by config later
@@ -200,6 +197,7 @@ class FluidicsRobotLogic(LogicBase):
         self.threadpool = QtCore.QThreadPool(self)
 
         # calculate the probe grid coordinates - the grid is independent of the origin that is not yet set
+        self._get_grid_properties()
         self._probe_grid_dict = self.map_probe_number_to_grid_coordinates()
 
     def on_deactivate(self):
@@ -227,6 +225,19 @@ class FluidicsRobotLogic(LogicBase):
         :return: (dict) Constraints indexed by the configured hardware axis labels.
         """
         return self._robot.get_constraints()
+
+    def _get_grid_properties(self):
+        """Retrieve grid properties from the connected stage."""
+        grid_properties = self._robot.get_grid_properties()
+        self.grid = grid_properties['grid']
+        self.first_axis_label = grid_properties['axis_1']
+        self.second_axis_label = grid_properties['axis_2']
+        self.third_axis_label = grid_properties['axis_3']
+        self.z_safety_pos = grid_properties['z_safety_pos']
+
+    def get_robot_parameters(self):
+        """Return pipetting-robot configuration parameters.This function is called from the gui."""
+        return self._robot.get_robot_parameters()
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods defining the origin, the grid and the x-y or r-phi coordinates
@@ -628,10 +639,23 @@ class FluidicsRobotLogic(LogicBase):
             elif self.go_to_target:
                 self.sigStageMovedToTarget.emit(new_pos, self.target_position)
                 self.go_to_target = False
-            else:
-                pass
+            self.moving = False
 
-                self.moving = False
+    def _movement_failed(self, message):
+        """Abort the current movement sequence after a hardware start failure."""
+        self.moving = False
+        self._movement_id += 1
+        try:
+            self._robot.abort()
+        except Exception as exc:
+            self.log.warning(f'Failed to abort movement after startup failure: {exc}')
+
+        self.move_stage = False
+        self.go_to_target = False
+        self.log.warning(message)
+
+        pos = self.get_position()
+        self.sigStageStopped.emit(pos)
 
     def abort_movement(self):
         """Abort the active stage movement and emit the reached position.
@@ -657,7 +681,7 @@ class FluidicsRobotLogic(LogicBase):
         :return: float tuple: position (x, y, z) or (r, phi, z)
         """
         axis_labels = self._axis_labels
-        position = self._stage.get_pos(list(axis_labels))
+        position = self._robot.get_pos(list(axis_labels))
         return tuple(position[label] for label in axis_labels)
 
 # ----------------------------------------------------------------------------------------------------------------------
