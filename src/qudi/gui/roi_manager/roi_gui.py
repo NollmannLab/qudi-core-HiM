@@ -458,7 +458,10 @@ class RoiGUI(GuiBase):
         self.sigRoiWidthChanged.connect(self._roi_logic.set_roi_width)
         self.sigRoiFirstDigitChanged.connect(self._roi_logic.set_roi_first_digit)
         self.sigRoiListNameChanged.connect(self._roi_logic.rename_roi_list, QtCore.Qt.QueuedConnection)
-        self._mw.active_roi_ComboBox.activated[str].connect(self._roi_logic.set_active_roi, QtCore.Qt.QueuedConnection)
+        self._mw.active_roi_ComboBox.textActivated.connect(
+            self._roi_logic.set_active_roi,
+            QtCore.Qt.ConnectionType.QueuedConnection
+        )
         self.sigAddInterpolation.connect(self._roi_logic.add_interpolation, QtCore.Qt.QueuedConnection)
         self.sigStartTracking.connect(self._roi_logic.start_tracking)
         self.sigStopTracking.connect(self._roi_logic.stop_tracking)
@@ -471,7 +474,9 @@ class RoiGUI(GuiBase):
         self._mw.new_list_Action.triggered.disconnect()
         self.sigRoiWidthChanged.disconnect()
         self.sigRoiListNameChanged.disconnect()
-        self._mw.active_roi_ComboBox.activated[str].disconnect()
+        self._mw.active_roi_ComboBox.textActivated.disconnect(
+            self._roi_logic.set_active_roi
+        )
         self.sigAddInterpolation.disconnect()
         self.sigStartTracking.disconnect()
         self.sigStopTracking.disconnect()
