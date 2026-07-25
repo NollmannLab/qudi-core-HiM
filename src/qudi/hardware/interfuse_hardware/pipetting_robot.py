@@ -41,33 +41,52 @@ class PipettingRobot(MultiAxisStageInterface):
     Example configuration for a Cartesian robot::
 
         pipetting_robot:
-          module.Class: 'interfuse.pipetting_robot_interfuse.PipettingRobotInterfuse'
-          connect:
-            motor: 'pi_multi_axis_stage'
-          options:
-            first_axis: 'x'
-            second_axis: 'y'
-            z_axis: 'z'
-            z_safety_position: 0.0
-            parking_position:
-              x: 0.0
-              y: 0.0
-              z: 0.0
-            park_on_deactivate: false
+            module.Class: 'interfuse_hardware.pipetting_robot.PipettingRobot'
+            connect:
+                motor: 'dummy_translation_stage'
+            options:
+                first_axis: 'x'
+                second_axis: 'y'
+                z_axis: 'z'
+                z_safety_position: 0.0
+                parking_position:
+                    x: 0.0
+                    y: 0.0
+                    z: 0.0
+                park_on_deactivate: false
+                tube_types:
+                    - '2mL flat tube'
+                    - '2mL round tube'
+                pos1_x_default: 13.0
+                pos1_y_default: 4.0
+                pos1_z_default:
+                    - 88.0
+                    - 87.0
+                exp_setup: 'dummy'
+                max_number_tubes : 100
     """
 
     # Generic multi-axis motor backend.
     motor = Connector(interface='MultiAxisStageInterface', name='motor')
 
     # Robot axis roles. The Z role is always required to be linear.
-    _first_axis_label = ConfigOption('first_axis', 'x', missing='warn')
-    _second_axis_label = ConfigOption('second_axis', 'y', missing='warn')
-    _z_axis_label = ConfigOption('z_axis', 'z', missing='warn')
+    _grid = ConfigOption('grid', missing='error')
+    _first_axis_label = ConfigOption('first_axis', 'x', missing='error')
+    _second_axis_label = ConfigOption('second_axis', 'y', missing='error')
+    _z_axis_label = ConfigOption('z_axis', 'z', missing='error')
 
     # Robot-specific safe and parking positions, expressed in interface units.
-    _z_safety_position = ConfigOption('z_safety_position', 0.0, missing='warn')
-    _parking_position = ConfigOption('parking_position', None)
-    _park_on_deactivate = ConfigOption('park_on_deactivate', False, missing='warn')
+    _z_safety_position = ConfigOption('z_safety_position', 0.0, missing='error')
+    _parking_position = ConfigOption('parking_position', missing='error')
+    _park_on_deactivate = ConfigOption('park_on_deactivate', missing='error')
+
+    # Robot-specific position of the first tube
+    _pos1_x_default = ConfigOption('pos1_x_default', missing='error')
+    _pos1_y_default = ConfigOption('pos1_y_default', missing='error')
+    _pos1_z_default = ConfigOption('pos1_z_default', missing='error')
+    _setup = ConfigOption('exp_setup', missing='error')
+    _tube_types = ConfigOption('tube_types', missing='error')
+    _max_number_tubes = ConfigOption('max_number_tubes', missing='error')
 
     # Attributes initialized on activation.
     _motor = None
@@ -161,6 +180,28 @@ class PipettingRobot(MultiAxisStageInterface):
     # ------------------------------------------------------------------------------------------------------------------
     # MultiAxisStageInterface implementation
     # ------------------------------------------------------------------------------------------------------------------
+
+    def get_robot_parameters(self):
+        """Return robot-specific parameters needed by logic and GUI."""
+        return {
+            'pos1_x_default': float(self._pos1_x_default),
+            'pos1_y_default': float(self._pos1_y_default),
+            'pos1_z_default': self._pos1_z_default,
+            'exp_setup': self._setup,
+            'tube_types': self._tube_types,
+            'max_number_tubes': int(self._max_number_tubes),
+            'z_safety_position': float(self._z_safety_position),
+        }
+
+    def get_grid_properties(self):
+        """Return grid properties needed by logic and GUI."""
+        return {
+            'grid': float(self._grid),
+            'axis_1': float(self._first_axis_label),
+            'axis_2': self._second_axis_label,
+            'axis_3': self._z_axis_label,
+            'z_safety_pos': self._z_safety_position,
+        }
 
     def get_constraints(self):
         """Return constraints of the three robot axes in robot-axis order.

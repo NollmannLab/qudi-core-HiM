@@ -29,15 +29,12 @@ top-level directory of this distribution and at <https://github.com/Ulm-IQO/qudi
 """
 import os
 from qtpy import QtCore
-from qtpy import QtGui
 from qtpy import QtWidgets
 from qtpy import uic
 from functools import partial
-import numpy as np
 
 from qudi.core.module import GuiBase
 from qudi.core.connector import Connector
-from qudi.core.configoption import ConfigOption
 
 
 # ======================================================================================================================
@@ -110,14 +107,7 @@ class FluidicsGUI(GuiBase):
     # connector to logic modules
     valve_logic = Connector(interface='FluidicsValveLogic', name='valve_logic')
     flowcontrol_logic = Connector(interface='FluidicsFlowLogic', name='flowcontrol_logic')
-    positioning_logic = Connector(interface='PositioningLogic', name='positioning_logic', optional=True)
-
-    # config options
-    tube_types = ConfigOption('tube_type', '')
-    pos1_x_default = ConfigOption('pos1_x_default', 0)
-    pos1_y_default = ConfigOption('pos1_y_default', 0)
-    pos1_z_default = ConfigOption('pos1_z_default', 0)
-    exp_setup = ConfigOption('exp_setup', '')
+    positioning_logic = Connector(interface='FluidicsRobotLogic', name='pipetting_logic', optional=True)
 
     # Signals
     # signals for valve settings
@@ -139,14 +129,13 @@ class FluidicsGUI(GuiBase):
     sigMoveToTarget = QtCore.Signal(int)
     sigStopMovement = QtCore.Signal()
 
-    def __init__(self, config, **kwargs):
-        super().__init__(config=config, **kwargs)
-        self._valve_logic = None
-        self._flow_logic = None
-        self._positioning_logic = None
-        self._mw = None
-        self._pos1_sd = None
-        self.valve_IDs = []
+    # attributes
+    _valve_logic = None
+    _flow_logic = None
+    _pipetting_robot_logic = None
+    _mw = None
+    pos1_sd = None
+    valve_IDs = []
 
     def on_activate(self):
         """ Required initialization steps.
@@ -154,7 +143,10 @@ class FluidicsGUI(GuiBase):
         # connectors to the logic
         self._valve_logic = self.valve_logic()
         self._flow_logic = self.flowcontrol_logic()
-        self._positioning_logic = self._get_optional_logic(self.positioning_logic, "positioning")
+        self._pipetting_robot_logic = self._get_optional_logic(self.positioning_logic, "positioning")
+
+        # retrieve specific parameters related to the robot
+        self._get_robot_specific_parameters()
 
         # create an instance of the Main Window
         self._mw = FluidicsWindowCE(self.close_function)
@@ -197,7 +189,7 @@ class FluidicsGUI(GuiBase):
     @property
     def has_positioning(self):
         """Return whether positioning logic is available."""
-        return self._positioning_logic is not None
+        return self._pipetting_robot_logic is not None
 
     def _get_optional_logic(self, connector, name):
         """Return a connected logic module, or ``None`` if unavailable.
@@ -331,14 +323,14 @@ class FluidicsGUI(GuiBase):
         It initializes the indicators with the specified axis labels and displays the current stage position.
         It establishes the signal-slot connections for the toolbar actions.
         """
-        if self._positioning_logic.origin is None:
+        if self._pipetting_robot_logic.origin is None:
             self._mw.go_to_position_Action.setDisabled(True)
 
         # initialize indicators
-        self._mw.first_axis_Label.setText(self._positioning_logic.first_axis_label)
-        self._mw.second_axis_Label.setText(self._positioning_logic.second_axis_label)
-        self._mw.third_axis_Label.setText(self._positioning_logic.third_axis_label)
-        stage_position = self._positioning_logic.get_position()
+        self._mw.first_axis_Label.setText(self._pipetting_robot_logic.first_axis_label)
+        self._mw.second_axis_Label.setText(self._pipetting_robot_logic.second_axis_label)
+        self._mw.third_axis_Label.setText(self._pipetting_robot_logic.third_axis_label)
+        stage_position = self._pipetting_robot_logic.get_position()
         self._mw.x_axis_position_LineEdit.setText('{:.3f}'.format(stage_position[0]))
         self._mw.y_axis_position_LineEdit.setText('{:.3f}'.format(stage_position[1]))
         self._mw.z_axis_position_LineEdit.setText('{:.3f}'.format(stage_position[2]))
@@ -346,7 +338,7 @@ class FluidicsGUI(GuiBase):
         self._mw.probe_position_LineEdit.setText('Please calibrate !')
 
         # initialize spinboxes depending on connected hardware
-        constraints = self._positioning_logic.get_hardware_constraints()
+        constraints = self._pipetting_robot_logic.get_hardware_constraints()
 
         x_min = constraints['x']['pos_min']
         x_max = constraints['x']['pos_max']
@@ -364,7 +356,7 @@ class FluidicsGUI(GuiBase):
         self._mw.z_axis_position_DSpinBox.setMinimum(z_min)
         self._mw.z_axis_position_DSpinBox.setMaximum(z_max)
 
-        probe_max = self._positioning_logic.num_probes
+        probe_max = self._pipetting_robot_logic.num_probes
         self._mw.target_probe_position_SpinBox.setMaximum(probe_max)
 
         # toolbar actions
@@ -373,19 +365,19 @@ class FluidicsGUI(GuiBase):
         self._mw.go_to_position_Action.triggered.connect(self.go_to_position_clicked)
 
         # signals to logic
-        self.sigMoveStage.connect(self._positioning_logic.start_move_stage)
-        self.sigMoveToTarget.connect(self._positioning_logic.start_move_to_target)
-        self.sigSetPos1.connect(self._positioning_logic.set_origin)
-        self.sigStopMovement.connect(self._positioning_logic.abort_movement)
+        self.sigMoveStage.connect(self._pipetting_robot_logic.start_move_stage)
+        self.sigMoveToTarget.connect(self._pipetting_robot_logic.start_move_to_target)
+        self.sigSetPos1.connect(self._pipetting_robot_logic.set_origin)
+        self.sigStopMovement.connect(self._pipetting_robot_logic.abort_movement)
 
         # signals from logic
-        self._positioning_logic.sigUpdatePosition.connect(self.update_stage_position)
-        self._positioning_logic.sigStageMoved.connect(self.stage_movement_finished)
-        self._positioning_logic.sigOriginDefined.connect(self.origin_defined)
-        self._positioning_logic.sigStageMovedToTarget.connect(self.update_target_position)
-        self._positioning_logic.sigStageStopped.connect(self.stage_stopped)
-        self._positioning_logic.sigDisablePositioningActions.connect(self.disable_positioning_actions)
-        self._positioning_logic.sigEnablePositioningActions.connect(self.enable_positioning_actions)
+        self._pipetting_robot_logic.sigUpdatePosition.connect(self.update_stage_position)
+        self._pipetting_robot_logic.sigStageMoved.connect(self.stage_movement_finished)
+        self._pipetting_robot_logic.sigOriginDefined.connect(self.origin_defined)
+        self._pipetting_robot_logic.sigStageMovedToTarget.connect(self.update_target_position)
+        self._pipetting_robot_logic.sigStageStopped.connect(self.stage_stopped)
+        self._pipetting_robot_logic.sigDisablePositioningActions.connect(self.disable_positioning_actions)
+        self._pipetting_robot_logic.sigEnablePositioningActions.connect(self.enable_positioning_actions)
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods belonging to the position1 settings window
@@ -406,9 +398,9 @@ class FluidicsGUI(GuiBase):
         self._pos1_sd.Tube_comboBox.currentIndexChanged.connect(self.select_tube_type)
 
         # update the labels according to connected hardware
-        self._pos1_sd.label.setText(self._positioning_logic.first_axis_label)
-        self._pos1_sd.label_2.setText(self._positioning_logic.second_axis_label)
-        self._pos1_sd.label_3.setText(self._positioning_logic.third_axis_label)
+        self._pos1_sd.label.setText(self._pipetting_robot_logic.first_axis_label)
+        self._pos1_sd.label_2.setText(self._pipetting_robot_logic.second_axis_label)
+        self._pos1_sd.label_3.setText(self._pipetting_robot_logic.third_axis_label)
 
         # Connect the action of the settings window with the code:
         self._pos1_sd.accepted.connect(self.set_position1)  # ok button
@@ -452,6 +444,18 @@ class FluidicsGUI(GuiBase):
 # Slots related to the positioning
 # ----------------------------------------------------------------------------------------------------------------------
 
+    def _get_robot_specific_parameters(self):
+        """Retrieve robot-specific parameters from the positioning logic."""
+        parameters = self._pipetting_robot_logic.get_robot_parameters()
+
+        self.pos1_x_default = parameters['pos1_x_default']
+        self.pos1_y_default = parameters['pos1_y_default']
+        self.pos1_z_default = parameters['pos1_z_default']
+
+        self.exp_setup = parameters['exp_setup']
+        self.tube_types = parameters['tube_types']
+        self.max_number_tubes = parameters['max_number_tubes']
+
 # Methods for stage movement--------------------------------------------------------------------------------------------
     @QtCore.Slot()
     def move_stage_clicked(self):
@@ -461,9 +465,9 @@ class FluidicsGUI(GuiBase):
         if not self.has_positioning:
             return
 
-        if self._positioning_logic.moving:  # stage already in movement, will be stopped by clicking the toolbutton
+        if self._pipetting_robot_logic.moving:  # stage already in movement, will be stopped by clicking the toolbutton
             self._mw.move_stage_Action.setText('Move Stage')
-            if self._positioning_logic.origin is not None:  # allow access to go to target toolbutton when position 1 has been defined
+            if self._pipetting_robot_logic.origin is not None:  # allow access to go to target toolbutton when position 1 has been defined
                 self._mw.go_to_position_Action.setDisabled(False)
             self.sigStopMovement.emit()
         else:
@@ -484,7 +488,7 @@ class FluidicsGUI(GuiBase):
         if not self.has_positioning:
             return
 
-        if self._positioning_logic.moving:  # stage already in movement
+        if self._pipetting_robot_logic.moving:  # stage already in movement
             self._mw.go_to_position_Action.setText('Go to Target')
             self._mw.move_stage_Action.setDisabled(False)
             self.sigStopMovement.emit()
@@ -506,7 +510,7 @@ class FluidicsGUI(GuiBase):
 
         self._mw.move_stage_Action.setChecked(False)
         self._mw.move_stage_Action.setText('Move Stage')
-        if self._positioning_logic.origin is not None:
+        if self._pipetting_robot_logic.origin is not None:
             self._mw.go_to_position_Action.setDisabled(False)
         self.update_stage_position(position)
 
@@ -523,7 +527,7 @@ class FluidicsGUI(GuiBase):
         self._mw.move_stage_Action.setDisabled(False)
         self._mw.move_stage_Action.setText('Move Stage')
         self._mw.move_stage_Action.setChecked(False)
-        if self._positioning_logic.origin is not None:
+        if self._pipetting_robot_logic.origin is not None:
             self._mw.go_to_position_Action.setDisabled(False)
             self._mw.go_to_position_Action.setText('Go to Target')
             self._mw.go_to_position_Action.setChecked(False)
@@ -544,9 +548,9 @@ class FluidicsGUI(GuiBase):
         self._mw.z_axis_position_LineEdit.setText('{:.3f}'.format(position[2]))
         # set the current position of the injections probe to its indicator if the stage coordinates correspond to a position
         xy_pos = (position[0], position[1])
-        if xy_pos in self._positioning_logic._probe_xy_position_dict.keys():
-            self._mw.probe_position_LineEdit.setText(str(self._positioning_logic._probe_xy_position_dict[xy_pos]))
-        elif self._positioning_logic.origin is None:
+        if xy_pos in self._pipetting_robot_logic._probe_xy_position_dict.keys():
+            self._mw.probe_position_LineEdit.setText(str(self._pipetting_robot_logic._probe_xy_position_dict[xy_pos]))
+        elif self._pipetting_robot_logic.origin is None:
             pass  # keep the default text if position1 is not yet defined
         else:
             self._mw.probe_position_LineEdit.setText('Not at a probe XY position')
@@ -591,10 +595,10 @@ class FluidicsGUI(GuiBase):
             return
 
         self._mw.go_to_position_Action.setDisabled(False)
-        position = self._positioning_logic.get_position()
+        position = self._pipetting_robot_logic.get_position()
         xy_pos = (position[0], position[1])
-        if xy_pos in self._positioning_logic._probe_xy_position_dict.keys():
-            self._mw.probe_position_LineEdit.setText(str(self._positioning_logic._probe_xy_position_dict[xy_pos]))
+        if xy_pos in self._pipetting_robot_logic._probe_xy_position_dict.keys():
+            self._mw.probe_position_LineEdit.setText(str(self._pipetting_robot_logic._probe_xy_position_dict[xy_pos]))
         else:
             self._mw.probe_position_LineEdit.setText('Not at a probe XY position')
 
@@ -619,7 +623,7 @@ class FluidicsGUI(GuiBase):
 
         self._mw.move_stage_Action.setDisabled(False)
         self._mw.set_position1_Action.setDisabled(False)
-        if self._positioning_logic.origin is not None:
+        if self._pipetting_robot_logic.origin is not None:
             self._mw.go_to_position_Action.setDisabled(False)
 
 # ----------------------------------------------------------------------------------------------------------------------
