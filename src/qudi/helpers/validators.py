@@ -41,24 +41,24 @@ class NameValidator(QtGui.QValidator):
         # Return intermediate status when empty string is passed
         if not string.strip():  # remove white space
             if self._empty_allowed:
-                return self.Acceptable, '', position
+                return QtGui.QValidator.State.Acceptable, '', position
             else:
-                # return self.Intermediate, string, position
-                return self.Invalid, string, position
-                # not so user friedly as one letter must stay in the lineedit. But return self.Intermediate is not sufficient to force a non empty name
+                # return QtGui.QValidator.State.Intermediate, string, position
+                return QtGui.QValidator.State.Invalid, string, position
+                # not so user friedly as one letter must stay in the lineedit. But return QtGui.QValidator.State.Intermediate is not sufficient to force a non empty name
 
         if self._path:  # flag for path validator
             match = self.path_re.match(string)
         else:
             match = self.name_re.match(string)
         if not match:
-            return self.Invalid, '', position
+            return QtGui.QValidator.State.Invalid, '', position
 
         matched = match.group()
         if matched == string:
-            return self.Acceptable, string, position
+            return QtGui.QValidator.State.Acceptable, string, position
 
-        return self.Invalid, matched, position
+        return QtGui.QValidator.State.Invalid, matched, position
 
     def fixup(self, text):
         if self._path:
