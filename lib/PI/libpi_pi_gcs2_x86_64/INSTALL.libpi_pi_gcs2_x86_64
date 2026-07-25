@@ -1,0 +1,723 @@
+#! /bin/sh
+#
+#
+
+#**********************************************************************************************************
+#  Physik Instrumente (PI) SE & Co. KG (www.pi.ws)
+#**********************************************************************************************************
+#
+#  Description:	  Installs and removes the PI GCS high level library
+#
+#  Author:        Jens Kapp (JKa)
+#                 SW Engineer
+#                 Physik Instrumente (PI) SE & Co. KG
+#                 Auf der Roemerstr. 1
+#                 D-76228 Karlsruhe
+#                 Germany
+#
+#**********************************************************************************************************
+#  Version:	2.2.7
+#**********************************************************************************************************
+
+
+PI_TARGET_PLATFORM_NAME='x86_64'
+PI_CURRENT_PLATFORM_NAME=`uname -m`
+
+PI_PRODUCT_NAME='GCS2 Controller '$PI_TARGET_PLATFORM_NAME
+
+PI_COMPONENT_LIB_NAME=libpi_pi_gcs2
+PI_COMPONENT_WIN_PSEUDO_NAME=PI_GCS2_DLL_x64.dll
+PI_COMPONENT_LIB_HEADER_FILE_NAME=PI_GCS2_DLL.h
+PI_COMPONENT_LIB_NAME_PLATTFORM_SUFFIX="_"$PI_TARGET_PLATFORM_NAME
+PI_COMPONENT_LD_CONF_NAME=pi.conf
+
+PI_SOURCE_LIB_PATH=./lib
+PI_SOURCE_INCLUDE_PATH=./include
+
+PI_DESTINATION_PATH=/usr/local/PI
+PI_DESTINATION_ETC_DIR=${PI_DESTINATION_PATH}/etc
+PI_DESTINATION_ETC_SHARED_DIR=${PI_DESTINATION_ETC_DIR}/PI
+PI_DESTINATION_ETC_LDSOCONF_DIR=${PI_DESTINATION_ETC_DIR}/ld.so.conf.d
+PI_DESTINATION_LIB_PATH=${PI_DESTINATION_PATH}/lib64
+PI_DESTINATION_LIB_PATH_OLD=${PI_DESTINATION_PATH}/lib
+PI_DESTINATION_INCLUDE_PATH=${PI_DESTINATION_PATH}/include
+PI_DESTINATION_GCS_TRANSLATOR_PATH=${PI_DESTINATION_PATH}/pi_gcs_translator
+
+PI_SYSTEM_ETC_PI_SHARED_DIR=/etc/PI
+PI_SYSTEM_ETC_LDSOCONF_DIR=/etc/ld.so.conf.d
+PI_SYSTEM_LOCAL_INCLUDE_PATH=/usr/local/include/PI
+PI_SYSTEM_LOCAL_LIB_PATH=/usr/local/lib
+PI_SYSTEM_LOCAL_LIB_PATH_PLATFORM_DEPENDEND=/usr/local/lib64
+
+if test $PI_CURRENT_PLATFORM_NAME = $PI_TARGET_PLATFORM_NAME
+then
+	if test -n "`find $PI_SOURCE_LOCAL_LIB_PATH_PLATFORM_DEPENDEND -maxdepth 0 -type d 1> /dev/null 2> /dev/null`"
+	then
+		PI_SOURCE_LOCAL_LIB_PATH=$PI_SOURCE_LOCAL_LIB_PATH_PLATFORM_DEPENDEND
+	fi
+else
+	PI_SOURCE_LOCAL_LIB_PATH=$PI_SOURCE_LOCAL_LIB_PATH_PLATFORM_DEPENDEND	
+fi
+
+if test $PI_TARGET_PLATFORM_NAME = "x86"
+then
+	if test -n "`find $PI_DESTINATION_LIB_PATH_OLD -maxdepth 0 -type d 1> /dev/null 2> /dev/null`"
+	then
+		PI_DESTINATION_LIB_PATH=$PI_DESTINATION_LIB_PATH_OLD
+	fi
+
+	PI_COMPONENT_LIB_NAME_PLATTFORM_SUFFIX=""
+fi
+
+PI_DEPENDENCIES_SCRIPT_NAME="DEPENDENCIES."`echo $0 | cut -f3 -d.`
+
+PI_PLATTFORM_ALL="all"
+PI_PLATTFORM_i686="i686"
+PI_PLATTFORM_x86_64="x86_64"
+PI_VER_MAJOR=`ls ${PI_SOURCE_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so* | cut -f4 -d.`
+PI_VER_MINOR=`ls ${PI_SOURCE_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so* | cut -f5 -d.`
+PI_VER_REVISION=`ls ${PI_SOURCE_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so* | cut -f6 -d.`
+PI_ALL=0
+PI_REMOVE=0
+PI_UPDATE=0
+PI_ANSWER=0
+PI_MAKE_SYMBOLIC_DLL_LINK=0
+PI_IGNOR_IF_INVALIDE_PLATFORM=0
+PI_FORCE_PLATTFORM=$PI_PLATTFORM_ALL
+
+
+PiMakeSharedEntery()
+{
+	if ! mkdir -p $PI_DESTINATION_ETC_SHARED_DIR 1> /dev/null
+	then
+		return 2
+	fi
+
+	if ! mkdir -p $PI_SYSTEM_ETC_PI_SHARED_DIR 1> /dev/null
+	then
+		return 2
+	fi
+
+	echo "$1" | cat >> ${PI_DESTINATION_ETC_SHARED_DIR}/${2}
+
+	ln -s ${PI_DESTINATION_ETC_SHARED_DIR}/${2} ${PI_SYSTEM_ETC_PI_SHARED_DIR}/${2} 1> /dev/null 2> /dev/null
+
+	return 0
+}
+
+PiRemoveSharedEntery()
+{
+	if find ${PI_DESTINATION_ETC_SHARED_DIR}/${2} 1> /dev/null 2> /dev/null
+	then
+		PI_TMP1=`grep -xn "$1" ${PI_DESTINATION_ETC_SHARED_DIR}/${2} | cut -f1 -d: | tail -n1`
+		if ! test -n "$PI_TMP1"
+		then
+			return 1
+		fi
+		head -n`expr $PI_TMP1 - 1` ${PI_DESTINATION_ETC_SHARED_DIR}/${2} > ${PI_DESTINATION_ETC_SHARED_DIR}/${2}_tmp
+		PI_TMP2=`wc -l ${PI_DESTINATION_ETC_SHARED_DIR}/${2} | cut -f1 -d' '`
+
+		if test $PI_TMP2 -gt $PI_TMP1
+		then
+			tail -`expr $PI_TMP2 - $PI_TMP1` ${PI_DESTINATION_ETC_SHARED_DIR}/${2}  | cat >> ${PI_DESTINATION_ETC_SHARED_DIR}/${2}_tmp
+		fi
+
+		cp ${PI_DESTINATION_ETC_SHARED_DIR}/${2}_tmp ${PI_DESTINATION_ETC_SHARED_DIR}/${2}
+		rm ${PI_DESTINATION_ETC_SHARED_DIR}/${2}_tmp
+		
+
+		PI_ANSWER=`cat ${PI_DESTINATION_ETC_SHARED_DIR}/${2} | wc -w`
+		if test $PI_ANSWER -eq 0
+		then
+			rm ${PI_SYSTEM_ETC_PI_SHARED_DIR}/${2}*  1> /dev/null 2> /dev/null
+			rm ${PI_DESTINATION_ETC_DIR}/${2}*  1> /dev/null 2> /dev/null
+			rm ${PI_DESTINATION_ETC_SHARED_DIR}/${2}*  1> /dev/null 2> /dev/null
+			rmdir -p ${PI_DESTINATION_ETC_SHARED_DIR}  1> /dev/null 2> /dev/null
+			rmdir -p ${PI_DESTINATION_ETC_DIR}  1> /dev/null 2> /dev/null
+			rmdir -p ${PI_SYSTEM_ETC_PI_SHARED_DIR}  1> /dev/null 2> /dev/null
+			return 1
+		fi
+
+		PI_TMP1=`grep -xn "$1" ${PI_DESTINATION_ETC_SHARED_DIR}/${2} | cut -f1 -d: | tail -n1`
+		if ! test -n "$PI_TMP1"
+		then
+			return 1
+		fi
+
+	else
+		return 1
+	fi
+	return 0
+}
+
+PiMakeLdConfigEntery()
+{
+	if ! test -d $PI_SYSTEM_ETC_LDSOCONF_DIR
+	then
+		return 2
+	fi
+
+	if ! mkdir -p $PI_DESTINATION_ETC_LDSOCONF_DIR 1> /dev/null
+	then
+		return 2
+	fi
+
+	if ! test -e ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}
+	then
+		echo "$1" | cat >> ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}
+	else
+		if test -z `grep -x "$1" ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}`
+		then
+			echo "$1" | cat >> ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}
+		fi
+	fi
+
+	ln -s ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2} ${PI_SYSTEM_ETC_LDSOCONF_DIR}/${2} 1> /dev/null 2> /dev/null
+	
+
+	return 0
+}
+
+PiRemoveLdConfigEntery()
+{
+	if find ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2} 1> /dev/null 2> /dev/null
+	then
+		if test -n "`find ${1}/*.so* 1> /dev/null 2> /dev/null`"
+		then
+			return 1
+		fi
+
+		PI_TMP1=`grep -xn "$1" ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2} | cut -f1 -d: | tail -n1`
+		if ! test -n "$PI_TMP1"
+		then
+			return 1
+		fi
+		head -n`expr $PI_TMP1 - 1` ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2} > ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}_tmp
+		PI_TMP2=`wc -l ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2} | cut -f1 -d' '`
+
+		if test $PI_TMP2 -gt $PI_TMP1
+		then
+			tail -`expr $PI_TMP2 - $PI_TMP1` ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}  | cat >> ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}_tmp
+		fi
+
+		cp ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}_tmp ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}
+		rm ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}_tmp
+		
+
+		PI_ANSWER=`cat ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2} | wc -w`
+		if test $PI_ANSWER -eq 0
+		then
+			rm ${PI_SYSTEM_ETC_LDSOCONF_DIR}/${2}*  1> /dev/null 2> /dev/null
+			rm ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2}*  1> /dev/null 2> /dev/null
+			rmdir -p ${PI_DESTINATION_ETC_LDSOCONF_DIR}  1> /dev/null 2> /dev/null
+			return 1
+		fi
+
+		PI_TMP1=`grep -xn "$1" ${PI_DESTINATION_ETC_LDSOCONF_DIR}/${2} | cut -f1 -d: | tail -n1`
+		if ! test -n "$PI_TMP1"
+		then
+			return 1
+		fi
+
+	else
+		return 1
+	fi
+	return 0
+}
+
+PiLibraryTransfer()
+{
+	# Install dpendency
+	PI_PARAMETER=" -a"
+	PI_DIR_COUNTER=1
+	PI_INSTALL_DIRS=`ls -F | grep / | cut -f1 -d/`
+	PI_INSTALL_PATHS=$PI_INSTALL_DIRS
+
+	if test -n "$PI_INSTALL_DIRS"
+	then
+		PI_INSTALL_DIRS=${PI_INSTALL_DIRS}" "
+	fi
+
+	if test -n "$PI_INSTALL_PATHS"
+	then
+		PI_INSTALL_PATHS=${PI_INSTALL_PATHS}" "
+	fi
+
+	PI_INSTALL_DIRS=${PI_INSTALL_DIRS}`cat "./"${PI_DEPENDENCIES_SCRIPT_NAME} | rev | cut -f1 -d/ | rev` 1> /dev/null 2> /dev/null
+	PI_INSTALL_PATHS=${PI_INSTALL_PATHS}`cat "./"${PI_DEPENDENCIES_SCRIPT_NAME}` 1> /dev/null 2> /dev/null
+
+	PI_CUR_INSTALL_DIR=`echo ${PI_INSTALL_DIRS} | cut -f${PI_DIR_COUNTER} -d' ' | tr -d '\n' | tr -d '\r'`
+	PI_CUR_INSTALL_PATH=`echo ${PI_INSTALL_PATHS} | cut -f${PI_DIR_COUNTER} -d' ' | tr -d '\n' | tr -d '\r'`
+
+	if test $PI_UPDATE -eq 1
+	then
+		PI_PARAMETER=" -u"${PI_PARAMETER}
+	fi
+
+	if test $PI_IGNOR_IF_INVALIDE_PLATFORM -eq 1
+	then
+		PI_PARAMETER=" -i"${PI_PARAMETER}
+	fi
+
+	if test $PI_FORCE_PLATTFORM != $PI_PLATTFORM_ALL
+	then
+		PI_PARAMETER=" --"${PI_FORCE_PLATTFORM}${PI_PARAMETER}
+	fi
+
+	while test -n "${PI_CUR_INSTALL_DIR}"
+	do
+		PI_CURRENT_PATH=`pwd`
+		cd "./${PI_CUR_INSTALL_PATH}" 1> /dev/null 2> /dev/null
+
+		./INSTALL.${PI_CUR_INSTALL_DIR}${PI_PARAMETER} 2> /dev/null
+		PI_ANSWER=$?
+
+		if test $PI_ANSWER -eq 1
+		then
+			cd "$PI_CURRENT_PATH" 1> /dev/null
+			return $PI_ANSWER
+		fi
+
+		cd "$PI_CURRENT_PATH" 1> /dev/null
+
+		PI_DIR_COUNTER=`expr ${PI_DIR_COUNTER} + 1`
+		PI_CUR_INSTALL_DIR=`echo ${PI_INSTALL_DIRS} | cut -s -f${PI_DIR_COUNTER} -d' ' | tr -d '\n' | tr -d '\r'`
+		PI_CUR_INSTALL_PATH=`echo ${PI_INSTALL_PATHS} | cut -s -f${PI_DIR_COUNTER} -d' ' | tr -d '\n' | tr -d '\r'`
+	done
+
+	if ! mkdir -p $PI_DESTINATION_LIB_PATH 1> /dev/null
+	then
+		return 2
+	fi
+
+	if ! mkdir -p $PI_DESTINATION_INCLUDE_PATH 1> /dev/null
+	then
+		return 2
+	fi
+
+	if ! mkdir -p $PI_DESTINATION_GCS_TRANSLATOR_PATH 1> /dev/null
+	then
+		return 2
+	fi
+
+	if ! mkdir -p $PI_SYSTEM_LOCAL_INCLUDE_PATH 1> /dev/null
+	then
+		return 2
+	fi
+
+	if ! mkdir -p $PI_SYSTEM_LOCAL_LIB_PATH 1> /dev/null
+	then
+		return 2
+	fi
+
+
+	# Install library
+	cp ./${PI_SOURCE_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so* ${PI_DESTINATION_LIB_PATH} 1> /dev/null 2> /dev/null
+	chmod a+rx ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so* 1> /dev/null 2> /dev/null
+	cp ./${PI_SOURCE_LIB_PATH}/${PI_COMPONENT_LIB_NAME}-*.a ${PI_DESTINATION_LIB_PATH} 1> /dev/null 2> /dev/null
+	chmod a+rx ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}-*.a 1> /dev/null 2> /dev/null
+	cp ./${PI_SOURCE_INCLUDE_PATH}/${PI_COMPONENT_LIB_HEADER_FILE_NAME} ${PI_DESTINATION_INCLUDE_PATH} 1> /dev/null 2> /dev/null
+	chmod a+r ${PI_DESTINATION_INCLUDE_PATH}/${PI_COMPONENT_LIB_HEADER_FILE_NAME} 1> /dev/null 2> /dev/null
+
+	ln -s -f ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so.${PI_VER_MAJOR}.${PI_VER_MINOR}.${PI_VER_REVISION} ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so 1> /dev/null 2> /dev/null
+	ln -s ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so ${PI_SYSTEM_LOCAL_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so 1> /dev/null 2> /dev/null
+	ln -s ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so ${PI_DESTINATION_GCS_TRANSLATOR_PATH}/${PI_COMPONENT_LIB_NAME}${PI_COMPONENT_LIB_NAME_PLATTFORM_SUFFIX}.so 1> /dev/null 2> /dev/null
+	ln -s ${PI_DESTINATION_GCS_TRANSLATOR_PATH}/${PI_COMPONENT_LIB_NAME}${PI_COMPONENT_LIB_NAME_PLATTFORM_SUFFIX}.so ${PI_DESTINATION_GCS_TRANSLATOR_PATH}/${PI_COMPONENT_LIB_NAME}.so  1> /dev/null 2> /dev/null
+
+	if test -e ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}-${PI_VER_MAJOR}.${PI_VER_MINOR}.${PI_VER_REVISION}.a
+	then
+		ln -s ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}-${PI_VER_MAJOR}.${PI_VER_MINOR}.${PI_VER_REVISION}.a ${PI_SYSTEM_LOCAL_LIB_PATH}/${PI_COMPONENT_LIB_NAME}-${PI_VER_MAJOR}.${PI_VER_MINOR}.${PI_VER_REVISION}.a 1> /dev/null 2> /dev/null
+	fi
+
+	if test $PI_MAKE_SYMBOLIC_DLL_LINK -gt 0
+	then
+		ln -s ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so ${PI_DESTINATION_GCS_TRANSLATOR_PATH}/${PI_COMPONENT_WIN_PSEUDO_NAME} 1> /dev/null 2> /dev/null
+	fi
+	
+	/sbin/ldconfig ${PI_DESTINATION_LIB_PATH}
+  
+	if test -n "${PI_COMPONENT_LIB_HEADER_FILE_NAME}"
+	then
+		ln -s ${PI_DESTINATION_INCLUDE_PATH}/${PI_COMPONENT_LIB_HEADER_FILE_NAME} ${PI_SYSTEM_LOCAL_INCLUDE_PATH}/${PI_COMPONENT_LIB_HEADER_FILE_NAME} 1> /dev/null 2> /dev/null
+	fi
+
+
+	# If a shared information file exists in the old PI file system structure,
+	# copy it to the new PI file system structure and modify the contents of the file.      
+	# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+	if test -e ${PI_SYSTEM_ETC_PI_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared
+	then
+		if ! test -L ${PI_SYSTEM_ETC_PI_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared
+		then
+			if ! mkdir -p $PI_DESTINATION_ETC_SHARED_DIR 1> /dev/null
+			then
+				return 2
+			fi
+
+			PI_TMP_LIB_PATH=`echo $PI_DESTINATION_LIB_PATH | sed 's/\//\\\\\//g'`
+			PI_TMP_GCS_TRANSLATOR_PATH=`echo $PI_DESTINATION_GCS_TRANSLATOR_PATH | sed 's/\//\\\\\//g'`
+
+			cat ${PI_SYSTEM_ETC_PI_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared | sed s/${PI_TMP_GCS_TRANSLATOR_PATH}/${PI_TMP_LIB_PATH}/g > ${PI_DESTINATION_ETC_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared
+
+			rm ${PI_SYSTEM_ETC_PI_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared  1> /dev/null 2> /dev/null
+			ln -s ${PI_DESTINATION_ETC_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared ${PI_SYSTEM_ETC_PI_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared 1> /dev/null 2> /dev/null
+		fi
+	fi
+
+	if test -e ${PI_DESTINATION_ETC_DIR}/${PI_COMPONENT_LIB_NAME}.shared
+	then
+		if ! test -L ${PI_DESTINATION_ETC_DIR}/${PI_COMPONENT_LIB_NAME}.shared
+		then
+			if ! mkdir -p $PI_DESTINATION_ETC_SHARED_DIR 1> /dev/null
+			then
+				return 2
+			fi
+
+			PI_TMP_LIB_PATH=`echo $PI_DESTINATION_LIB_PATH | sed 's/\//\\\\\//g'`
+			PI_TMP_GCS_TRANSLATOR_PATH=`echo $PI_DESTINATION_GCS_TRANSLATOR_PATH | sed 's/\//\\\\\//g'`
+
+			cat ${PI_DESTINATION_ETC_DIR}/${PI_COMPONENT_LIB_NAME}.shared | sed s/${PI_TMP_GCS_TRANSLATOR_PATH}/${PI_TMP_LIB_PATH}/g > ${PI_DESTINATION_ETC_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared
+
+			rm ${PI_DESTINATION_ETC_DIR}/${PI_COMPONENT_LIB_NAME}.shared  1> /dev/null 2> /dev/null
+			ln -s ${PI_DESTINATION_ETC_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared ${PI_DESTINATION_ETC_DIR}/${PI_COMPONENT_LIB_NAME}.shared 1> /dev/null 2> /dev/null
+		fi
+	fi
+	# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+	if test $PI_UPDATE -eq 0
+	then
+		PiMakeSharedEntery ${PI_DESTINATION_LIB_PATH} ${PI_COMPONENT_LIB_NAME}.shared
+	else
+		if ! find ${PI_DESTINATION_ETC_SHARED_DIR}/${PI_COMPONENT_LIB_NAME}.shared 1> /dev/null 2> /dev/null
+		then
+			PiMakeSharedEntery ${PI_DESTINATION_LIB_PATH} ${PI_COMPONENT_LIB_NAME}.shared
+		fi
+	fi
+
+	PiMakeLdConfigEntery ${PI_DESTINATION_GCS_TRANSLATOR_PATH} ${PI_COMPONENT_LD_CONF_NAME}
+
+	return 0
+}
+
+PiLibraryInstall()
+{
+	if test $PI_ALL -le 0
+	then
+		echo ""
+		echo "PI ${PI_PRODUCT_NAME} GCS LIBRARY"
+		echo ""
+	fi
+
+	if test `whoami` != "root"
+	then
+		echo "You have to be root to install the PI ${PI_PRODUCT_NAME} high level GCS library!"
+		echo "Please log in as root and restart this script"
+		echo ""
+		return 1
+	fi
+
+	if test $PI_ALL -gt 0
+	then
+		PiLibraryTransfer
+		return $?
+	fi
+
+	echo "The high level GCS ${PI_TARGET_PLATFORM_NAME} library ("${PI_COMPONENT_LIB_NAME}".*) will be copied to "${PI_DESTINATION_LIB_PATH}"."
+	echo ""
+	echo "To install the PI ${PI_PRODUCT_NAME} high level GCS library now press 'y'"
+	echo "To skip this option press 'n'"
+	echo "To quit the installation press 'q'"
+	echo ""
+
+	while true
+	do
+		if test $PI_UPDATE -eq 0
+		then
+			echo -n "Install the PI ${PI_PRODUCT_NAME} high level GCS library? [ynq]: "; read PI_ANSWER
+		else
+			echo -n "Update the PI ${PI_PRODUCT_NAME} high level GCS library? [ynq]: "; read PI_ANSWER
+		fi
+
+		case "$PI_ANSWER" in
+			'y'*)
+				PiLibraryTransfer
+				echo ""
+				return $?
+				break;;
+
+			'n'*)
+				echo ""
+				return 0
+				break;;
+
+			'q'*)
+				echo ""
+				return 1
+				break;;
+		esac	
+	done
+
+	return 0
+}
+
+
+PiLibraryRemove()
+{
+	# Remove library
+	if test $PI_MAKE_SYMBOLIC_DLL_LINK -gt 0
+	then
+		rm ${PI_DESTINATION_GCS_TRANSLATOR_PATH}/${PI_COMPONENT_WIN_PSEUDO_NAME} 1> /dev/null 2> /dev/null
+	fi
+
+	if ! PiRemoveSharedEntery ${PI_DESTINATION_LIB_PATH} ${PI_COMPONENT_LIB_NAME}.shared
+	then
+		rm ${PI_DESTINATION_GCS_TRANSLATOR_PATH}/${PI_COMPONENT_WIN_PSEUDO_NAME} 1> /dev/null 2> /dev/null
+		rm ${PI_DESTINATION_GCS_TRANSLATOR_PATH}/${PI_COMPONENT_LIB_NAME}${PI_COMPONENT_LIB_NAME_PLATTFORM_SUFFIX}.so 1> /dev/null 2> /dev/null
+		rm ${PI_DESTINATION_GCS_TRANSLATOR_PATH}/${PI_COMPONENT_LIB_NAME}.so 1> /dev/null 2> /dev/null
+
+		rm ${PI_SYSTEM_LOCAL_LIB_PATH}/${PI_COMPONENT_LIB_NAME}-*.a 1> /dev/null 2> /dev/null
+		rm ${PI_SYSTEM_LOCAL_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so* 1> /dev/null 2> /dev/null
+
+		rm ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}-*.a 1> /dev/null 2> /dev/null
+		rm ${PI_DESTINATION_LIB_PATH}/${PI_COMPONENT_LIB_NAME}.so* 1> /dev/null 2> /dev/null
+
+		rm ${PI_SYSTEM_LOCAL_INCLUDE_PATH}/${PI_COMPONENT_LIB_HEADER_FILE_NAME} 1> /dev/null 2> /dev/null
+		rm ${PI_DESTINATION_INCLUDE_PATH}/${PI_COMPONENT_LIB_HEADER_FILE_NAME} 1> /dev/null 2> /dev/null
+
+		rmdir -p ${PI_SYSTEM_LOCAL_INCLUDE_PATH} 1> /dev/null 2> /dev/null
+		rmdir -p ${PI_DESTINATION_LIB_PATH}  1> /dev/null 2> /dev/null
+		rmdir -p ${PI_DESTINATION_INCLUDE_PATH}  1> /dev/null 2> /dev/null
+		rmdir -p ${PI_DESTINATION_GCS_TRANSLATOR_PATH} 1> /dev/null 2> /dev/null
+		rmdir -p ${PI_DESTINATION_PATH} 1> /dev/null 2> /dev/null
+	
+		# Remove the conf-File
+		PiRemoveLdConfigEntery ${PI_DESTINATION_GCS_TRANSLATOR_PATH} ${PI_COMPONENT_LD_CONF_NAME}
+	fi
+
+
+
+	# Remove dpendencys
+	PI_DIR_COUNTER=1
+	PI_INSTALL_DIRS=`ls -F | grep / | cut -f1 -d/`
+	PI_INSTALL_PATHS=$PI_INSTALL_DIRS
+	PI_PARAMETER=" -r -a"
+
+	if test -n "$PI_INSTALL_DIRS"
+	then
+		PI_INSTALL_DIRS=${PI_INSTALL_DIRS}" "
+	fi
+
+	if test -n "$PI_INSTALL_PATHS"
+	then
+		PI_INSTALL_PATHS=${PI_INSTALL_PATHS}" "
+	fi
+
+	PI_INSTALL_DIRS=${PI_INSTALL_DIRS}`cat "./"${PI_DEPENDENCIES_SCRIPT_NAME} | rev | cut -f1 -d/ | rev` 1> /dev/null 2> /dev/null
+	PI_INSTALL_PATHS=${PI_INSTALL_PATHS}`cat "./"${PI_DEPENDENCIES_SCRIPT_NAME}` 1> /dev/null 2> /dev/null
+
+	PI_CUR_INSTALL_DIR=`echo ${PI_INSTALL_DIRS} | cut -f${PI_DIR_COUNTER} -d' ' | tr -d '\n' | tr -d '\r'`
+	PI_CUR_INSTALL_PATH=`echo ${PI_INSTALL_PATHS} | cut -f${PI_DIR_COUNTER} -d' ' | tr -d '\n' | tr -d '\r'`
+
+	if test $PI_FORCE_PLATTFORM != $PI_PLATTFORM_ALL
+	then
+		PI_PARAMETER=" --"${PI_FORCE_PLATTFORM}${PI_PARAMETER}
+	fi
+
+	while test -n "${PI_CUR_INSTALL_DIR}"
+	do
+		PI_CURRENT_PATH=`pwd`
+		cd "./${PI_CUR_INSTALL_PATH}" 1> /dev/null 2> /dev/null
+
+		./INSTALL.${PI_CUR_INSTALL_DIR}${PI_PARAMETER} 2> /dev/null
+
+		cd "$PI_CURRENT_PATH" 1> /dev/null
+
+		PI_DIR_COUNTER=`expr ${PI_DIR_COUNTER} + 1`
+		PI_CUR_INSTALL_DIR=`echo ${PI_INSTALL_DIRS} | cut -s -f${PI_DIR_COUNTER} -d' ' | tr -d '\n' | tr -d '\r'`
+		PI_CUR_INSTALL_PATH=`echo ${PI_INSTALL_PATHS} | cut -s -f${PI_DIR_COUNTER} -d' ' | tr -d '\n' | tr -d '\r'`
+	done
+
+	return 0
+}
+
+PiLibraryUninstall()
+{
+	if test $PI_ALL -le 0
+	then
+		echo ""
+		echo "PI ${PI_PRODUCT_NAME} GCS LIBRARY"
+		echo ""
+	fi
+
+	if test `whoami` != "root"
+	then
+		echo "You have to be root to uninstall the PI ${PI_PRODUCT_NAME} high level GCS library!"
+		echo "Please log in as root and restart this script"
+		echo ""
+		return 1
+	fi
+
+	if test $PI_ALL -gt 0
+	then
+		PiLibraryRemove
+		return $?
+	fi
+
+	echo ""
+	echo "To uninstall the PI ${PI_PRODUCT_NAME} high level GCS library now press 'y'"
+	echo "To skip this option press 'n'"
+	echo "To quit the installation press 'q'"
+	echo ""
+
+	while true
+	do
+		echo -n "Uninstall the PI ${PI_PRODUCT_NAME} high level GCS library? [ynq]: "; read PI_ANSWER
+		case "$PI_ANSWER" in
+			'y'*)
+				PiLibraryRemove
+				echo ""
+				return $?
+				break;;
+
+			'n'*)
+				echo ""
+				return 0
+				break;;
+
+			'q'*)
+				echo ""
+				return 1
+				break;;
+		esac	
+	done
+
+	return 0
+}
+
+
+
+PiInstallComponents()
+{
+	PiLibraryInstall
+	PI_ANSWER=$?
+	if test $PI_ANSWER -gt 1
+	then
+		PiLibraryRemove
+	fi
+
+	return $PI_ANSWER
+}
+
+
+PiUninstallComponents()
+{
+	PiLibraryUninstall
+	return $?
+}
+
+
+while test $# -gt 0
+do
+	case "$1" in
+		-r | --remove)
+			PI_REMOVE=1
+			shift;;
+
+		-a | --all)
+			PI_ALL=1
+			shift;;
+
+		-u | --update)
+			PI_UPDATE=1
+			shift;;
+
+		-l | --link)
+			PI_MAKE_SYMBOLIC_DLL_LINK=1
+			shift;;
+
+		-i | --ignor_platform)
+			PI_IGNOR_IF_INVALIDE_PLATFORM=1
+			shift;;
+
+		--i686)
+			PI_FORCE_PLATTFORM=$PI_PLATTFORM_i686
+			shift;;
+
+		--x86_64)
+			PI_FORCE_PLATTFORM=$PI_PLATTFORM_x86_64
+			shift;;
+
+		-h | --help)
+			echo ""
+			echo "INSTALL.$PI_COMPONENT_LIB_NAME [-r | --remove] [-a | --all]"
+			echo "INSTALL.$PI_COMPONENT_LIB_NAME [-h | --help]"
+			echo ""
+			echo ""
+			echo "Description:"
+			echo "	Installs the PI ${PI_PRODUCT_NAME} high level GCS library."
+			echo ""
+			echo "	-r, --remove"
+			echo "		removes the PI ${PI_PRODUCT_NAME} high level GCS library."
+			echo ""
+			echo "	-a, --all"
+			echo "		installs, removes or updates the PI ${PI_PRODUCT_NAME} high level GCS library without selection."
+			echo ""
+			echo "	-u, --update"
+			echo "		updates the PI ${PI_PRODUCT_NAME} high level GCS library."
+			echo ""
+			echo "	-l, --link"
+			echo "		makes a symbolic link in the ${PI_DESTINATION_GCS_TRANSLATOR_PATH} directory which is required by the PI GCS LabVIEW drivers."
+			echo ""
+			echo "	-i, --ignor_platform"
+			echo "		install even if the target platform "$PI_TARGET_PLATFORM_NAME" is not compatible with the current platform "$PI_CURRENT_PLATFORM_NAME"."
+			echo ""
+			echo "	--i686"
+			echo "		Only install or remove dependencies for ${PI_FORCE_PLATTFORM=$PI_PLATTFORM_i686} plattforms."
+			echo ""
+			echo "	--x86_64"
+			echo "		Only install or remove dependencies for ${PI_FORCE_PLATTFORM=$PI_PLATTFORM_x86_64} plattforms."
+			echo ""
+			echo "	-h, --help"
+			echo "		displays this help."
+			echo ""
+			exit 0;;
+
+		*)
+			shift;;
+	esac
+done
+
+if test $PI_FORCE_PLATTFORM != $PI_PLATTFORM_ALL
+then
+	if test $PI_FORCE_PLATTFORM != $PI_PLATTFORM_x86_64
+	then
+		exit 0
+	fi
+fi
+
+if test $PI_CURRENT_PLATFORM_NAME != $PI_TARGET_PLATFORM_NAME
+then
+	if test $PI_IGNOR_IF_INVALIDE_PLATFORM -gt 0
+	then
+		exit 0
+	else
+		echo "Sorry, but it's not possible to install the PI ${PI_PRODUCT_NAME} high level GCS library"
+		echo "on a "$PI_CURRENT_PLATFORM_NAME" platform!"
+		echo ""
+		exit 0
+	fi
+fi
+
+#When installing the x86_64 version only x86_64 dependecies shall be installed.
+PI_FORCE_PLATTFORM=$PI_PLATTFORM_x86_64
+
+if test $PI_REMOVE -gt 0
+then
+	PiUninstallComponents
+	PI_ANSWER=$?
+else
+	PiInstallComponents
+	PI_ANSWER=$?
+fi
+
+exit $PI_ANSWER
