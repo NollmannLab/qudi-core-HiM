@@ -4,6 +4,12 @@ from pipython import GCSDevice
 with GCSDevice('C-863') as pidevice:
     pidevice.ConnectUSB(serialnum='0019550121')
     print(pidevice.qIDN().strip())
+    
+```python
+with GCSDevice('C-863') as pidevice:
+pidevice.ConnectRS232(comport='/dev/ttyUSB0', baudrate=9600)
+print(pidevice.qIDN().strip())
+```
 
 # in fact, the USB connection is interpreted on linux as a COM port -
 
