@@ -135,15 +135,15 @@ class FluidicsRobotLogic(LogicBase):
 
     Example configuration::
 
-        positioning_logic:
-          module.Class: 'logic.positioning_logic.PositioningLogic'
-          connect:
-            stage: 'pi_pipetting_robot'
-          options:
-            movement_poll_interval: 0.5
+    pipetting_robot_logic:
+        module.Class: 'fluidics_robot_logic.FluidicsRobotLogic'
+        connect:
+            robot: 'dummy_pipetting_robot'
+        options:
+            movement_poll_interval: 0.5  # is s - to probe the stage position
     """
     # declare connectors
-    robot = Connector(interface='MultiAxisStageInterface', name='robot')
+    robot = Connector(interface='PipettingRobotInterface', name='robot')
 
     # config options
     poll_interval = ConfigOption('movement_poll_interval', 0.5, missing='warn')
@@ -164,7 +164,7 @@ class FluidicsRobotLogic(LogicBase):
     second_axis_label = None
     third_axis_label = None
     z_safety_pos = 0
-    num_probes = 0
+    max_num_probes = 0
     target_position = 0  # overwritten when movement is started using the start_move_to_target method  (target is the probe number)
 
     # attributes for actions
@@ -174,11 +174,6 @@ class FluidicsRobotLogic(LogicBase):
     moving = False
     origin = None
     _movement_id = 0
-
-    delta_x = 14.9  # in mm # to be defined by config later
-    delta_y = 14.9  # in mm # to be defined by config later
-    delta_r = -20  # in mm # to be defined by config later
-    delta_phi = -10  # in degree # to be defined by config later
 
     _probe_grid_dict = {}  # mapping of the probe numbers to their coordinates on the grid  {1: (0, 0), ...}
     _probe_xy_position_dict = {}  # mapping of the physical x-y or r-phi positions of the probes {(12.0, 10.0): 1, ..}}
@@ -234,6 +229,7 @@ class FluidicsRobotLogic(LogicBase):
         self.second_axis_label = grid_properties['axis_2']
         self.third_axis_label = grid_properties['axis_3']
         self.z_safety_pos = grid_properties['z_safety_pos']
+        self. max_num_probes = grid_properties['max_number_tubes']
 
     def get_robot_parameters(self):
         """Return pipetting-robot configuration parameters.This function is called from the gui."""
@@ -261,57 +257,11 @@ class FluidicsRobotLogic(LogicBase):
         self.sigOriginDefined.emit()
 
     def map_probe_number_to_grid_coordinates(self):
-        """ For a cartesian grid, this method generates a mapping of probe positions to coordinates on a
-        serpentine grid (just grid points, no metric coordinates):
-        1: (0, 0), 2: (0, 1), 3: (0, 2), etc.. values in (x, y) order, y being the index that varies rapidly.
-
-        For a polar grid, this method generates a mapping of probe positions to coordinates on on a grid using
-        using polar coordinates
-        1: (0, 0), 2: (1, 0), 3: (2, 0), 4: (0, 1), 5: (1, 1), .. etc. Values in (r, phi) order, r varying rapidly.
+        """ Generate a mapping of the probes based on the coordinate system used for the grid.
 
         :return dict coord_dict: dictionary mapping the probe position to the corresponding grid position
         """
-        if self.grid == 'cartesian':  # for RAMM setup
-            num_x = 10  # number of positions in x direction
-            num_y = 10  # number of positions in y direction
-            self.num_probes = num_x * num_y
-            # create the coordinate grid
-            list_even = [(x, y) for x in range(num_x) for y in range(num_y) if x % 2 == 0]
-            list_odd = [(x, y) for x in range(num_x) for y in reversed(range(num_y)) if x % 2 != 0]
-            list_all = list_even + list_odd
-            coords_list = sorted(list_all, key=self.sort_first)
-
-            # associate a grid point to each probe position
-            coord_dict = {}
-            for key in range(self.num_probes):
-                coord_dict[key+1] = coords_list[key]
-
-        elif self.grid == 'polar':  # for Airyscan setup
-            num_r = 3
-            num_phi = 36
-            self.num_probes = num_r * num_phi
-
-            # coords_list = [(x, y) for y in range(0, -360, -10) for x in [40, 20, 0]]  # this would directly define the metric coordinates
-            coords_list = [(x, y) for y in range(num_phi) for x in range(num_r)]
-
-            coord_dict = {}
-            for key in range(self.num_probes):
-                coord_dict[key+1] = coords_list[key]
-
-        else:
-            coord_dict = {}
-            self.log.warning('Your grid type is currently not covered.')
-
-        return coord_dict
-
-    @staticmethod
-    def sort_first(val):
-        """ Helper function for sorting a list of tuples by the first element of each tuple,
-        used for setting up the serpentine grid
-
-        :return: the first element of value (in the context here, value is a 2dim tuple (x, y))
-        """
-        return val[0]
+        return self._robot.map_probe_number_to_grid_coordinates()
 
     def map_xy_position_to_probe_number(self):
         """ This method calculates the in-plane coordinates given the metrics of the respective setup
@@ -321,28 +271,7 @@ class FluidicsRobotLogic(LogicBase):
 
         This dictionary serves as look-up-table in the fluidics gui module to check if the stage is currently at a probe position.
         """
-        probe_xy_position_dict = {}
-        if self.grid == 'cartesian':
-            for key in self._probe_grid_dict:
-                x_pos = self._probe_grid_dict[key][0] * self.delta_x + self.origin[0] + self._probe_grid_dict[key][1] * -0.11
-                y_pos = self._probe_grid_dict[key][1] * self.delta_y + self.origin[1] + self._probe_grid_dict[key][0] * -0.055
-                position = (x_pos, y_pos)
-                probe_xy_position_dict[key] = position
-
-        elif self.grid == 'polar':
-            for key in self._probe_grid_dict:
-                r_pos = self._probe_grid_dict[key][0] * self.delta_r + self.origin[0]
-                phi_pos = self._probe_grid_dict[key][1] * self.delta_phi + self.origin[1]
-                position = (r_pos, phi_pos)
-                probe_xy_position_dict[key] = position
-
-        else:
-            self.log.warning('Your grid type is currently not covered.')
-
-        # invert the keys and values in the dictionary because we want to access the target position by the key
-        inv_dict = dict((v, k) for k, v in probe_xy_position_dict.items())
-
-        return inv_dict
+        return self._robot.map_xy_position_to_probe_number(self._probe_grid_dict, self.origin)
 
     def get_coordinates(self, target):
         """ This method returns the (x, y) grid coordinates associated to the target position
@@ -437,7 +366,7 @@ class FluidicsRobotLogic(LogicBase):
         if target_position not in self._probe_grid_dict:
             self.log.warning(
                 f'Probe target {target_position} is not available. '
-                f'Valid targets are 1 to {self.num_probes}.'
+                f'Valid targets are 1 to {self.max_num_probes}.'
             )
             return
 

@@ -91,17 +91,12 @@ class FluidicsGUI(GuiBase):
 
     Example config for copy-paste:
 
-    Fluidics Control:
+    fluidics_gui:
         module.Class: 'fluidics.fluidics_gui.FluidicsGUI'
-        pos1_x_default: 12.0
-        pos1_y_default: 4.5
-        pos1_z_default: 89.0
-        exp_setup: 'RAMM'  # or 'Airyscan'
         connect:
-            valve_logic: 'valve_logic'
-            flowcontrol_logic: 'flowcontrol_logic'
-            # Optional while stage/positioning logic is unavailable:
-            # positioning_logic: 'positioning_logic'
+            valve_logic: 'fluidics_valve_logic'
+            flowcontrol_logic: 'fluidics_flow_logic'
+            pipetting_logic: 'pipetting_robot_logic'
     """
 
     # connector to logic modules
@@ -356,8 +351,7 @@ class FluidicsGUI(GuiBase):
         self._mw.z_axis_position_DSpinBox.setMinimum(z_min)
         self._mw.z_axis_position_DSpinBox.setMaximum(z_max)
 
-        probe_max = self._pipetting_robot_logic.num_probes
-        self._mw.target_probe_position_SpinBox.setMaximum(probe_max)
+        self._mw.target_probe_position_SpinBox.setMaximum(self.max_number_tubes)
 
         # toolbar actions
         self._mw.move_stage_Action.triggered.connect(self.move_stage_clicked)
@@ -451,7 +445,6 @@ class FluidicsGUI(GuiBase):
         self.pos1_x_default = parameters['pos1_x_default']
         self.pos1_y_default = parameters['pos1_y_default']
         self.pos1_z_default = parameters['pos1_z_default']
-
         self.exp_setup = parameters['exp_setup']
         self.tube_types = parameters['tube_types']
         self.max_number_tubes = parameters['max_number_tubes']
