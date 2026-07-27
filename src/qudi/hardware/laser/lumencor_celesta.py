@@ -30,22 +30,20 @@ class LumencorCelesta(Base):
   celesta:
     module.Class: 'laser.lumencor_celesta.LumencorCelesta'
     options:
-        ip: '192.168.201.200'
-        wavelengths :
-            - "405 nm"
-            - "477 nm"
-            - "546 nm"
-            - "638 nm"
-            - "750 nm"
+      ip: '192.168.201.200'
+      wavelengths:
+        - "405 nm"
+        - "446 nm"
+        - "477 nm"
+        - "520 nm"
+        - "546 nm"
+        - "638 nm"
+        - "750 nm"
     """
 
     # config options
     _ip = ConfigOption('ip', missing='error')
     _wavelengths = ConfigOption('wavelengths', missing='error')
-
-    # def __init__(self, config, **kwargs):
-    #     super().__init__(config=config, **kwargs)
-    #     self.laser_lines = {}
 
     def on_activate(self):
         """ Initialization: test whether the celesta is connected
@@ -183,22 +181,22 @@ class LumencorCelesta(Base):
     def set_intensity_selected_laser_lines(self, wavelength, intensity):
         """ Set laser line intensity to a given value
 
-            wavelength : array of string - indicate the selected laser line
-            intensity : array of int - indicate the laser power (in per thousand)
+            wavelength : array of string - indicate the selected laser line. For example ['405 nm']
+            intensity : array of int - indicate the laser power (in per thousand). For example [100]
         """
         laser_lines_intensity = self.get_laserline_intensity()
 
         for n in range(len(wavelength)):
             channel_wavelength = wavelength[n]
             channel_intensity = intensity[n]
-            if self.laser_check[channel_wavelength]:
-                line = self.laser_lines[channel_wavelength]
+            if channel_wavelength in self._wavelengths:
+                line = self._wavelengths.index(channel_wavelength)
                 laser_lines_intensity[line] = channel_intensity
 
         self.set_intensity_all_laser_lines(laser_lines_intensity)
 
     def set_intensity_all_laser_lines(self, intensity):
-        """ Set the intensity of all laser lines at oonce
+        """ Set the intensity of all laser lines at once
 
             intensity : array of int - indicate the laser power (in per thousand)
         """
@@ -216,8 +214,8 @@ class LumencorCelesta(Base):
         for n in range(len(wavelength)):
             channel_wavelength = wavelength[n]
             channel_state = state[n]
-            if self.laser_check[channel_wavelength]:
-                line = self.laser_lines[channel_wavelength]
+            if channel_wavelength in self._wavelengths:
+                line = self._wavelengths.index(channel_wavelength)
                 laser_lines_state[line] = channel_state
 
         self.set_state_all_laser_lines(laser_lines_state)
