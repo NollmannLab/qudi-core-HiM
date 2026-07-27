@@ -19,6 +19,7 @@ import numpy as np
 import serial
 from time import sleep, time
 import re
+from typing import Dict, List, Optional
 
 from qudi.core.configoption import ConfigOption
 from qudi.interface.multi_axis_stage_interface import MultiAxisStageInterface
@@ -57,7 +58,7 @@ class MS2000(MultiAxisStageInterface):
     _led_mode = "Internal"
 
     # attributes
-    _conversion_factor = 10.0  # user will send positions in um, stage uses 0.1 um
+    _position_conversion_factor = 10.0  # user will send positions in um, stage uses 0.1 um
     _velocity_conversion_factor = 1000.0  # interface uses um/s, stage uses mm/s
     _timeout = 30
     axis_list = None
@@ -130,8 +131,7 @@ class MS2000(MultiAxisStageInterface):
     # Motor interface functions
     # ----------------------------------------------------------------------------------------------------------------------
 
-    @property
-    def get_constraints(self):
+    def get_constraints(self) -> Dict[str, dict]:
         """ Retrieve the hardware constraints from the motor device. ASI Stage has no fixed pos_min and pos_max due to
         variable home position.
         @return dict constraints
@@ -219,7 +219,7 @@ class MS2000(MultiAxisStageInterface):
         cmd = "\\r"
         return self.write(cmd)
 
-    def get_pos(self, param_list=None):
+    def get_pos(self, param_list: Optional[List[str]] = None) -> Dict[str, float]:
         """ Gets current position of the stage.
 
         :param list param_list: optional, if a specific position of an axis
@@ -235,7 +235,7 @@ class MS2000(MultiAxisStageInterface):
             pos[axis_label] = controller_position / self._position_conversion_factor
         return pos
 
-    def get_status(self, param_list=None):
+    def get_status(self, param_list: Optional[List[str]] = None) -> Dict[str, bool]:
         """ Queries if any motors are still busy moving following a serial command.
 
         :param list param_list: optional, if a specific status of an axis
@@ -258,7 +258,7 @@ class MS2000(MultiAxisStageInterface):
 
         return {axis_label: on_target for axis_label in selected_axes}
 
-    def calibrate(self, param_list=None):
+    def calibrate(self, param_list: Optional[List[str]] = None) -> int:
         # to be defined what should be done here: ALIGN, ZEROING, HOMING ?
         """ Performs self-calibration of the axis motor drive circuit.
         The ASI ``AA`` command aligns the motor drive circuit; it does not home
@@ -276,7 +276,7 @@ class MS2000(MultiAxisStageInterface):
             calibrated = self.write(cmd) or calibrated
         return 0 if calibrated else -1
 
-    def get_velocity(self, param_list=None):
+    def get_velocity(self, param_list: Optional[List[str]] = None) -> Dict[str, float]:
         """ Gets the current velocity of the translation stage for the specified axes or all axes.
 
         :param list param_list: list param_list: optional, if a specific status of an axis
@@ -448,7 +448,7 @@ class MS2000(MultiAxisStageInterface):
         self.log.warning(f'The ASI stage was unable to execute command: {command!r}')
         return False
 
-    def _selected_axes(self, param_list=None):
+    def _selected_axes(self, param_list: Optional[List[str]] = None,) -> List[str]:
         """Return configured axes selected by an optional axis list."""
         if not param_list:
             return list(self.axis_list)
