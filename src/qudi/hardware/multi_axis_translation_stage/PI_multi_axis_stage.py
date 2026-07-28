@@ -20,6 +20,8 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 from time import sleep, time
+from typing import Dict, List, Optional
+from pathlib import Path
 
 import numpy as np
 from pipython import GCSDevice, pitools
@@ -41,7 +43,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
     linear units are assumed to be millimetres and are converted internally.
 
     The module only owns PI communication and generic stage operations. It does
-    not know which axis is the pipetting-robot safety axis and it never parks
+    not know which axis is the pipetting-robot safety axis, and it never parks
     the robot automatically. Those responsibilities belong to the pipetting
     robot interfuse.
 
@@ -110,8 +112,8 @@ class PIMultiAxisStage(MultiAxisStageInterface):
 
     # Connection configuration.
     _connection_mode = ConfigOption('connection_mode', missing='error')
-    _daisychain_description = ConfigOption('daisychain_description', None)
-    _master_axis = ConfigOption('master_axis', None)
+    _daisychain_description = ConfigOption('daisychain_description', default=None)
+    _master_axis = ConfigOption('master_axis', default=None)
 
     # Logical-axis mapping. See the class docstring for the supported fields.
     _axes_config = ConfigOption('axes', missing='error')
@@ -153,8 +155,10 @@ class PIMultiAxisStage(MultiAxisStageInterface):
                 controller_name = self._axes_config[axis_label]['controller_name']
                 self._devices[axis_label] = GCSDevice(controller_name)
 
-            if self._connection_mode == 'daisychain':
+            if self._connection_mode == 'daisychain_windows':
                 self._connect_daisychain()
+            elif self._connection_mode == 'individual_linux':
+                self._connect_individually_linux()
             else:
                 self._connect_individually()
 
@@ -324,7 +328,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
                 self.log.error(f'Could not abort PI axis {axis_label!r}: {error}')
         return success
 
-    def get_pos(self, param_list=None):
+    def get_pos(self, param_list: Optional[List[str]] = None,) -> Dict[str, float]:
         """Get current positions of selected axes.
 
         :param list param_list: Optional logical axis labels. All configured
@@ -343,7 +347,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
             )
         return positions
 
-    def get_status(self, param_list=None):
+    def get_status(self, param_list: Optional[List[str]] = None,) -> Dict[str, bool]:
         """Get on-target states of selected axes.
 
         :param list param_list: Optional logical axis labels. All configured
@@ -358,7 +362,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
             status[axis_label] = bool(device.qONT(device_axis)[device_axis])
         return status
 
-    def calibrate(self, param_list=None):
+    def calibrate(self, param_list: Optional[List[str]] = None,) -> int:
         """Reference selected axes using their configured PI reference modes.
 
         The generic hardware follows the requested/configured axis order and
@@ -393,14 +397,17 @@ class PIMultiAxisStage(MultiAxisStageInterface):
                 ron_command = getattr(device, 'RON', None)
                 if callable(ron_command):
                     ron_command(device_axis, values=1)
+                else:
+                    self.log.warning(f"RON command not available for {device}")
 
                 reference_command = getattr(device, reference_mode, None)
                 if not callable(reference_command):
                     raise RuntimeError(
-                        f'Controller does not support reference command {reference_mode!r}.'
+                        f'Controller {device} does not support reference command {reference_mode!r}.'
                     )
+                else:
+                    reference_command(device_axis)
 
-                reference_command(device_axis)
                 if not self._wait_for_axes([axis_label]):
                     raise TimeoutError(
                         f'Referencing PI axis {axis_label!r} exceeded {self._timeout} s.'
@@ -412,7 +419,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
 
         return 0 if success else -1
 
-    def get_velocity(self, param_list=None):
+    def get_velocity(self, param_list: Optional[List[str]] = None,) -> Dict[str, float]:
         """Get current velocities of selected axes.
 
         :param list param_list: Optional logical axis labels. All configured
@@ -479,9 +486,9 @@ class PIMultiAxisStage(MultiAxisStageInterface):
 
     def _validate_configuration(self):
         """Validate connection and per-axis configuration."""
-        if self._connection_mode not in ('daisychain', 'individual'):
+        if self._connection_mode not in ('daisychain_windows', 'individual_windows', 'individual_linux'):
             raise ValueError(
-                "connection_mode must be either 'daisychain' or 'individual'."
+                "connection_mode must be either 'daisychain_windows', 'individual_windows' or 'individual_linux'."
             )
 
         if not isinstance(self._axes_config, dict):
@@ -516,7 +523,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
                 reference_mode = str(reference_mode).upper()
             self._reference_modes[axis_label] = reference_mode
 
-            if self._connection_mode == 'daisychain':
+            if self._connection_mode == 'daisychain_windows':
                 if config.get('daisychain_id') is None:
                     raise ValueError(f'Axis {axis_label!r} requires daisychain_id.')
                 daisychain_ids.append(config['daisychain_id'])
@@ -545,21 +552,39 @@ class PIMultiAxisStage(MultiAxisStageInterface):
             )
 
     def _connect_individually(self):
-        """Open one USB connection per configured controller."""
+        """Open one USB connection per configured controller. This method is used on WINDOWS """
         for axis_label in self.axis_list:
             serialnumber = self._axes_config[axis_label]['serialnumber']
             self._devices[axis_label].ConnectUSB(serialnum=serialnumber)
 
+    def _connect_individually_linux(self):
+        """Open one USB connection per configured controller. This method is used on LINUX since USB ports are
+         emulated as COM ports """
+        for axis_label in self.axis_list:
+            serial_path = self._axes_config[axis_label]['serialnumber']
+            serial_number = self.resolve_linux_serial_port(serial_path)
+            self._devices[axis_label].ConnectRS232(comport=serial_number, baudrate=9600)
+
+    @staticmethod
+    def resolve_linux_serial_port(by_id_path: str) -> str:
+        port_path = Path(by_id_path)
+
+        if not port_path.exists():
+            raise FileNotFoundError(f'Serial device not found: {by_id_path}')
+
+        resolved_path = port_path.resolve()
+
+        if not resolved_path.name.startswith(('ttyUSB', 'ttyACM')):
+            raise RuntimeError(
+                f'Unexpected serial-device target: {resolved_path}'
+            )
+
+        return str(resolved_path)
+
     def _initialize_axis(self, axis_label):
         """Initialize one PI stage/controller without referencing it."""
-        config = self._axes_config[axis_label]
         device = self._devices[axis_label]
-        stage_name = config.get('stage_name')
-
-        if stage_name:
-            pitools.startup(device, stages=stage_name, refmodes=None)
-        else:
-            pitools.startup(device, refmodes=None)
+        pitools.startup(device, refmodes=None)
 
     def _resolve_device_axis(self, axis_label):
         """Resolve the PI controller axis associated with one logical label."""
@@ -584,7 +609,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
             f'{axis_label!r} is not among {available_axes}.'
         )
 
-    def _selected_axes(self, param_list=None):
+    def _selected_axes(self,  param_list: Optional[List[str]] = None) -> List[str]:
         """Return valid selected axes while warning about unknown labels."""
         if not param_list:
             return list(self.axis_list)
@@ -656,7 +681,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
         if not self._devices:
             return
 
-        if self._connection_mode == 'daisychain':
+        if self._connection_mode == 'daisychain_windows':
             # Close subordinate GCSDevice connections before closing the shared
             # chain through the configured master device.
             for axis_label, device in self._devices.items():

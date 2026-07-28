@@ -18,6 +18,7 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
+from typing import Dict, List, Optional
 from qudi.core.configoption import ConfigOption
 from qudi.core.connector import Connector
 from qudi.interface.pipetting_robot_interface import PipettingRobotInterface
@@ -335,7 +336,7 @@ class PipettingRobot(PipettingRobotInterface):
         """
         return self._motor.abort()
 
-    def get_pos(self, param_list=None):
+    def get_pos(self, param_list: Optional[List[str]] = None,) -> Dict[str, float]:
         """Return current positions of selected robot axes.
 
         :param list param_list: Optional robot axis labels. All axes are returned
@@ -345,7 +346,7 @@ class PipettingRobot(PipettingRobotInterface):
         """
         return self._motor.get_pos(self._selected_axes(param_list))
 
-    def get_status(self, param_list=None):
+    def get_status(self, param_list: Optional[List[str]] = None,) -> Dict[str, bool]:
         """Return on-target states of selected robot axes.
 
         :param list param_list: Optional robot axis labels. All axes are returned
@@ -355,7 +356,7 @@ class PipettingRobot(PipettingRobotInterface):
         """
         return self._motor.get_status(self._selected_axes(param_list))
 
-    def calibrate(self, param_list=None):
+    def calibrate(self, param_list: Optional[List[str]] = None,) -> int:
         """Calibrate selected robot axes in a safe order.
 
         When all robot axes are requested, Z is calibrated first and must become
@@ -385,7 +386,7 @@ class PipettingRobot(PipettingRobotInterface):
                 return -1
         return 0
 
-    def get_velocity(self, param_list=None):
+    def get_velocity(self, param_list: Optional[List[str]] = None,) -> Dict[str, float]:
         """Return velocities of selected robot axes.
 
         :param list param_list: Optional robot axis labels. All axes are returned
@@ -457,7 +458,7 @@ class PipettingRobot(PipettingRobotInterface):
     # Helper functions
     # ------------------------------------------------------------------------------------------------------------------
 
-    def _selected_axes(self, param_list=None):
+    def _selected_axes(self, param_list: Optional[List[str]] = None) -> List[str]:
         """Validate and return selected robot axes in requested order."""
         if not param_list:
             return list(self.axis_list)
