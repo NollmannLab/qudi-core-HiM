@@ -11,7 +11,7 @@ This module intentionally contains only low-level DAQ operations:
 - read and write scalar values
 
 Higher-level experiment behavior such as laser control, piezo motion, trigger
-sequences, or pump control should live in logic modules.
+sequences, or pump control are defined as interfuse hardware instruments.
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
@@ -48,19 +48,19 @@ class DummyDaq(DaqInterface):
     """
 
     _rw_timeout = ConfigOption("read_write_timeout", default=10)
-    _ao_voltage_range = ConfigOption("ao_voltage_range", default=(0, 10))
     _ao_channels = ConfigOption("ao_channels", default={})
     _ai_channels = ConfigOption("ai_channels", default={})
     _do_channels = ConfigOption("do_channels", default={})
     _di_channels = ConfigOption("di_channels", default={})
 
+    # Attributes
+    _tasks = {}
+    _channel_metadata = {}
+    _ao_voltage_ranges = {}
+    _channel_data = {}
+
     def on_activate(self):
         """Populate the dummy task registry from the configured channels."""
-        self._tasks = {}
-        self._channel_data = {}
-        self._channel_metadata = {}
-        self._ao_voltage_ranges = {}
-
         if self._ao_channels:
             self._register_channels(self._ao_channels, channel_type="ao", default_value=0.0)
 
@@ -122,15 +122,6 @@ class DummyDaq(DaqInterface):
         """Create a new dummy task handle."""
         return object()
 
-    def set_up_ao_channel(self, taskhandle, channel, voltage_range):
-        """Store metadata for a dummy analog-output channel."""
-        self._channel_metadata[taskhandle] = {
-            "channel": channel,
-            "type": "ao",
-            "voltage_range": tuple(voltage_range),
-        }
-        self._channel_data[taskhandle] = 0.0
-
     def write_to_ao_channel(self, taskhandle, voltage, voltage_range=None, timeout=None, autostart=True):
         """Cache the analog-output voltage in memory."""
         if voltage_range is None:
@@ -147,15 +138,6 @@ class DummyDaq(DaqInterface):
         _ = autostart
         self._channel_data[taskhandle] = float(voltage)
 
-    def set_up_ai_channel(self, taskhandle, channel, voltage_range):
-        """Store metadata for a dummy analog-input channel."""
-        self._channel_metadata[taskhandle] = {
-            "channel": channel,
-            "type": "ai",
-            "voltage_range": tuple(voltage_range),
-        }
-        self._channel_data[taskhandle] = 0.0
-
     def read_ai_channel(self, taskhandle):
         """Return the cached analog-input value.
 
@@ -164,14 +146,6 @@ class DummyDaq(DaqInterface):
         """
         return float(self._channel_data.get(taskhandle, 0.0))
 
-    def set_up_do_channel(self, taskhandle, channel):
-        """Store metadata for a dummy digital-output channel."""
-        self._channel_metadata[taskhandle] = {
-            "channel": channel,
-            "type": "do",
-        }
-        self._channel_data[taskhandle] = np.uint8(0)
-
     def write_to_do_channel(self, taskhandle, num_samp, digital_write):
         """Cache the last digital output state."""
         _ = num_samp
@@ -179,27 +153,10 @@ class DummyDaq(DaqInterface):
         self._channel_data[taskhandle] = value.copy()
         return value.size
 
-    def set_up_di_channel(self, taskhandle, channel):
-        """Store metadata for a dummy digital-input channel."""
-        self._channel_metadata[taskhandle] = {
-            "channel": channel,
-            "type": "di",
-        }
-        self._channel_data[taskhandle] = np.zeros((1,), dtype=np.uint8)
-
     def read_di_channel(self, taskhandle, num_samp):
         """Return the cached digital input state."""
         value = self._channel_data.get(taskhandle, np.zeros((num_samp,), dtype=np.uint8))
         return np.asarray(value, dtype=np.uint8)
-
-    def close_task(self, taskhandle):
-        """Remove a task and its cached value from the dummy registry."""
-        self._channel_data.pop(taskhandle, None)
-        self._channel_metadata.pop(taskhandle, None)
-        for task_name, handle in list(self._tasks.items()):
-            if handle is taskhandle:
-                self._tasks.pop(task_name, None)
-                break
 
     def write_named_ao(self, task_name, voltage):
         """Write a value to a named dummy analog-output task."""

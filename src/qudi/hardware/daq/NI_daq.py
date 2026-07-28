@@ -11,7 +11,7 @@ This module intentionally contains only low-level DAQ operations:
 - read and write scalar values
 
 Higher-level experiment behavior such as laser control, piezo motion, trigger
-sequences, or pump control should live in logic modules.
+sequences, or pump control are defined as interfuse hardware instruments.
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License

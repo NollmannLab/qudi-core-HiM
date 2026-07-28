@@ -40,7 +40,7 @@ class DaqPumpController(PumpInterface):
     def rinsing(self):
         self._daq.write_named_ao(
             self._output_task,
-            self._stop_voltage,
+            float(self._rinsing_voltage),
         )
 
     def stop(self):
