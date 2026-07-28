@@ -21,18 +21,8 @@ class DaqInterface(Base):
         pass
 
     @abstractmethod
-    def set_up_ao_channel(self, taskhandle, channel, voltage_range):
-        """Create and configure one analog-output channel."""
-        pass
-
-    @abstractmethod
     def write_to_ao_channel(self, taskhandle, voltage, timeout=None, autostart=True):
         """Write a scalar voltage to an analog-output channel."""
-        pass
-
-    @abstractmethod
-    def set_up_ai_channel(self, taskhandle, channel, voltage_range):
-        """Create and configure one analog-input channel."""
         pass
 
     @abstractmethod
@@ -41,28 +31,13 @@ class DaqInterface(Base):
         pass
 
     @abstractmethod
-    def set_up_do_channel(self, taskhandle, channel):
-        """Create and configure one digital-output channel."""
-        pass
-
-    @abstractmethod
     def write_to_do_channel(self, taskhandle, num_samp, digital_write):
         """Write one or more digital values to a digital-output channel."""
         pass
 
     @abstractmethod
-    def set_up_di_channel(self, taskhandle, channel):
-        """Create and configure one digital-input channel."""
-        pass
-
-    @abstractmethod
     def read_di_channel(self, taskhandle, num_samp):
         """Read one or more digital values from a digital-input channel."""
-        pass
-
-    @abstractmethod
-    def close_task(self, taskhandle):
-        """Stop and clear a DAQ task."""
         pass
 
     @abstractmethod
