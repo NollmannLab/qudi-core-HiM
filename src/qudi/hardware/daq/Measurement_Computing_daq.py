@@ -190,10 +190,10 @@ class MccDAQ(DaqInterface):
             self._channel_data[taskhandle] = default_value
 
     def get_taskhandle(self, task_name):
-        """Return the dummy task handle for ``task_name``."""
+        """Return the task handle associated with ``task_name``."""
         if task_name not in self._tasks:
             raise KeyError(f"Unknown DAQ task '{task_name}'.")
-        return self._tasks[task_name]
+        return self._tasks[task_name]["task_handle"]
 
     def create_taskhandle(self, channel_type):
         """Create a new dummy task handle.
@@ -263,5 +263,4 @@ class MccDAQ(DaqInterface):
         input_mode = self._tasks[task_name]['input_mode']
         value = float(self.read_ai_channel(taskhandle, channel, input_mode, voltage_range))
         return value
-
 
