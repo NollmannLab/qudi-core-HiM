@@ -335,12 +335,12 @@ class FluidicsGUI(GuiBase):
         # initialize spinboxes depending on connected hardware
         constraints = self._pipetting_robot_logic.get_hardware_constraints()
 
-        x_min = constraints['x']['pos_min']
-        x_max = constraints['x']['pos_max']
-        y_min = constraints['y']['pos_min']
-        y_max = constraints['y']['pos_max']
-        z_min = constraints['z']['pos_min']
-        z_max = constraints['z']['pos_max']
+        x_min = constraints[self._pipetting_robot_logic.first_axis_label]['pos_min']
+        x_max = constraints[self._pipetting_robot_logic.first_axis_label]['pos_max']
+        y_min = constraints[self._pipetting_robot_logic.second_axis_label]['pos_min']
+        y_max = constraints[self._pipetting_robot_logic.second_axis_label]['pos_max']
+        z_min = constraints[self._pipetting_robot_logic.third_axis_label]['pos_min']
+        z_max = constraints[self._pipetting_robot_logic.third_axis_label]['pos_max']
 
         self._mw.x_axis_position_DSpinBox.setMinimum(x_min)
         self._mw.x_axis_position_DSpinBox.setMaximum(x_max)
