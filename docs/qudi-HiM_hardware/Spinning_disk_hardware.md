@@ -43,11 +43,11 @@
 
 ## Physik Instrumente 3 axis translation stage:
 
-| **Model and SN**     | PI Controler C-863 Mercury 1-axis translation stage (Z:SN#0185500777 , R:SN#0105500972 ) and C-867 for the rotation stage (SN#111005330)     |
-| -------------------- | ------------------------------------------------------------ |
-| **Drivers location** | The drivers compatible with windows 10 can be found here : https://www.pifrance.fr/fr/produits/logiciels-dedies-au-positionnement/ |
-| **Software**         | PI MikroMove - part of PI software suite (https://www.pifrance.fr/fr/produits/logiciels-dedies-au-positionnement/) |
-| **Python**           | PIpython<br />Installation: <br />activate the conda environment (conda activate qudi) and navigate to the folder C:\Users\sCMOS-1\Desktop\PIPython-2.3.0.3 <br />(maybe change the location where the package is kept)<br />Run python setup.py install.<br />Check the installation (conda list), pipython should appear now. |
+| **Model and SN**     | PI Controler C-863 Mercury 1-axis translation stage (Z:SN#0185500777 , R:SN#0105500972 ) and C-867 for the rotation stage (SN#111005330)                                                                                                                                                                                                                                                                                                                             |
+|----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Drivers location** | The drivers compatible with windows 10 can be found here : https://www.pifrance.fr/fr/produits/logiciels-dedies-au-positionnement/                                                                                                                                                                                                                                                                                                                                   |
+| **Software**         | PI MikroMove - part of PI software suite (https://www.pifrance.fr/fr/produits/logiciels-dedies-au-positionnement/)                                                                                                                                                                                                                                                                                                                                                   |
+| **Python**           | PIpython<br />Installation: <br />activate the conda environment (`conda activate qudi`). Run `python -m pip install PIPython`to make sure the package is installed in qudi. <br /> <br /> *Note (from July 2026). On linux, USB connection is not possible. USB port are emulated as COM port and the command `ConnectRS232` is used instead of `ConnectUSB`. Also, daisy chain connection is not working since it expects COM port WINDOWS nomemclature as input.* |
 
 
 
