@@ -1,3 +1,6 @@
+# The following script is only used to check that communication is working with Fluigent devices.
+# It also returns whether a pump and/or a flow sensor are detected.
+
 import Fluigent.SDK as fgt
 
 print("detect:", fgt.fgt_detect())

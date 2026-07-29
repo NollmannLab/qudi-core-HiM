@@ -13,11 +13,16 @@ from qudi.core.module import Base
 
 
 class DaqInterface(Base):
-    """Interface for hardware providing generic DAQ read/write capabilities."""
+    """Interface for hardware providing generic DAQ read/write capabilities.
+
+    Concrete drivers may keep backend-specific task metadata internally, but
+    the value returned by :meth:`get_taskhandle` must be treated as an opaque
+    handle that can be passed back into the low-level read/write methods.
+    """
 
     @abstractmethod
     def get_taskhandle(self, task_name):
-        """Return the task handle associated with a configured task name."""
+        """Return the opaque task handle associated with ``task_name``."""
         pass
 
     @abstractmethod
