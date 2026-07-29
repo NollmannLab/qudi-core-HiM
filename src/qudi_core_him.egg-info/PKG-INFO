@@ -14,4 +14,4 @@ Provides-Extra: dev-lint-format
 Requires-Dist: ruff==0.7.0; extra == "dev-lint-format"
 Dynamic: license-file
 
-# qudi_core_cbs
+# qudi_core-HiM
