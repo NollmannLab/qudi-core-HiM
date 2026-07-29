@@ -92,9 +92,9 @@ class PipettingRobot(PipettingRobotInterface):
     _park_on_deactivate = ConfigOption('park_on_deactivate', missing='error', converter=bool)
 
     # Robot-specific position of the first tube
-    _pos1_x_default = ConfigOption('pos1_x_default', missing='error', converter=float)
-    _pos1_y_default = ConfigOption('pos1_y_default', missing='error', converter=float)
-    _pos1_z_default = ConfigOption('pos1_z_default', missing='error', converter=list)
+    _pos1_axis_1_default = ConfigOption('pos1_axis_1_default', missing='error', converter=float)
+    _pos1_axis_2_default = ConfigOption('pos1_axis_2_default', missing='error', converter=float)
+    _pos1_axis_3_default = ConfigOption('pos1_axis_3_default', missing='error', converter=list)
     _setup = ConfigOption('exp_setup', missing='error')
     _tube_types = ConfigOption('tube_types', missing='error')
 
@@ -207,9 +207,9 @@ class PipettingRobot(PipettingRobotInterface):
     def get_robot_parameters(self):
         """Return robot-specific parameters needed by logic and GUI."""
         return {
-            'pos1_x_default': self._pos1_x_default,
-            'pos1_y_default': self._pos1_y_default,
-            'pos1_z_default': self._pos1_z_default,
+            'pos1_axis_1_default': self._pos1_axis_1_default,
+            'pos1_axis_2_default': self._pos1_axis_2_default,
+            'pos1_axis_3_default': self._pos1_axis_3_default,
             'exp_setup': self._setup,
             'tube_types': self._tube_types,
             'max_number_tubes': self.max_num_probes,

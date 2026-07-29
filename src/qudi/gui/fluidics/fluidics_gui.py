@@ -429,9 +429,9 @@ class FluidicsGUI(GuiBase):
             return
 
         idx = self._pos1_sd.Tube_comboBox.currentIndex()
-        self._pos1_sd.x_pos_DSpinBox.setValue(self.pos1_x_default)
-        self._pos1_sd.y_pos_DSpinBox.setValue(self.pos1_y_default)
-        self._pos1_sd.z_pos_DSpinBox.setValue(self.pos1_z_default[idx])
+        self._pos1_sd.x_pos_DSpinBox.setValue(self.pos1_axis_1_default)
+        self._pos1_sd.y_pos_DSpinBox.setValue(self.pos1_axis_2_default)
+        self._pos1_sd.z_pos_DSpinBox.setValue(self.pos1_axis_3_default[idx])
 # end of position1 settings window related methods ---------------------------------------------------------------------
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -442,9 +442,9 @@ class FluidicsGUI(GuiBase):
         """Retrieve robot-specific parameters from the positioning logic."""
         parameters = self._pipetting_robot_logic.get_robot_parameters()
 
-        self.pos1_x_default = parameters['pos1_x_default']
-        self.pos1_y_default = parameters['pos1_y_default']
-        self.pos1_z_default = parameters['pos1_z_default']
+        self.pos1_axis_1_default = parameters['pos1_axis_1_default']
+        self.pos1_axis_2_default = parameters['pos1_axis_2_default']
+        self.pos1_axis_3_default = parameters['pos1_axis_3_default']
         self.exp_setup = parameters['exp_setup']
         self.tube_types = parameters['tube_types']
         self.max_number_tubes = parameters['max_number_tubes']
