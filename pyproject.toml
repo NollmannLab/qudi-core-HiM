@@ -9,17 +9,17 @@ description = "Custom qudi-core modules for Nollmann lab setups"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "qudi-core"
+    "qudi-core>=1.7.0",
 ]
 
 [project.optional-dependencies]
 dev-lint-format = ["ruff==0.7.0"]
 
 [project.urls]
-Homepage = "https://github.com/NollmannLab/qudi_core_cbs"
-Documentation = "https://github.com/NollmannLab/qudi_core_cbs/docs"
-Repository = "https://github.com/NollmannLab/qudi_core_cbs.git"
-Changelog = "https://github.com/NollmannLab/qudi_core_cbs/docs/changelog.md"
+Homepage = "https://github.com/NollmannLab/qudi-core-HiM"
+Documentation = "https://github.com/NollmannLab/qudi-core-HiM/docs"
+Repository = "https://github.com/NollmannLab/qudi-core-HiM.git"
+Changelog = "https://github.com/NollmannLab/qudi-core-HiM/docs/changelog.md"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
