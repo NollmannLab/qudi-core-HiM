@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Author: F Barho - adapted for qudi-core-HiM by JB Fiche
-Created: 2026-07-15 -> Adapted 2026-07-29
+Created: 2026-07-15
 
 Qudi-core-HiM hardware module for a Fluigent flowboard.
 
@@ -34,7 +34,7 @@ class FluigentFlowboard(FluidicsInterface):
     Example config:
 
     fluigent_flowboard:
-      module.Class: 'fluidics_pump.fluigent_flowboard.FluigentFlowboard'
+      module.Class: 'fluidics.fluigent_flowboard.FluigentFlowboard'
       options:
         pressure_channel_IDs:
           - 0
