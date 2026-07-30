@@ -3,7 +3,7 @@
 Author: JB Fiche with codex - adapted for qudi-core-HiM from the previous daq script used in qudi-HiM
 Created: 2026-07-21
 
-Interface for the rinsing pump modules used by qudi-core-HiM.
+Interface for the pump hardware modules used by qudi-core-HiM.
 
 This interface exposes the minimal contract required by the fluidics
 logic and interfuse_hardware layers.
@@ -21,18 +21,43 @@ You should have received a copy of the GNU General Public License along with Qud
 
 
 from abc import abstractmethod
+from typing import Any, Dict, Optional, Sequence
+
 from qudi.core.module import Base
 
 
 class PumpInterface(Base):
-    """Interface for a controllable fluidics pump."""
+    """Interface for pump hardware modules used by qudi-core-HiM."""
 
     @abstractmethod
-    def rinsing(self, voltage):
-        """Set the pump-control voltage."""
-        raise NotImplementedError
+    def set_output(self, param_dict: Dict[int, float]) -> None:
+        """Set pump output values for one or more channels.
+
+        Args:
+            param_dict: Mapping of ``{channel_id: output_value}``. Concrete
+                implementations may support one channel or multiple channels.
+        """
+        pass
 
     @abstractmethod
-    def stop(self):
-        """Stop the pump."""
-        raise NotImplementedError
+    def get_output(self, param_list: Optional[Sequence[int]] = None) -> Dict[int, float]:
+        """Return output values for selected or all pump channels.
+
+        Args:
+            param_list: Optional sequence of channel IDs to query. If ``None``,
+                the implementation should return all configured channels.
+
+        Returns:
+            A mapping of ``{channel_id: output_value}``.
+        """
+        pass
+
+    @abstractmethod
+    def get_constraints(self) -> Dict[str, Any]:
+        """Return output limits and units for the pump."""
+        pass
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Set the pump to its safe stopped state."""
+        pass

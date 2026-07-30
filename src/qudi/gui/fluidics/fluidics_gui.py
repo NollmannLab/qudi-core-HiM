@@ -255,9 +255,9 @@ class FluidicsGUI(GuiBase):
             if valve_position is not None:
                 valve_combobox.setCurrentIndex(valve_position - 1)
 
-        # internal signals
-        for i in range(len(self.valve_ComboBoxes)):
-            self.valve_ComboBoxes[i].activated.connect(partial(self.change_valve_position, i))
+        # internal signals to connect each combobox (associated to a valve) to the 'change_valve_position' method
+        for i, combobox in enumerate(self.valve_ComboBoxes):
+            combobox.activated.connect(partial(self.change_valve_position, i))
 
         # signals to logic
         self.sigSetValvePosition.connect(self._valve_logic.set_valve_position)
@@ -440,14 +440,15 @@ class FluidicsGUI(GuiBase):
 
     def _get_robot_specific_parameters(self):
         """Retrieve robot-specific parameters from the positioning logic."""
-        parameters = self._pipetting_robot_logic.get_robot_parameters()
+        if self._pipetting_robot_logic is not None:
+            parameters = self._pipetting_robot_logic.get_robot_parameters()
 
-        self.pos1_axis_1_default = parameters['pos1_axis_1_default']
-        self.pos1_axis_2_default = parameters['pos1_axis_2_default']
-        self.pos1_axis_3_default = parameters['pos1_axis_3_default']
-        self.exp_setup = parameters['exp_setup']
-        self.tube_types = parameters['tube_types']
-        self.max_number_tubes = parameters['max_number_tubes']
+            self.pos1_axis_1_default = parameters['pos1_axis_1_default']
+            self.pos1_axis_2_default = parameters['pos1_axis_2_default']
+            self.pos1_axis_3_default = parameters['pos1_axis_3_default']
+            self.exp_setup = parameters['exp_setup']
+            self.tube_types = parameters['tube_types']
+            self.max_number_tubes = parameters['max_number_tubes']
 
 # Methods for stage movement--------------------------------------------------------------------------------------------
     @QtCore.Slot()
@@ -799,17 +800,17 @@ class FluidicsGUI(GuiBase):
 # Slots related to the valve control dockwidget
 # ----------------------------------------------------------------------------------------------------------------------
 
-    @QtCore.Slot(int)
-    def change_valve_position(self, valve_num):
+    @QtCore.Slot(int, int)
+    def change_valve_position(self, valve_num: int, selected_index: int)-> None:
         """ Callback of the valve comboboxes. Retrieves the target position and emits a signal containing the valve_id
         and the target position.
 
         :param: int valve_num: index of the element in the valve_ComboBoxes list. Element 0 corresponds to valve_id 'a', etc.
         """
-        index = self.valve_ComboBoxes[valve_num].currentIndex()
-        valve_pos = index + 1  # zero indexing
         valve_id = self.valve_IDs[valve_num]
-        self.sigSetValvePosition.emit(valve_id, valve_pos)
+        valve_position = selected_index + 1
+
+        self.sigSetValvePosition.emit(valve_id, valve_position)
 
     @QtCore.Slot(str, int)
     def update_combobox_index(self, valve_ID, valve_pos):

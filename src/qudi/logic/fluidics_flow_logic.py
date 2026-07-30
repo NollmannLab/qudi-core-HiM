@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Author: F Barho - adapted for qudi-core-HiM by JB Fiche with codex
-Created: 2021-03-04 -> translated into qudi-core-HiM on 2026-0<è-11
+Created: 2021-03-04 -> translated into qudi-core-HiM on 2026-07-11
 Logic module for pressure and flow-rate control.
 
 This is the qudi-core adaptation of the original HiM flowcontrol logic.  The
@@ -102,9 +102,12 @@ class FluidicsFlowLogic(LogicBase):
           flowboard: 'fluigent_flowboard'
     """
 
-    flowboard = Connector(interface="FluidicsInterface", name="flowboard")
+    # Connectors to hardware
+    flow_sensor = Connector(interface="FlowSensorInterface", name="flow_sensor")
+    fluidics_pump = Connector(interface="PumpInterface", name="fluidics_pump")
     rinsing_pump = Connector(interface="PumpInterface", name="rinsing_pump")
 
+    # Options
     p_gain = ConfigOption("p_gain", 0.005, missing="warn")
     i_gain = ConfigOption("i_gain", 0.01, missing="warn")
     d_gain = ConfigOption("d_gain", 0.0, missing="warn")
@@ -115,12 +118,19 @@ class FluidicsFlowLogic(LogicBase):
     default_pressure_channel = ConfigOption("default_pressure_channel", 0, missing="warn")
     default_sensor_channel = ConfigOption("default_sensor_channel", 0, missing="warn")
 
+    # Private variables from the class
+    _flow_sensor = None
+    _fluidics_pump = None
+    _rinsing_pump = None
+    _threadpool = None
+    _pid = None
     _latest_pressure = StatusVar(name="_latest_pressure", default=list())
     _latest_flowrate = StatusVar(name="_latest_flowrate", default=list())
     _pressure_setpoint = StatusVar(name="_pressure_setpoint", default=0.0)
     _total_volume = StatusVar(name="_total_volume", default=0.0)
     _time_since_start = StatusVar(name="_time_since_start", default=0.0)
 
+    # Signals for communication with GUI
     sigUpdateFlowMeasurement = QtCore.Signal(list, list)
     sigUpdatePressureSetpoint = QtCore.Signal(float)
     sigUpdateVolumeMeasurement = QtCore.Signal(float, float, float, float)
@@ -129,6 +139,7 @@ class FluidicsFlowLogic(LogicBase):
     sigDisableFlowActions = QtCore.Signal()
     sigEnableFlowActions = QtCore.Signal()
 
+    # attributes
     measuring_flowrate = False
     regulating = False
     measuring_volume = False
@@ -138,9 +149,10 @@ class FluidicsFlowLogic(LogicBase):
 
     def on_activate(self):
         """Connect the flowboard and initialize cached readings."""
-        self._flowboard = self.flowboard()
-        self.threadpool = QtCore.QThreadPool.globalInstance()
-        self.pid = None
+        self._flow_sensor = self.flow_sensor()
+        self._fluidics_pump = self.fluidics_pump()
+        self._rinsing_pump = self.rinsing_pump()
+        self._threadpool = QtCore.QThreadPool.globalInstance()
         self.set_pressure(0.0)
         self.update_flow_measurement()
 
@@ -153,7 +165,10 @@ class FluidicsFlowLogic(LogicBase):
             self.set_pressure(0.0)
         except Exception as exc:
             self.log.warning(f"Could not reset pressure during deactivation: {exc}")
-        self._flowboard = None
+
+        self._fluidics_pump = None
+        self._rinsing_pump = None
+        self._flow_sensor = None
 
     # ----------------------------------------------------------------------------------------------------------------------
     # Low level methods for pressure settings
@@ -180,7 +195,7 @@ class FluidicsFlowLogic(LogicBase):
         Returns:
             list: Pressure values ordered by channel.
         """
-        pressure = self._flowboard.get_pressure(self._normalize_channels(channels))
+        pressure = self._fluidics_pump.get_output(self._normalize_channels(channels))
         values = self._dict_values(pressure)
         self._latest_pressure = values
         return values
@@ -208,7 +223,7 @@ class FluidicsFlowLogic(LogicBase):
             int(channel): float(pressure)
             for channel, pressure in zip(channels, pressure_values)
         }
-        self._flowboard.set_pressure(pressure_by_channel)
+        self._fluidics_pump.set_output(pressure_by_channel)
 
         if len(pressure_values) == 1:
             self._pressure_setpoint = float(pressure_values[0])
@@ -226,8 +241,8 @@ class FluidicsFlowLogic(LogicBase):
         Returns:
             list: Pressure ranges ordered by channel.
         """
-        pressure_range = self._flowboard.get_pressure_range(self._normalize_channels(channels))
-        return self._dict_values(pressure_range)
+        pump_constraints = self._fluidics_pump.get_constraints()
+        return [self._dict_values([pump_constraints['minimum'], pump_constraints['maximum']])]
 
     def get_pressure_unit(self, channels=None):
         """Return pressure units for selected channels.
@@ -239,8 +254,8 @@ class FluidicsFlowLogic(LogicBase):
         Returns:
             list: Pressure unit strings ordered by channel.
         """
-        pressure_unit = self._flowboard.get_pressure_unit(self._normalize_channels(channels))
-        return self._dict_values(pressure_unit)
+        pump_constraints = self._fluidics_pump.get_constraints()
+        return self._dict_values({0:pump_constraints['unit']})
 
     # ----------------------------------------------------------------------------------------------------------------------
     # Low level methods for flowrate measurement
@@ -290,23 +305,23 @@ class FluidicsFlowLogic(LogicBase):
         Returns:
             list: Flow-rate values ordered by channel.
         """
-        flowrate = self._flowboard.get_flowrate(self._normalize_channels(channels))
+        flowrate = self._flow_sensor.get_flowrate(self._normalize_channels(channels))
         values = self._dict_values(flowrate)
         self._latest_flowrate = values
         return values
 
-    def get_flowrate_range(self, channels=None):
-        """Return flow-rate ranges for selected sensor channels.
-
-        Args:
-            channels (list[int] | int | None): Sensor channels to query. If
-                ``None``, all configured channels are queried.
-
-        Returns:
-            list: Flow-rate ranges ordered by channel.
-        """
-        flowrate_range = self._flowboard.get_sensor_range(self._normalize_channels(channels))
-        return self._dict_values(flowrate_range)
+    # def get_flowrate_range(self, channels=None):
+    #     """Return flow-rate ranges for selected sensor channels.
+    #
+    #     Args:
+    #         channels (list[int] | int | None): Sensor channels to query. If
+    #             ``None``, all configured channels are queried.
+    #
+    #     Returns:
+    #         list: Flow-rate ranges ordered by channel.
+    #     """
+    #     flowrate_range = self._flowboard.get_sensor_range(self._normalize_channels(channels))
+    #     return self._dict_values(flowrate_range)
 
     def get_flowrate_unit(self, channels=None):
         """Return flow-rate units for selected sensor channels.
@@ -318,7 +333,7 @@ class FluidicsFlowLogic(LogicBase):
         Returns:
             list: Flow-rate unit strings ordered by channel.
         """
-        flowrate_unit = self._flowboard.get_sensor_unit(self._normalize_channels(channels))
+        flowrate_unit = self._flow_sensor.get_sensor_unit(self._normalize_channels(channels))
         return self._dict_values(flowrate_unit)
 
     # ----------------------------------------------------------------------------------------------------------------------
@@ -381,7 +396,7 @@ class FluidicsFlowLogic(LogicBase):
         flowrate = self.get_flowrate([int(self.default_sensor_channel)])
         if not flowrate:
             raise RuntimeError("No flow-rate value available for PID regulation.")
-        new_pressure = float(self.pid(flowrate[0]))
+        new_pressure = float(self._pid(flowrate[0]))
         self.set_pressure(new_pressure, log_entry=False)
         return new_pressure
 
@@ -394,7 +409,7 @@ class FluidicsFlowLogic(LogicBase):
         if self.regulating:
             self.stop_pressure_regulation_loop()
         self.regulating = True
-        self.pid = self.init_pid(setpoint=float(target_flowrate))
+        self._pid = self.init_pid(setpoint=float(target_flowrate))
         self._schedule_pressure_regulation(float(target_flowrate))
 
     def stop_pressure_regulation_loop(self):
@@ -514,7 +529,7 @@ class FluidicsFlowLogic(LogicBase):
         """Schedule the next flow-measurement update."""
         worker = WaitWorker(self.sampling_interval)
         worker.signals.sigFinished.connect(self.flow_measurement_loop)
-        self.threadpool.start(worker)
+        self._threadpool.start(worker)
 
     def _schedule_pressure_regulation(self, target_flowrate):
         """Schedule the next pressure-regulation step.
@@ -524,13 +539,13 @@ class FluidicsFlowLogic(LogicBase):
         """
         worker = WaitWorker(self.sampling_interval, payload=target_flowrate)
         worker.signals.sigRegulationWaitFinished.connect(self.pressure_regulation_loop)
-        self.threadpool.start(worker)
+        self._threadpool.start(worker)
 
     def _schedule_volume_measurement(self):
         """Schedule the next volume-integration step."""
         worker = VolumeCountWorker(self.sampling_interval)
         worker.signals.sigIntegrationIntervalFinished.connect(self.volume_measurement_loop)
-        self.threadpool.start(worker)
+        self._threadpool.start(worker)
 
     @staticmethod
     def _dict_values(mapping):

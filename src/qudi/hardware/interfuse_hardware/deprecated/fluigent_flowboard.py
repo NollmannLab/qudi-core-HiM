@@ -25,7 +25,7 @@ from typing import Dict, Optional, List, Sequence, Tuple
 from qudi.core.connector import Connector
 from qudi.interface.fluigent_sdk_interface import FluigentSdkInterface
 from qudi.core.configoption import ConfigOption
-from qudi.interface.fluidics_interface import FluidicsInterface
+from qudi.interface.deprecated.fluidics_interface import FluidicsInterface
 
 
 class FluigentFlowboard(FluidicsInterface):

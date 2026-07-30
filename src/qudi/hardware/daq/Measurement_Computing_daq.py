@@ -66,7 +66,7 @@ class MccDAQ(DaqInterface):
         options:
           read_write_timeout: 10
           ao_channels:
-             fluidics_pump:
+             fluidics:
                - '/Dev1/AO1'  # physical channel on the daq
                - [0, 5]  # voltage range defined by the spec of the connected device. Max range is [-10, 10] V.
              rinsing_pump:

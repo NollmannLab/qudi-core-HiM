@@ -46,7 +46,11 @@ class FluigentSDK(FluigentSdkInterface):
     _controllers_info = ""
 
     def on_activate(self):
-        """Initialize the Fluigent SDK and check configured channels."""
+        """Initialize the Fluigent SDK backend and discover available channels.
+
+        The vendor SDK is imported lazily so the module can be discovered on
+        machines that do not have the Fluigent package installed.
+        """
 
         try:
             self._fgt = import_module("Fluigent.SDK")
@@ -90,26 +94,44 @@ class FluigentSDK(FluigentSdkInterface):
             raise
 
     def on_deactivate(self):
-        """Close the Fluigent SDK connection."""
+        """Close the Fluigent SDK connection and reset runtime state."""
         self._close_sdk()
 
     # -------------------------------------------------------------------------
     # Channel discovery
     # -------------------------------------------------------------------------
     def get_pressure_channel_ids(self) -> Tuple[int, ...]:
-        """Return all discovered pressure-channel IDs."""
+        """Return all discovered pressure-channel IDs.
+
+        Returns:
+            A tuple of zero-based pressure-channel identifiers exposed by the
+            connected Fluigent backend.
+        """
         self._require_initialized()
         pressure_channels = tuple(range(self._num_pressure_channels))
         return tuple(pressure_channels)
 
     def get_sensor_channel_ids(self) -> Tuple[int, ...]:
-        """Return all discovered sensor-channel IDs."""
+        """Return all discovered sensor-channel IDs.
+
+        Returns:
+            A tuple of zero-based sensor-channel identifiers exposed by the
+            connected Fluigent backend.
+        """
         self._require_initialized()
         sensor_channels = tuple(range(self._num_sensor_channels))
         return tuple(sensor_channels)
 
     def get_pressure_channel_info(self, channel: int,) -> Dict[str, Any]:
-        """Return range and unit information for one pressure channel."""
+        """Return range and unit information for one pressure channel.
+
+        Args:
+            channel: Pressure-channel identifier to inspect.
+
+        Returns:
+            A mapping containing the normalized channel ID, pressure range,
+            and pressure unit.
+        """
         channel = self._validate_pressure_channel(channel)
 
         return {
@@ -125,7 +147,15 @@ class FluigentSDK(FluigentSdkInterface):
         }
 
     def get_sensor_channel_info(self, channel: int,) -> Dict[str, Any]:
-        """Return range and unit information for one flow-sensor channel."""
+        """Return range and unit information for one flow-sensor channel.
+
+        Args:
+            channel: Sensor-channel identifier to inspect.
+
+        Returns:
+            A mapping containing the normalized channel ID, sensor range, and
+            sensor unit.
+        """
         channel = self._validate_sensor_channel(channel)
 
         return {
@@ -146,10 +176,16 @@ class FluigentSDK(FluigentSdkInterface):
 
     # Pressure channels
     def set_pressure(self, channel: int, pressure: float) -> None:
-        """Set pressure values on pressure channels.
+        """Set the pressure setpoint for one pressure channel.
 
         Args:
-            param_dict: Mapping of ``{pressure_channel_id: pressure_setpoint}``.
+            channel: Pressure-channel identifier to update.
+            pressure: Requested pressure setpoint.
+
+        Raises:
+            RuntimeError: If the Fluigent SDK is not initialized.
+            ValueError: If the channel is invalid or the pressure is outside
+                the channel's allowed range.
         """
         channel = self._validate_pressure_channel(channel)
         pressure = float(pressure)
@@ -165,7 +201,14 @@ class FluigentSDK(FluigentSdkInterface):
         self._sdk_call("fgt_set_pressure",channel, pressure,)
 
     def get_pressure(self, channel: int) -> float:
-        """Read one pressure channel."""
+        """Read the current pressure value for one pressure channel.
+
+        Args:
+            channel: Pressure-channel identifier to read.
+
+        Returns:
+            The current pressure value reported by the Fluigent backend.
+        """
         channel = self._validate_pressure_channel(channel)
         return float(self._sdk_call("fgt_get_pressure",channel))
 
@@ -174,7 +217,14 @@ class FluigentSDK(FluigentSdkInterface):
     # -------------------------------------------------------------------------
 
     def get_flowrate(self, channel: int) -> float:
-        """Read one flow-sensor channel."""
+        """Read the current flowrate value for one sensor channel.
+
+        Args:
+            channel: Sensor-channel identifier to read.
+
+        Returns:
+            The current flowrate value reported by the Fluigent backend.
+        """
         channel = self._validate_sensor_channel(channel)
 
         return float(self._sdk_call("fgt_get_sensorValue",channel))
@@ -195,7 +245,18 @@ class FluigentSDK(FluigentSdkInterface):
                 )
 
     def _validate_pressure_channel(self, channel: int) -> int:
-        """Validate and normalize one pressure-channel ID."""
+        """Validate and normalize one pressure-channel ID.
+
+        Args:
+            channel: Pressure-channel identifier to validate.
+
+        Returns:
+            The normalized channel identifier.
+
+        Raises:
+            ValueError: If the channel is not available in the current SDK
+                session.
+        """
         channel = int(channel)
         pressure_channels = tuple(range(self._num_pressure_channels))
 
@@ -208,7 +269,18 @@ class FluigentSDK(FluigentSdkInterface):
         return channel
 
     def _validate_sensor_channel(self, channel: int) -> int:
-        """Validate and normalize one sensor-channel ID."""
+        """Validate and normalize one sensor-channel ID.
+
+        Args:
+            channel: Sensor-channel identifier to validate.
+
+        Returns:
+            The normalized channel identifier.
+
+        Raises:
+            ValueError: If the channel is not available in the current SDK
+                session.
+        """
         channel = int(channel)
         sensor_channels = tuple(range(self._num_sensor_channels))
 
@@ -221,11 +293,25 @@ class FluigentSDK(FluigentSdkInterface):
         return channel
 
     def _sdk_call(self, function_name: str, *args):
-        """Execute one SDK call through the shared SDK lock."""
+        """Execute one SDK call through the shared SDK backend.
+
+        Args:
+            function_name: SDK function name to invoke on the loaded vendor
+                module.
+            *args: Positional arguments forwarded to the SDK function.
+
+        Returns:
+            Whatever value the underlying SDK function returns.
+        """
         self._require_initialized()
         function = getattr(self._fgt, function_name)
         return function(*args)
 
     def _require_initialized(self):
+        """Ensure the SDK backend has been loaded and initialized.
+
+        Raises:
+            RuntimeError: If the Fluigent SDK is not initialized.
+        """
         if self._fgt is None or not self._initialized:
             raise RuntimeError("Fluigent flowboard is not initialized.")

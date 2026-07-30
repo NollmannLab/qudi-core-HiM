@@ -18,7 +18,7 @@ You should have received a copy of the GNU General Public License along with Qud
 
 from numpy.random import normal
 from qudi.core.configoption import ConfigOption
-from qudi.interface.fluidics_interface import FluidicsInterface
+from qudi.interface.deprecated.fluidics_interface import FluidicsInterface
 
 
 class DummyFlowboard(FluidicsInterface):
@@ -27,7 +27,7 @@ class DummyFlowboard(FluidicsInterface):
     Example config:
 
     fluigent_flowboard:
-      module.Class: 'fluidics_pump.fluigent_flowboard.FluigentFlowboard'
+      module.Class: 'fluidics.fluigent_flowboard.FluigentFlowboard'
       options:
         pressure_channel_IDs:
           - 0

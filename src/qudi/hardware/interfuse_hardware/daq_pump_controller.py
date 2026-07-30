@@ -20,15 +20,20 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, Sequence, Any
 
 from qudi.core.connector import Connector
 from qudi.interface.pump_interface import PumpInterface
 from qudi.core.configoption import ConfigOption
 from qudi.interface.daq_interface import DaqInterface
 
+
 class DaqPumpController(PumpInterface):
-    """Control a voltage-driven pump through a generic DAQ."""
+    """Control a voltage-driven pump through a generic DAQ.
+
+    The controller exposes a single logical output channel and maps pump
+    setpoints to one analog output task on the configured DAQ backend.
+    """
 
     daq = Connector(name="daq", interface="DaqInterface")
     _output_task = ConfigOption("output_task", missing="error")
@@ -42,36 +47,68 @@ class DaqPumpController(PumpInterface):
     _set_voltage: float = 0.0
 
     def on_activate(self):
-        """Initialize the Fluigent SDK and check configured channels."""
+        """Connect to the DAQ backend and reset the pump output.
+
+        The module stores the connected DAQ backend and immediately drives the
+        configured output task to the minimum voltage.
+        """
         self._daq = self.daq()
         self.stop()
 
     def on_deactivate(self):
-        """Close the Fluigent SDK connection."""
+        """Drive the output to minimum and release the DAQ backend."""
         self.stop()
         self._daq = None
 
     # Pressure channels
     def set_output(self, param_dict: Dict[int, float]) -> None:
+        """Set the pump output voltage.
+
+        Args:
+            param_dict: Mapping of ``{channel_id: voltage_setpoint}``. Only a
+                single channel is supported; if multiple channels are supplied,
+                a warning is logged and no output is written.
+
+        Raises:
+            AttributeError: If the DAQ backend has not been activated.
+        """
         if len(param_dict) > 1:
-            self.log.warning(f"Multiple channels not supported: {param_dict}}")
+            self.log.warning(f"Multiple channels not supported: {param_dict}")
         elif len(param_dict) == 1:
             (_, voltage), = param_dict.items()
             self._daq.write_named_ao(self._output_task, float(voltage))
             self._set_voltage = voltage
 
-    def get_output(self, param_list: Optional[List[int]] = None, ) -> Dict[int, float]:
+    def get_output(self, param_list: Optional[Sequence[int]] = None) -> Dict[int, float]:
+        """Read the last set pump output voltage.
+
+        Args:
+            param_list: Optional list of requested channel IDs. Only a single
+                channel is supported. If ``None``, the method returns the
+                stored voltage for channel ``0``.
+
+        Returns:
+            A mapping of ``{channel_id: voltage_setpoint}`` for the supported
+            channel.
+        """
         if param_list is None:
             return {0: self._set_voltage}
         else:
             if len(param_list) > 1:
-                self.log.warning(f"Multiple channels not supported: {param_list}}")
+                raise ValueError(f"Multiple channels not supported: {param_list}")
             elif len(param_list) == 1:
                 channel = param_list[0]
                 return {channel: self._set_voltage}
+            else:
+                raise ValueError(f"No channel indicated")
 
     def get_constraints(self) -> Dict[str, Any]:
-        """Return native pump-output constraints."""
+        """Return native pump-output constraints.
+
+        Returns:
+            A mapping with the configured pump kind, unit, minimum voltage,
+            and maximum voltage.
+        """
         return {
             "kind": self._pump_kind,
             "unit": self._pump_unit,
@@ -80,4 +117,5 @@ class DaqPumpController(PumpInterface):
         }
 
     def stop(self):
+        """Drive the output task to the configured minimum voltage."""
         self._daq.write_named_ao(self._output_task, float(self._voltage_minimum))
