@@ -328,6 +328,7 @@ class RoiGUI(GuiBase):
     stagemarker_width = ConfigOption('stagemarker_width', 50, missing='info')  # stagemarker width in um
 
     # signals
+    sigAddRoi = QtCore.Signal()
     sigRoiWidthChanged = QtCore.Signal(float)
     sigRoiFirstDigitChanged = QtCore.Signal(float)
     sigRoiListNameChanged = QtCore.Signal(str)
@@ -446,7 +447,9 @@ class RoiGUI(GuiBase):
     def __connect_control_signals_to_logic(self):
         """ Establish the connections of signals emitted with slots in logic module. """
         # roi toolbar actions
-        self._mw.new_roi_Action.triggered.connect(self._roi_logic.add_roi, QtCore.Qt.QueuedConnection)
+        #self._mw.new_roi_Action.triggered.connect(self._roi_logic.add_roi, QtCore.Qt.QueuedConnection)
+        self._mw.new_roi_Action.triggered.connect(self.new_roi_clicked)
+        self.sigAddRoi.connect(self._roi_logic.add_roi, QtCore.Qt.QueuedConnection,)
         # self._mw.go_to_roi_Action.triggered.connect(self._roi_logic.go_to_roi, QtCore.Qt.QueuedConnection)
         self._mw.go_to_roi_Action.triggered.connect(self.go_to_roi_clicked)
         # self._mw.delete_roi_Action.triggered.connect(self._roi_logic.delete_roi, QtCore.Qt.QueuedConnection)
@@ -458,25 +461,22 @@ class RoiGUI(GuiBase):
         self.sigRoiWidthChanged.connect(self._roi_logic.set_roi_width)
         self.sigRoiFirstDigitChanged.connect(self._roi_logic.set_roi_first_digit)
         self.sigRoiListNameChanged.connect(self._roi_logic.rename_roi_list, QtCore.Qt.QueuedConnection)
-        self._mw.active_roi_ComboBox.textActivated.connect(
-            self._roi_logic.set_active_roi,
-            QtCore.Qt.ConnectionType.QueuedConnection
-        )
+        self._mw.active_roi_ComboBox.textActivated.connect(self._roi_logic.set_active_roi, QtCore.Qt.ConnectionType.QueuedConnection)
         self.sigAddInterpolation.connect(self._roi_logic.add_interpolation, QtCore.Qt.QueuedConnection)
         self.sigStartTracking.connect(self._roi_logic.start_tracking)
         self.sigStopTracking.connect(self._roi_logic.stop_tracking)
 
     def __disconnect_control_signals_to_logic(self):
         """ Disconnect signals from their slots in logic module. """
+        self._mw.new_roi_Action.triggered.disconnect(self.new_roi_clicked)
+        self.sigAddRoi.disconnect(self._roi_logic.add_roi)
         self._mw.new_roi_Action.triggered.disconnect()
         self._mw.go_to_roi_Action.triggered.disconnect()
         self._mw.delete_roi_Action.triggered.disconnect()
         self._mw.new_list_Action.triggered.disconnect()
         self.sigRoiWidthChanged.disconnect()
         self.sigRoiListNameChanged.disconnect()
-        self._mw.active_roi_ComboBox.textActivated.disconnect(
-            self._roi_logic.set_active_roi
-        )
+        self._mw.active_roi_ComboBox.textActivated.disconnect(self._roi_logic.set_active_roi)
         self.sigAddInterpolation.disconnect()
         self.sigStartTracking.disconnect()
         self.sigStopTracking.disconnect()
@@ -635,6 +635,11 @@ class RoiGUI(GuiBase):
         else:
             self._mw.roi_distance_Label.setText('? (?, ?)')
         pass
+
+    @QtCore.Slot(bool)
+    def new_roi_clicked(self, _checked=False):
+        """Add an ROI at the current stage position."""
+        self.sigAddRoi.emit()
 
     @QtCore.Slot()
     def go_to_roi_clicked(self):

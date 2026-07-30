@@ -7,6 +7,8 @@ from time import sleep
 from pipython import GCSDevice, pitools
 from pathlib import Path
 
+import traceback
+
 
 def resolve_serial_port(by_id_path: str) -> str:
     port_path = Path(by_id_path)
@@ -15,6 +17,7 @@ def resolve_serial_port(by_id_path: str) -> str:
         raise FileNotFoundError(f'Serial device not found: {by_id_path}')
 
     resolved_path = port_path.resolve()
+    print(resolved_path)
 
     if not resolved_path.name.startswith(('ttyUSB', 'ttyACM')):
         raise RuntimeError(
@@ -55,7 +58,8 @@ try :
     initialize(serial_port, 'C-863', 'FNL')
 except Exception as error:
     print("Z stage was not properly initialized - the following error was detected :")
-    print(error)
+    print(f"{type(error).__name__}: {error!r}")
+    traceback.print_exc()
 
 # r-axis
 try:
@@ -64,7 +68,8 @@ try:
     initialize(serial_port, 'C-863', 'FNL')
 except Exception as error:
     print("R (radial) stage was not properly initialized - the following error was detected :")
-    print(error)
+    print(f"{type(error).__name__}: {error!r}")
+    traceback.print_exc()
 
 
 # phi-axis
@@ -73,5 +78,6 @@ try:
     serial_port = resolve_serial_port(serial_id)
     initialize(serial_port, 'C-867', 'FRF')
 except Exception as error:
-    print("R (radial) stage was not properly initialized - the following error was detected :")
-    print(error)
+    print("Phi (radial) stage was not properly initialized - the following error was detected :")
+    print(f"{type(error).__name__}: {error!r}")
+    traceback.print_exc()

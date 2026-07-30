@@ -651,6 +651,9 @@ class RoiLogic(LogicBase):
         # Get current stage position from motor interface if no position is provided.
         if position is None:
             position = self.stage_position
+
+        if len(position) != 3:
+            raise ValueError(f"ROI position must contain exactly three values: (x, y, z). Received {position}.")
         current_roi_set = set(self.roi_names)
 
         # Add ROI to current ROI list
