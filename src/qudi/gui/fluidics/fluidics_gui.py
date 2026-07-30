@@ -91,18 +91,18 @@ class FluidicsGUI(GuiBase):
 
     Example config for copy-paste:
 
-    fluidics_gui:
+      fluidics_gui:
         module.Class: 'fluidics.fluidics_gui.FluidicsGUI'
         connect:
-            valve_logic: 'fluidics_valve_logic'
-            flowcontrol_logic: 'fluidics_flow_logic'
-            pipetting_logic: 'pipetting_robot_logic'
+          valve_logic: 'fluidics_valve_logic'
+          fluidics_logic: 'fluidics_flow_logic'
+          pipetting_robot_logic: 'pipetting_robot_logic'
     """
 
     # connector to logic modules
     valve_logic = Connector(interface='FluidicsValveLogic', name='valve_logic')
-    flowcontrol_logic = Connector(interface='FluidicsFlowLogic', name='flowcontrol_logic')
-    positioning_logic = Connector(interface='FluidicsRobotLogic', name='pipetting_logic', optional=True)
+    fluidics_logic = Connector(interface='FluidicsFlowLogic', name='fluidics_logic')
+    positioning_logic = Connector(interface='FluidicsRobotLogic', name='pipetting_robot_logic', optional=True)
 
     # Signals
     # signals for valve settings
@@ -137,7 +137,7 @@ class FluidicsGUI(GuiBase):
         """
         # connectors to the logic
         self._valve_logic = self.valve_logic()
-        self._flow_logic = self.flowcontrol_logic()
+        self._flow_logic = self.fluidics_logic()
         self._pipetting_robot_logic = self._get_optional_logic(self.positioning_logic, "positioning")
 
         # retrieve specific parameters related to the robot
@@ -331,6 +331,7 @@ class FluidicsGUI(GuiBase):
         self._mw.z_axis_position_LineEdit.setText('{:.3f}'.format(stage_position[2]))
 
         self._mw.probe_position_LineEdit.setText('Please calibrate !')
+        self._update_positioning_units()
 
         # initialize spinboxes depending on connected hardware
         constraints = self._pipetting_robot_logic.get_hardware_constraints()
@@ -449,6 +450,21 @@ class FluidicsGUI(GuiBase):
             self.exp_setup = parameters['exp_setup']
             self.tube_types = parameters['tube_types']
             self.max_number_tubes = parameters['max_number_tubes']
+            self.coordinate_system = parameters['coordinate_system']
+
+    def _update_positioning_units(self) -> None:
+        """Update displayed axis units for the robot coordinate system."""
+        if self.coordinate_system == 'cartesian':
+            units = ('µm', 'µm', 'µm')
+        elif self.coordinate_system == 'polar':
+            units = ('µm', '°', 'µm')
+        else:
+            self.log.warning(f"Unknown robot coordinate system: {self.coordinate_system!r}.")
+            units = ('', '', '')
+
+        self._mw.first_axis_unit_Label.setText(units[0])
+        self._mw.second_axis_unit_Label.setText(units[1])
+        self._mw.third_axis_unit_Label.setText(units[2])
 
 # Methods for stage movement--------------------------------------------------------------------------------------------
     @QtCore.Slot()
@@ -737,9 +753,6 @@ class FluidicsGUI(GuiBase):
             self._mw.rinsing_time_SpinBox.setDisabled(False)
             self.sigStopRinsing.emit()
         else:
-            #  make sure to set the RT rinsing valve to the correct position, different cases for the experimental setups
-            self.set_valves_for_rinsing(self.exp_setup)
-
             # handle the start of rinsing
             rinsing_time = self._mw.rinsing_time_SpinBox.value()
             self._mw.rinsing_time_SpinBox.setDisabled(True)  # do not allow to modify time when rinsing starts
@@ -753,29 +766,6 @@ class FluidicsGUI(GuiBase):
         self._mw.rinsing_Action.setText('Start rinsing')
         self._mw.rinsing_Action.setChecked(False)
         self._mw.rinsing_time_SpinBox.setDisabled(False)
-
-    def set_valves_for_rinsing(self, exp_setup):
-        """ Helper function when rinsing is started via GUI. Verify if the valves are positioned correctly
-        for the respective setup, and modify if necessary, to avoid injecting air or injecting in a wrong tube.
-        As the exact steps depend on the experimental setup, this information is retrieved as config option.
-        If deployed on new setup, add the respective valve positioning sequence.
-
-        :param: str exp_setup: identifier of the experimental setup ('RAMM' or 'Airyscan' are supported currently)
-        :return: None
-        """
-        if exp_setup == 'RAMM':
-            if self._valve_logic.get_valve_position('b') != 1:
-                self._valve_logic.set_valve_position('b', 1)
-
-        elif exp_setup == 'Airyscan':
-            if self._valve_logic.get_valve_position('a') != 3:
-                self._valve_logic.set_valve_position('a', 3)
-
-            if self._valve_logic.get_valve_position('b') != 2:
-                self._valve_logic.set_valve_position('b', 2)
-
-        else:
-            pass
 
 # Disable/Enable user interface actions --------------------------------------------------------------------------------
     @QtCore.Slot()

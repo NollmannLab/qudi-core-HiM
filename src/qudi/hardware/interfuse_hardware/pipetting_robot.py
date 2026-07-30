@@ -214,6 +214,7 @@ class PipettingRobot(PipettingRobotInterface):
             'tube_types': self._tube_types,
             'max_number_tubes': self.max_num_probes,
             'z_safety_position': self._z_safety_position,
+            'coordinate_system': self._grid,
         }
 
     def get_grid_properties(self):

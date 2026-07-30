@@ -18,7 +18,6 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 """
-
 from math import inf
 from time import sleep
 
@@ -106,6 +105,7 @@ class FluidicsFlowLogic(LogicBase):
     flow_sensor = Connector(interface="FlowSensorInterface", name="flow_sensor")
     fluidics_pump = Connector(interface="PumpInterface", name="fluidics_pump")
     rinsing_pump = Connector(interface="PumpInterface", name="rinsing_pump")
+    valve_logic = Connector(interface="FluidicsValveLogic", name="valve_logic")
 
     # Options
     p_gain = ConfigOption("p_gain", 0.005, missing="warn")
@@ -117,13 +117,18 @@ class FluidicsFlowLogic(LogicBase):
     sampling_interval = ConfigOption("sampling_interval", 1.0, missing="warn")
     default_pressure_channel = ConfigOption("default_pressure_channel", 0, missing="warn")
     default_sensor_channel = ConfigOption("default_sensor_channel", 0, missing="warn")
+    _rinsing_valve_positions = ConfigOption("rinsing_valve_positions", default={}, missing="warn", converter=dict,)
+    _restore_rinsing_valves = ConfigOption("restore_valves_after_rinsing", default=True, missing="warn", converter=bool)
 
     # Private variables from the class
     _flow_sensor = None
     _fluidics_pump = None
     _rinsing_pump = None
+    _valve_logic = None
+    _rinsing_previous_valve_positions = {}
     _threadpool = None
     _pid = None
+    _rinsing_timer = None
     _latest_pressure = StatusVar(name="_latest_pressure", default=list())
     _latest_flowrate = StatusVar(name="_latest_flowrate", default=list())
     _pressure_setpoint = StatusVar(name="_pressure_setpoint", default=0.0)
@@ -152,7 +157,17 @@ class FluidicsFlowLogic(LogicBase):
         self._flow_sensor = self.flow_sensor()
         self._fluidics_pump = self.fluidics_pump()
         self._rinsing_pump = self.rinsing_pump()
+        self._valve_logic = self.valve_logic()
+
         self._threadpool = QtCore.QThreadPool.globalInstance()
+
+        self._rinsing_previous_valve_positions = {}
+        self._validate_rinsing_valve_positions()
+
+        self._rinsing_timer = QtCore.QTimer()
+        self._rinsing_timer.setSingleShot(True)
+        self._rinsing_timer.timeout.connect(self.rinsing_finished)
+
         self.set_pressure(0.0)
         self.update_flow_measurement()
 
@@ -161,10 +176,20 @@ class FluidicsFlowLogic(LogicBase):
         self.stop_flow_measurement()
         self.stop_pressure_regulation_loop()
         self.stop_volume_measurement()
+
+        try:
+            self.stop_rinsing(emit_signal=False)
+        except Exception as exc:
+            self.log.warning(f"Could not stop rinsing during deactivation: {exc}")
+
         try:
             self.set_pressure(0.0)
         except Exception as exc:
             self.log.warning(f"Could not reset pressure during deactivation: {exc}")
+
+        if self._rinsing_timer is not None:
+            self._rinsing_timer.timeout.disconnect()
+            self._rinsing_timer = None
 
         self._fluidics_pump = None
         self._rinsing_pump = None
@@ -491,24 +516,135 @@ class FluidicsFlowLogic(LogicBase):
 
     # Rinse needle ---------------------------------------------------------------------------------------------------------
 
-    def start_rinsing(self, duration):
-        """Start needle rinsing.
+    @QtCore.Slot(int)
+    def start_rinsing(self, duration) -> None:
+        """Run the rinsing pump for a fixed duration."""
+        duration = float(duration)
 
-        Args:
-            duration (float): Rinsing duration in seconds.
-        """
+        if duration <= 0:
+            raise ValueError("Rinsing duration must be greater than zero.")
+
+        if self._rinsing_pump is None:
+            raise RuntimeError("The rinsing pump is not connected.")
+
+        # Cancel a previous rinse before starting another one.
+        if self.rinsing_enabled:
+            self.stop_rinsing(emit_signal=False)
+
+        try:
+            self._prepare_valves_for_rinsing()
+            constraints = (self._rinsing_pump.get_constraints())
+            self._rinsing_pump.set_output({0: float(constraints["maximum"]),})
+            self.rinsing_enabled = True
+            self._rinsing_timer.start(int(round(duration * 1000)))
+        except Exception:
+            # The pump may not have started, but stopping it is safe.
+            try:
+                self._rinsing_pump.stop()
+            except Exception as stop_error:
+                self.log.error(f"Could not stop the rinsing pump after an initialization error: {stop_error}")
+
+            try:
+                self._restore_valves_after_rinsing()
+            except Exception as restore_error:
+                self.log.error(f"Could not restore the valves after an initialization error: {restore_error}")
+
         self.rinsing_enabled = True
-        self.rinsing_pump.rinsing(duration)
 
-    def stop_rinsing(self):
-        """Stop needle rinsing and notify listeners."""
-        self.rinsing_enabled = False
-        self.sigRinsingFinished.emit()
+    @QtCore.Slot()
+    def stop_rinsing(self, emit_signal: bool = True,) -> None:
+        """Stop the rinsing pump and cancel its timer."""
+        if self._rinsing_timer is not None and self._rinsing_timer.isActive():
+            self._rinsing_timer.stop()
 
-    def rinsing_finished(self):
-        """Handle completion of a timed rinsing operation."""
+        errors = []
+
+        if self._rinsing_pump is not None:
+            try:
+                self._rinsing_pump.stop()
+            except Exception as exc:
+                errors.append(f"stopping the rinsing pump failed: {exc}")
+
+        if self._valve_logic is not None:
+            try:
+                self._restore_valves_after_rinsing()
+            except Exception as exc:
+                errors.append(f"restoring the valves failed: {exc}")
+
         self.rinsing_enabled = False
-        self.sigRinsingFinished.emit()
+
+        if emit_signal:
+            self.sigRinsingFinished.emit()
+
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    @QtCore.Slot()
+    def rinsing_finished(self) -> None:
+        """Stop the pump when the rinsing timer expires."""
+        self.stop_rinsing()
+
+    def _validate_rinsing_valve_positions(self) -> None:
+        """Validate the configured valve IDs and rinse positions."""
+        normalized_positions = {}
+
+        for valve_id, position in self._rinsing_valve_positions.items():
+            valve_id = str(valve_id)
+            position = int(position)
+
+            if valve_id not in self._valve_logic.valve_dict:
+                raise ValueError(f"Rinsing valve {valve_id} is not available. Available valves: {tuple(self._valve_logic.valve_dict)}.")
+
+            maximum = int(self._valve_logic.valve_dict[valve_id]["number_outputs"])
+
+            if position < 1 or position > maximum:
+                raise ValueError(f"Rinsing position {position} is invalid for valve {valve_id}. Valid positions are 1 to {maximum}.")
+            normalized_positions[valve_id] = position
+
+        self._rinsing_valve_positions = normalized_positions
+
+    def _prepare_valves_for_rinsing(self) -> None:
+        """Save current valve positions and apply the rinsing route."""
+        previous_positions = {}
+
+        # First read every position. Do not move anything until all
+        # current positions have been obtained successfully.
+        for valve_id in self._rinsing_valve_positions:
+            current_position = (self._valve_logic.get_valve_position(valve_id))
+
+            if current_position is None:
+                raise RuntimeError(f"Could not read the current position of valve {valve_id!r}.")
+            previous_positions[valve_id] = int(current_position)
+
+        self._rinsing_previous_valve_positions = (previous_positions)
+
+        # Then apply the rinsing positions.
+        for valve_id, rinsing_position in (self._rinsing_valve_positions.items()):
+            if (previous_positions[valve_id] != rinsing_position):
+                self._valve_logic.set_valve_position(valve_id, rinsing_position)
+
+            # Optional but useful: verify the movement.
+            actual_position = (self._valve_logic.get_valve_position(valve_id))
+
+            if int(actual_position) != rinsing_position:
+                raise RuntimeError(f"Valve {valve_id!r} did not reach rinsing position {rinsing_position}. Current position: {actual_position}.")
+
+    def _restore_valves_after_rinsing(self) -> None:
+        """Restore the valve positions saved before rinsing."""
+        if not self._restore_rinsing_valves:
+            self._rinsing_previous_valve_positions = {}
+            return
+
+        previous_positions = dict(self._rinsing_previous_valve_positions or {})
+
+        # Restore in reverse order, like unwinding a sequence.
+        for valve_id, position in reversed(tuple(previous_positions.items())):
+            current_position = (self._valve_logic.get_valve_position(valve_id))
+
+            if int(current_position) != int(position):
+                self._valve_logic.set_valve_position(valve_id, int(position))
+
+        self._rinsing_previous_valve_positions = {}
 
     # ----------------------------------------------------------------------------------------------------------------------
     # Methods to handle the user interface state

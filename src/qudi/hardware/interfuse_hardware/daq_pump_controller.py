@@ -116,6 +116,9 @@ class DaqPumpController(PumpInterface):
             "maximum": float(self._voltage_maximum),
         }
 
-    def stop(self):
-        """Drive the output task to the configured minimum voltage."""
-        self._daq.write_named_ao(self._output_task, float(self._voltage_minimum))
+    def stop(self) -> None:
+        """Drive the pump to its safe minimum output."""
+        self.set_output({0: float(self._voltage_minimum)})
+        self._set_voltage = self._voltage_minimum
+
+
