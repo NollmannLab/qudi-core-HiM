@@ -27,10 +27,9 @@ from qudi.core.connector import Connector
 
 
 class TestTask(ModuleTask):
-
-    _robot = Connector(name='pipetting_robot_logic', interface='LogicBase')
-    _valve = Connector(name='valve_logic', interface='LogicBase')
-    _flow = Connector(name='flowcontrol_logic', interface='LogicBase')
+    _valve = Connector(name='fluidics_valve', interface='FluidicsValveLogic')
+    _robot = Connector(name='pipetting_robot', interface='FluidicsRobotLogic')
+    _flow = Connector(name='fluidics_flow', interface='FluidicsFlowLogic')
 
     def _setup(self) -> None:
         i = 0
