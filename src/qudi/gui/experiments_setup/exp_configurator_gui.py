@@ -1,40 +1,27 @@
 # -*- coding: utf-8 -*-
-"""
-Qudi-CBS
 
+"""
+# Author: F.Barho - adapted to qudi-core by JB Fiche
+# Reformated: 2026-07-31
 This module contains a GUI that allows to create an experiment config file for a Task.
 
-An extension to Qudi.
+qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
-@author: F. Barho - later modifications JB Fiche
------------------------------------------------------------------------------------
+Qudi is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 
-Qudi is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-Qudi is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with Qudi. If not, see <http://www.gnu.org/licenses/>.
-
-Copyright (c) the Qudi Developers. See the COPYRIGHT.txt file at the
-top-level directory of this distribution and at <https://github.com/Ulm-IQO/qudi/>
------------------------------------------------------------------------------------
+You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 """
+
 import os
 from qtpy import QtCore
-from qtpy import QtGui
 from qtpy import QtWidgets
 from qtpy import uic
 
-from gui.guibase import GUIBase
-from core.connector import Connector
-from core.configoption import ConfigOption
+from qudi.core.module import GuiBase
+from qudi.core.connector import Connector
+from qudi.core.configoption import ConfigOption
 
 
 class ExpConfiguratorWindow(QtWidgets.QMainWindow):
@@ -53,7 +40,7 @@ class ExpConfiguratorWindow(QtWidgets.QMainWindow):
         self.show()
 
 
-class ExpConfiguratorGUI(GUIBase):
+class ExpConfiguratorGUI(GuiBase):
     """ GUI module that helps the user to define the configuration file for the different types of experiments (=tasks).
 
     Example config for copy-paste:
@@ -68,7 +55,7 @@ class ExpConfiguratorGUI(GUIBase):
     QtCore.QLocale.setDefault(QtCore.QLocale("English"))
 
     # connector to logic module
-    exp_logic = Connector(interface='ExpConfigLogic')
+    exp_logic = Connector(name='experiment_logic', interface='ExpConfigLogic')
 
     # config options
     default_location = ConfigOption('default_location_qudi_files', missing='warn')
@@ -119,7 +106,8 @@ class ExpConfiguratorGUI(GUIBase):
 
         # widgets on the configuration form
         # self._mw.select_experiment_ComboBox.activated[str].connect(self.update_form)
-        self._mw.select_experiment_ComboBox.activated[str].connect(self.start_new_experiment_config)
+        # self._mw.select_experiment_ComboBox.activated[str].connect(self.start_new_experiment_config)
+        self._mw.select_experiment_ComboBox.textActivated.connect(self.start_new_experiment_config)
 
         self._mw.sample_name_LineEdit.textChanged.connect(self._exp_logic.update_sample_name)
         self._mw.mail_LineEdit.textChanged.connect(self._exp_logic.update_mail_address)
@@ -195,17 +183,24 @@ class ExpConfiguratorGUI(GUIBase):
 
     def init_configuration_form(self):
         """ Enter items into the combo-boxes according to available elements on the setup. """
-        self._mw.filterpos_ComboBox.addItems(self._exp_logic.filters)
-        self._mw.laser_ComboBox.addItems(self._exp_logic.lasers)
-        self._mw.fileformat_ComboBox.addItems(self._exp_logic.supported_fileformats)
+
+        self.log.warning('Connectors were removed -- need to add them for later use')
+
+        # self._mw.filterpos_ComboBox.addItems(self._exp_logic.filters)
+        # self._mw.laser_ComboBox.addItems(self._exp_logic.lasers)
+        # self._mw.fileformat_ComboBox.addItems(self._exp_logic.supported_fileformats)
+
+        self._mw.filterpos_ComboBox.addItems([])
+        self._mw.laser_ComboBox.addItems([])
+        self._mw.fileformat_ComboBox.addItems([])
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods to adapt the configuration form depending on the current experiment
 # ----------------------------------------------------------------------------------------------------------------------
 
-    def start_new_experiment_config(self):
-        """
-        """
+    @QtCore.Slot(str)
+    def start_new_experiment_config(self, _experiment: str) -> None:
+        """Initialize the configuration form for a newly selected experiment."""
         self._exp_logic.init_default_config_dict()
         self.update_form()
 

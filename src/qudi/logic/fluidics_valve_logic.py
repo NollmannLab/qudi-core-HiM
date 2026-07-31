@@ -47,6 +47,9 @@ class FluidicsValveLogic(LogicBase):
     sigValveStatusUpdated = QtCore.Signal(dict)
     sigValvePositionChanged = QtCore.Signal(str, int)
 
+    # attributes
+    _valve = None
+    _valve_dict = {}
     _required_hardware_methods = (
         "get_valve_dict",
         "get_status",

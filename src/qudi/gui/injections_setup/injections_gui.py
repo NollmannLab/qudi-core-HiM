@@ -1,40 +1,27 @@
 # -*- coding: utf-8 -*-
+
 """
-Qudi-CBS
+# Author: F.Barho - adapted to qudi-core by JB Fiche
+# Reformated: 2026-07-31
+# This module contains a GUI that allows to create an injection sequence.
 
-This module contains a GUI that allows to create an injection sequence.
+qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
-An extension to Qudi.
+Qudi is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 
-@author: F. Barho
------------------------------------------------------------------------------------
-
-Qudi is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-Qudi is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with Qudi. If not, see <http://www.gnu.org/licenses/>.
-
-Copyright (c) the Qudi Developers. See the COPYRIGHT.txt file at the
-top-level directory of this distribution and at <https://github.com/Ulm-IQO/qudi/>
------------------------------------------------------------------------------------
+You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 """
+
 import os
 from qtpy import QtCore
-from qtpy import QtGui
 from qtpy import QtWidgets
 from qtpy import uic
 
-from gui.guibase import GUIBase
-from core.connector import Connector
-from core.configoption import ConfigOption
+from qudi.core.module import GuiBase
+from qudi.core.connector import Connector
+from qudi.core.configoption import ConfigOption
 
 
 class InjectionsWindow(QtWidgets.QMainWindow):
@@ -43,7 +30,7 @@ class InjectionsWindow(QtWidgets.QMainWindow):
     def __init__(self):
         # Get the path to the *.ui file
         this_dir = os.path.dirname(__file__)
-        ui_file = os.path.join(this_dir, 'ui_merfish.ui')
+        ui_file = os.path.join(this_dir, 'ui_injection_setup.ui')
 
         # Load it
         super().__init__()
@@ -52,7 +39,7 @@ class InjectionsWindow(QtWidgets.QMainWindow):
         self.show()
 
 
-class InjectionsGUI(GUIBase):
+class InjectionsGUI(GuiBase):
     """ Main window that allows to create an injection sequence, save it to a file, or load it from file.
 
     Example config for copy-paste:
@@ -64,7 +51,7 @@ class InjectionsGUI(GUIBase):
             injections_logic: 'injections_logic'
     """
     # connector to logic module
-    injections_logic = Connector(interface='InjectionsLogic')
+    injections_logic = Connector(name='injection_logic', interface='InjectionsLogic')
 
     # config options
     default_path = ConfigOption('default_path')

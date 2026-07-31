@@ -69,7 +69,7 @@ class TaskRunnerLogic(LogicBase):
         """Shut down task runner."""
         self._sigStartTask.disconnect()
         for task in self._running_tasks.values():
-            task.interrupt
+            task.interrupt()
         self._configured_task_types = dict()
 
     @property

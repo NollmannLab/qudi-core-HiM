@@ -19,6 +19,9 @@ import re
 from qtpy import QtCore
 from qudi.core.module import LogicBase
 from qudi.core.configoption import ConfigOption
+from qudi.core.connector import Connector
+from scipy.optimize import _root
+
 
 # ======================================================================================================================
 # Child classes of QAbstractListModel for the List Views
@@ -97,9 +100,12 @@ class InjectionsLogic(LogicBase):
         number_of_valve_positions: 8
         number_of_probes: 100
     """
-    probe_valve_number = ConfigOption('probe_valve_number', missing='warn')
-    num_valve_positions = ConfigOption('number_of_valve_positions', missing='warn')
-    num_probes = ConfigOption('number_of_probes', missing='warn')
+    # define connectors to logic modules
+    valve = Connector(name='valve_logic', interface='FluidicsValveLogic')
+    robot = Connector(name='robot_logic', interface='FluidicsRobotLogic')
+
+    probe_valve_number = ConfigOption('probe_valve_outlet', missing='error', converter=int)
+    buffer_valve_address = ConfigOption('buffer_valve_address', missing='error')
 
     # signals
     sigBufferListChanged = QtCore.Signal()
@@ -109,18 +115,30 @@ class InjectionsLogic(LogicBase):
     sigIncompleteLoad = QtCore.Signal()
 
     # attributes
+    _robot = None
+    _valve = None
+    num_valve_positions = 0
+    num_probes = 0
     procedures = ['Hybridization', 'Photobleaching']
     products = ['Probe']
 
     buffer_dict = {}  # key: value = valve_number: buffer_name (to make sure that each valve is only used once)
     probe_dict = {}  # key: value = position_number: probe_name (same comment)
 
-    def __init__(self, config, **kwargs):
-        super().__init__(config=config, **kwargs)
-
     def on_activate(self):
         """ Initialisation performed during activation of the module.
         """
+
+        # instantiate logic connections
+        self._robot = self.robot()
+        self._valve = self.valve()
+
+        # load the number of outlets from the valve logic
+        self.num_valve_positions = self._valve.valve_dict[self.buffer_valve_address]['number_outputs']
+
+        # load the number of available position for the pipetting robot
+        self.num_probes = self._robot.max_num_probes
+
         self.buffer_list_model = BufferListModel()
         self.probe_position_model = ProbePositionModel()
         self.hybridization_injection_sequence_model = InjectionSequenceModel()

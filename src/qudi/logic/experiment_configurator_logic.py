@@ -1,39 +1,25 @@
 # -*- coding: utf-8 -*-
+
 """
-Qudi-CBS
+# Author: F.Barho - adapted to qudi-core by JB Fiche
+# Created on 2021-02-17 -> Reformated: 2026-07-31
+# This module contains the logic for the experiment configurator.
 
-This module contains the logic for the experiment configurator.
+qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
-An extension to Qudi.
+Qudi is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 
-@author: F. Barho
-
-Created on Wed Feb 17 2021
------------------------------------------------------------------------------------
-
-Qudi is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-Qudi is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with Qudi. If not, see <http://www.gnu.org/licenses/>.
-
-Copyright (c) the Qudi Developers. See the COPYRIGHT.txt file at the
-top-level directory of this distribution and at <https://github.com/Ulm-IQO/qudi/>
------------------------------------------------------------------------------------
+You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 """
+
 import os
 import yaml
 from qtpy import QtCore
-from logic.generic_logic import GenericLogic
-from core.configoption import ConfigOption
-from core.connector import Connector
+from qudi.core.module import LogicBase
+from qudi.core.configoption import ConfigOption
+from qudi.core.connector import Connector
 
 
 # ======================================================================================================================
@@ -98,7 +84,7 @@ class ImagingSequenceModelTimelapsePALM(QtCore.QAbstractListModel):
 # Logic class
 # ======================================================================================================================
 
-class ExpConfigLogic(GenericLogic):
+class ExpConfigLogic(LogicBase):
     """
     Class containing the logic for the definition of a configuration file for an experiment
 
@@ -120,9 +106,9 @@ class ExpConfigLogic(GenericLogic):
             filterwheel_logic: 'filterwheel_logic'
     """
     # define connectors to logic modules
-    camera_logic = Connector(interface='CameraLogic')
-    laser_logic = Connector(interface='LaserControlLogic')
-    filterwheel_logic = Connector(interface='FilterwheelLogic')
+    # camera_logic = Connector(interface='CameraLogic')
+    # laser_logic = Connector(interface='LaserControlLogic')
+    # filterwheel_logic = Connector(interface='FilterwheelLogic')
 
     # signals
     sigConfigDictUpdated = QtCore.Signal()
@@ -136,31 +122,29 @@ class ExpConfigLogic(GenericLogic):
     default_path_images = ConfigOption('default path imagedata')
     default_network_path = ConfigOption('default network path')
 
+    # attributes
     config_dict = {}
-
-    def __init__(self, config, **kwargs):
-        super().__init__(config=config, **kwargs)
-        self._camera_logic = None
-        self._laser_logic = None
-        self._filterwheel_logic = None
-        self.filters = None
-        self.lasers = None
-        self.img_sequence_model = None
-        self.is_timelapse_ramm = False
-        self.is_timelapse_palm = False
+    _camera_logic = None
+    _laser_logic = None
+    _filterwheel_logic = None
+    filters = None
+    lasers = None
+    img_sequence_model = None
+    is_timelapse_ramm = False
+    is_timelapse_palm = False
 
     def on_activate(self):
         """ Initialisation performed during activation of the module.
         """
-        self._camera_logic = self.camera_logic()
-        self._laser_logic = self.laser_logic()
-        self._filterwheel_logic = self.filterwheel_logic()
-
-        # prepare the items that will be displayed in the ComboBoxes on the GUI
-        filter_dict = self._filterwheel_logic.get_filter_dict()
-        self.filters = [filter_dict[key]['name'] for key in filter_dict]
-        laser_dict = self._laser_logic.get_laser_dict()
-        self.lasers = [laser_dict[key]['wavelength'] for key in laser_dict]
+        # self._camera_logic = self.camera_logic()
+        # self._laser_logic = self.laser_logic()
+        # self._filterwheel_logic = self.filterwheel_logic()
+        #
+        # # prepare the items that will be displayed in the ComboBoxes on the GUI
+        # filter_dict = self._filterwheel_logic.get_filter_dict()
+        # self.filters = [filter_dict[key]['name'] for key in filter_dict]
+        # laser_dict = self._laser_logic.get_laser_dict()
+        # self.lasers = [laser_dict[key]['wavelength'] for key in laser_dict]
 
         self.img_sequence_model = ImagingSequenceModel()
         self.img_sequence_model_timelapse_ramm = ImagingSequenceModelTimelapseRAMM()
