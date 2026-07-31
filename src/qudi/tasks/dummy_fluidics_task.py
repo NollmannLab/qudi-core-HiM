@@ -22,30 +22,64 @@ If not, see <https://www.gnu.org/licenses/>.
 
 from typing import Iterable, Sequence, Mapping, Union, Any, Optional, Tuple
 
+from time import monotonic, sleep
+
 from qudi.core.scripting.moduletask import ModuleTask
 from qudi.core.connector import Connector
-
+from qtpy import QtCore
 
 class TestTask(ModuleTask):
-    _valve = Connector(name='fluidics_valve', interface='FluidicsValveLogic')
-    _robot = Connector(name='pipetting_robot', interface='FluidicsRobotLogic')
-    _flow = Connector(name='fluidics_flow', interface='FluidicsFlowLogic')
+    valve = Connector(name='fluidics_valve', interface='FluidicsValveLogic')
+    # robot = Connector(name='pipetting_robot', interface='FluidicsRobotLogic')
+    # flow = Connector(name='fluidics_flow', interface='FluidicsFlowLogic')
 
     def _setup(self) -> None:
-        i = 0
-        for i in range(100000000):
-            i += 1
+        self._valve = self.valve()
+        # self._robot = self.robot()
+        # self._flow = self.flow()
+
+    def _run(self, delay_s: float = 5.0) -> dict:
+        self._check_interrupt()
+        self._valve.set_valve_position("a", 2)
+        self._interruptible_sleep(delay_s)
+
+        self._check_interrupt()
+        self._valve.set_valve_position("a", 3)
+        self._interruptible_sleep(delay_s)
+
+        self._check_interrupt()
+        self._valve.set_valve_position("a", 1)
 
     def _cleanup(self) -> None:
-        i = 0
-        for i in range(100000000):
-            i += 1
+        """Return the valve to a safe position."""
+        valve = getattr(self, "_valve", None)
+        if valve is not None:
+            valve.set_valve_position("a", 1)
+        self.log.info("Valve test cleanup completed.")
 
-    def _run(self, pos_arg='abc', kw_arg=42):
-        i = 0
-        for i in range(10000000):
+    def _interruptible_sleep(self, duration_s: float, poll_interval_s: float = 0.1,) -> None:
+        """Wait while checking regularly for an interruption."""
+        deadline = monotonic() + duration_s
+
+        while True:
             self._check_interrupt()
-            i += 1
+            remaining_s = deadline - monotonic()
+            if remaining_s <= 0:
+                return
+            sleep(min(poll_interval_s, remaining_s))
+
+    @QtCore.Slot(str)
+    def interrupt_task(self, name: str) -> None:
+        """Request interruption of a running task."""
+        with self._thread_lock:
+            task = self._running_tasks.get(name)
+
+            if task is None:
+                self.log.error(f'No ModuleTask with name "{name}" is running.')
+                return
+            self.log.info( f'Interrupt requested for ModuleTask "{name}".')
+            task.interrupt()
+            self.log.info(f"Task interruption flag: {task.interrupted}")
 
 
 class TestTask2(ModuleTask):
