@@ -1,7 +1,7 @@
-id: hi_m_sd
+experiment: hi_m_sd
 description: Configure a fluidics experiment consisting of buffer injections, probe injections, and incubation steps.
 
-output_filename: hi_m_task_SD.yml
+output_filename: hi_m_task_SD.yaml
 
 sections:
   general: true
@@ -29,12 +29,12 @@ fields:
   save_path:
     visible: true
     required: true
-    default_from: setup.default_path_imagedata
+    default_from: default_path_imagedata
 
   save_network_path:
     visible: true
     required: false
-    default_from: setup.default_network_path
+    default_from: default_network_path
 
   transfer_data:
     visible: true
@@ -44,10 +44,6 @@ fields:
     visible: true
     required: true
     default: tif
-    choices:
-      - tif
-      - hdf5
-      - npy
 
   imaging_sequence:
     visible: true

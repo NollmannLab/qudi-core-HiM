@@ -16,6 +16,9 @@ You should have received a copy of the GNU General Public License along with Qud
 
 import os
 import yaml
+
+from copy import deepcopy
+
 from qtpy import QtCore
 from qudi.core.module import LogicBase
 from qudi.core.configoption import ConfigOption
@@ -106,9 +109,9 @@ class ExpConfigLogic(LogicBase):
             filterwheel_logic: 'filterwheel_logic'
     """
     # define connectors to logic modules
-    # camera_logic = Connector(interface='CameraLogic')
-    # laser_logic = Connector(interface='LaserControlLogic')
-    # filterwheel_logic = Connector(interface='FilterwheelLogic')
+    camera_logic = Connector(interface='CameraLogic', optional=True)
+    laser_logic = Connector(interface='LaserControlLogic', optional=True)
+    filterwheel_logic = Connector(interface='FilterwheelLogic', optional=True)
 
     # signals
     sigConfigDictUpdated = QtCore.Signal()
@@ -117,12 +120,15 @@ class ExpConfigLogic(LogicBase):
     sigUpdateListModel = QtCore.Signal(int)
 
     # config options
-    experiments = ConfigOption('experiments')
+    experiment_definitions_directory = ConfigOption("experiment_definitions_directory", missing="error")
+    experiments = ConfigOption('experiments', missing="warn", default=[])
     supported_fileformats = ConfigOption('supported fileformats')
-    default_path_images = ConfigOption('default path imagedata')
+    default_path_imagedata = ConfigOption('default path imagedata')
     default_network_path = ConfigOption('default network path')
 
     # attributes
+    _experiment_definitions = {}
+    experiment_labels = []
     config_dict = {}
     _camera_logic = None
     _laser_logic = None
@@ -136,308 +142,580 @@ class ExpConfigLogic(LogicBase):
     def on_activate(self):
         """ Initialisation performed during activation of the module.
         """
-        # self._camera_logic = self.camera_logic()
-        # self._laser_logic = self.laser_logic()
-        # self._filterwheel_logic = self.filterwheel_logic()
-        #
-        # # prepare the items that will be displayed in the ComboBoxes on the GUI
-        # filter_dict = self._filterwheel_logic.get_filter_dict()
-        # self.filters = [filter_dict[key]['name'] for key in filter_dict]
-        # laser_dict = self._laser_logic.get_laser_dict()
-        # self.lasers = [laser_dict[key]['wavelength'] for key in laser_dict]
+        self._camera_logic = self.camera_logic()
+        self._laser_logic = self.laser_logic()
+        self._filterwheel_logic = self.filterwheel_logic()
+
+        # prepare the items that will be displayed in the ComboBoxes on the GUI
+        self.lasers = []
+        if self._laser_logic is not None:
+            laser_dict = self._laser_logic.get_laser_dict()
+            self.lasers = [laser_dict[key]["wavelength"] for key in laser_dict]
+
+        self.filters = []
+        if self._filterwheel_logic  is not None:
+            filter_dict = self._filterwheel_logic.get_filter_dict()
+            self.filters = [filter_dict[key]['name'] for key in filter_dict]
 
         self.img_sequence_model = ImagingSequenceModel()
         self.img_sequence_model_timelapse_ramm = ImagingSequenceModelTimelapseRAMM()
         self.img_sequence_model_timelapse_palm = ImagingSequenceModelTimelapsePALM()
 
         # add an additional entry to the experiment selector combobox with placeholder text
-        self.experiments.insert(0, 'Select your experiment..')
-
-        self.init_default_config_dict()
+        self._load_experiment_definitions()
 
     def on_deactivate(self):
         """ Perform required deactivation. """
         pass
 
 # ----------------------------------------------------------------------------------------------------------------------
-# Methods to load / save experiment config files
+# Check instruments availability
 # ----------------------------------------------------------------------------------------------------------------------
 
-    def init_default_config_dict(self):
-        """ Initialize the entries of the dictionary with some default values,
-        to set entries to the form displayed on the GUI on startup.
-        NB : since the following entries are defined by default, they will not be mandatory for saving the form.
-        """
-        # self.config_dict = {}
-        self.config_dict['dapi'] = False
-        self.config_dict['rna'] = False
-        self.config_dict['transfer_data'] = False
-        self.config_dict['exposure'] = 0.05
-        self.config_dict['gain'] = 0
-        self.config_dict['num_frames'] = 1
-        self.config_dict['filter_pos'] = 1
+    @property
+    def camera_available(self) -> bool:
+        return self._camera_logic is not None
+
+    @property
+    def laser_available(self) -> bool:
+        return self._laser_logic is not None
+
+    @property
+    def filterwheel_available(self) -> bool:
+        return self._filterwheel_logic is not None
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Methods to load template file for experiments
+# ----------------------------------------------------------------------------------------------------------------------
+    @property
+    def experiment_definitions(self):
+        return dict(self._experiment_definitions)
+
+    def load_config_file(self, path):
+        with open(path, "r", encoding="utf-8") as stream:
+            loaded_config = yaml.safe_load(stream)
+
+        if not isinstance(loaded_config, dict):
+            raise ValueError("The experiment configuration must contain a YAML mapping.")
+
+        experiment = loaded_config.get("experiment")
+
+        if not experiment:raise ValueError("The configuration does not define an experiment.")
+
+        if experiment not in self._experiment_definitions:
+            raise ValueError(f"Experiment {experiment} is not available on this setup.")
+
+        definition = self._experiment_definitions[experiment]
+
+        # Begin with the definition defaults.
+        self.config_dict = self._get_definition_defaults(definition)
+
+        # Replace defaults with values loaded from the file.
+        self.config_dict.update(loaded_config)
+        self.current_experiment = experiment
+        self._restore_imaging_sequence_model()
+        self.log.info(f"Experiment configuration loaded from {path}")
+        self.sigConfigLoaded.emit()
+
+    def init_config_from_definition(self, experiment: str,) -> None:
+        """Initialize a new configuration from an experiment definition."""
+
+        try:
+            definition = self._experiment_definitions[experiment]
+        except KeyError as exc:
+            raise KeyError(f"No experiment definition found for {experiment!r}.") from exc
+
+        self.config_dict = self._get_definition_defaults(definition)
+
+        self.current_experiment = experiment
         self.img_sequence_model.items = []
         self.img_sequence_model_timelapse_ramm.items = []
         self.img_sequence_model_timelapse_palm.items = []
-        self.config_dict['save_path'] = self.default_path_images
-        self.config_dict['save_network_path'] = self.default_network_path
-        self.config_dict['file_format'] = 'tif'
-        self.config_dict['num_z_planes'] = 1
-        self.config_dict['centered_focal_plane'] = False
-        self.config_dict['dapi_path'] = ''
-        # self.config_dict['zen_ref_images_path'] = ''
-        # self.config_dict['zen_saving_path'] = ''
-        self.config_dict['num_iterations'] = 0
-        self.config_dict['time_step'] = 0
-        self.config_dict['axial_calibration_path'] = ''
-        self.config_dict['email'] = None
-        # add here further dictionary entries that need initialization
-        self.sigConfigDictUpdated.emit()
 
-    def save_to_exp_config_file(self, path, experiment, filename=None):
-        """ Saves the current config_dict to a yml file.
+        self.is_timelapse_ramm = False
+        self.is_timelapse_palm = False
 
-        :param: str path: path to directory where the config file is saved
-        :param: str experiment: name of the experiment that shall be saved.
-                        For clarity, always append the name of the experimental setup for which the task is destinated.
-        :param: str filename: name of the config file including the suffix .yml. Default is None.
-                            filename must only be given when using save copy of config file under a non-default name.
+    def _load_experiment_definitions(self) -> None:
+        """Load all enabled experiment-definition YAML files."""
+        directory = os.path.abspath(os.path.expanduser(self.experiment_definitions_directory))
 
-        :return: None
-        """
-        if not os.path.exists(path):
-            try:
-                os.makedirs(path)  # recursive creation of all directories on the path
-            except Exception as e:
-                self.log.error(f'Error {e}.')
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(f"Experiment-definition directory not found: {directory}")
 
-        config_dict = {}
+        self._experiment_definitions = {}
+        self.experiment_labels = []
 
-        print(f'Experiment = {experiment}')
+        for definition_filename in self.experiments:
+            definition_path = str(definition_filename)
+
+            if not os.path.isabs(definition_path):
+                definition_path = os.path.join(directory, definition_path)
+
+            if not os.path.isfile(definition_path):
+                raise FileNotFoundError(f"Experiment-definition file not found: {definition_path}")
+
+            with open(definition_path, "r", encoding="utf-8") as stream:
+                definition = yaml.safe_load(stream)
+
+            if not isinstance(definition, dict):
+                raise TypeError(f"Experiment definition must contain a YAML mapping: {definition_path}")
+
+            experiment = definition.get("experiment")
+
+            if not experiment:
+                raise ValueError(f"Experiment definition has no 'experiment' entry: {definition_path}")
+
+            experiment = str(experiment)
+
+            if experiment in self._experiment_definitions:
+                raise ValueError(f"Experiment {experiment!r} is defined more than once.")
+            fields = definition.get("fields", {})
+
+            if not isinstance(fields, dict):
+                raise TypeError(f"The 'fields' entry for experiment {experiment!r} must be a dictionary.")
+
+            output_filename = definition.get("output_filename")
+
+            if not output_filename:
+                raise ValueError(f"Experiment {experiment!r} has no output filename.")
+
+            self._experiment_definitions[experiment] = definition
+            self.experiment_labels.append(experiment)
+
+            self.log.info(f"Loaded experiment definition {experiment!r} from {definition_path}")
+
+    def _get_definition_defaults(self, definition: dict) -> dict:
+        """Create a configuration dictionary from field defaults."""
+        experiment = definition["experiment"]
+        fields = definition.get("fields", {})
+
+        config = {"experiment": experiment,}
+
+        for field_name, field_definition in fields.items():
+            if field_definition is None:
+                field_definition = {}
+
+            if not isinstance(field_definition, dict):
+                raise TypeError(f"Definition of field {field_name!r} must be a dictionary.")
+
+            config[field_name] = self._get_field_default(field_definition)
+
+        return config
+
+    def _restore_imaging_sequence_model(self) -> None:
+        """Restore the appropriate imaging-sequence model."""
+        self.img_sequence_model.items = []
+        self.img_sequence_model_timelapse_ramm.items = []
+        self.img_sequence_model_timelapse_palm.items = []
+
+        sequence = self.config_dict.get("imaging_sequence", [])
+
+        definition = self._experiment_definitions[self.current_experiment]
+
+        imaging_definition = (
+            definition
+            .get("fields", {})
+            .get("imaging_sequence", {})
+        )
+
+        if imaging_definition is None:
+            imaging_definition = {}
+
+        model_name = imaging_definition.get("model", "standard",)
+
+        self.is_timelapse_ramm = (model_name == "timelapse_ramm")
+        self.is_timelapse_palm = (model_name == "timelapse_palm")
+
+        if model_name == "timelapse_ramm":
+            self.img_sequence_model_timelapse_ramm.items = (deepcopy(sequence))
+            self.sigUpdateListModel.emit(1)
+
+        elif model_name == "timelapse_palm":
+            self.img_sequence_model_timelapse_palm.items = (deepcopy(sequence))
+            self.sigUpdateListModel.emit(2)
+
+        else:
+            self.img_sequence_model.items = deepcopy(sequence)
+            self.sigUpdateListModel.emit(0)
+
+    def _get_field_default(self, field_definition: dict):
+        """Return the configured default value for one experiment field."""
+        if "default" in field_definition:
+            return deepcopy(field_definition["default"])
+
+        default_source = field_definition.get("default_from")
+
+        setup_defaults = {
+            "default_path_imagedata": self.default_path_imagedata,
+            "default_network_path": self.default_network_path,
+        }
+
+        if default_source in setup_defaults:
+            return deepcopy(setup_defaults[default_source])
+
+        if default_source is not None:
+            self.log.warning(f"Unknown default source {default_source!r}.")
+
+        return None
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Methods to load / save experiment config files
+# ----------------------------------------------------------------------------------------------------------------------
+
+    # def init_default_config_dict(self):
+    #     """ Initialize the entries of the dictionary with some default values,
+    #     to set entries to the form displayed on the GUI on startup.
+    #     NB : since the following entries are defined by default, they will not be mandatory for saving the form.
+    #     """
+    #     # self.config_dict = {}
+    #     self.config_dict['dapi'] = False
+    #     self.config_dict['rna'] = False
+    #     self.config_dict['transfer_data'] = False
+    #     self.config_dict['exposure'] = 0.05
+    #     self.config_dict['gain'] = 0
+    #     self.config_dict['num_frames'] = 1
+    #     self.config_dict['filter_pos'] = 1
+    #     self.img_sequence_model.items = []
+    #     self.img_sequence_model_timelapse_ramm.items = []
+    #     self.img_sequence_model_timelapse_palm.items = []
+    #     self.config_dict['save_path'] = self.default_path_images
+    #     self.config_dict['save_network_path'] = self.default_network_path
+    #     self.config_dict['file_format'] = 'tif'
+    #     self.config_dict['num_z_planes'] = 1
+    #     self.config_dict['centered_focal_plane'] = False
+    #     self.config_dict['dapi_path'] = ''
+    #     # self.config_dict['zen_ref_images_path'] = ''
+    #     # self.config_dict['zen_saving_path'] = ''
+    #     self.config_dict['num_iterations'] = 0
+    #     self.config_dict['time_step'] = 0
+    #     self.config_dict['axial_calibration_path'] = ''
+    #     self.config_dict['email'] = None
+    #     # add here further dictionary entries that need initialization
+    #     self.sigConfigDictUpdated.emit()
+
+    # def save_to_exp_config_file(self, path, experiment, filename=None):
+    #     """ Saves the current config_dict to a yml file.
+    #
+    #     :param: str path: path to directory where the config file is saved
+    #     :param: str experiment: name of the experiment that shall be saved.
+    #                     For clarity, always append the name of the experimental setup for which the task is destinated.
+    #     :param: str filename: name of the config file including the suffix .yml. Default is None.
+    #                         filename must only be given when using save copy of config file under a non-default name.
+    #
+    #     :return: None
+    #     """
+    #     if not os.path.exists(path):
+    #         try:
+    #             os.makedirs(path)  # recursive creation of all directories on the path
+    #         except Exception as e:
+    #             self.log.error(f'Error {e}.')
+    #
+    #     config_dict = {}
+    #
+    #     print(f'Experiment = {experiment}')
+    #
+    #     try:
+    #         if experiment == 'Multicolor imaging PALM':
+    #             if not filename:
+    #                 filename = 'multicolor_imaging_task_PALM.yml'
+    #             keys_to_extract = ['sample_name', 'filter_pos', 'exposure', 'gain', 'num_frames', 'save_path',
+    #                                'imaging_sequence', 'file_format']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Multicolor scan PALM':
+    #             if not filename:
+    #                 filename = 'multicolor_scan_task_PALM.yml'
+    #             keys_to_extract = ['sample_name', 'filter_pos', 'exposure', 'gain', 'num_frames', 'save_path',
+    #                                'file_format', 'imaging_sequence', 'num_z_planes', 'z_step', 'centered_focal_plane']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Multicolor scan RAMM':
+    #             if not filename:
+    #                 filename = 'multicolor_scan_task_RAMM.yml'
+    #             keys_to_extract = ['sample_name', 'exposure', 'save_path', 'file_format', 'imaging_sequence',
+    #                                'num_z_planes', 'z_step', 'centered_focal_plane']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         if experiment == 'PAINT RAMM':
+    #             if not filename:
+    #                 filename = 'PAINT_task_RAMM.yml'
+    #             keys_to_extract = ['sample_name', 'exposure', 'save_path', 'imaging_sequence', 'num_z_planes']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Multicolor scan Airyscan':
+    #             if not filename:
+    #                 filename = 'multicolor_scan_task_AIRYSCAN.yml'
+    #             keys_to_extract = ['imaging_sequence', 'num_z_planes']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'ROI multicolor scan PALM':
+    #             if not filename:
+    #                 filename = 'ROI_multicolor_scan_task_PALM.yml'
+    #             keys_to_extract = ['sample_name', 'filter_pos', 'exposure', 'gain', 'num_frames', 'save_path',
+    #                                'file_format', 'imaging_sequence', 'num_z_planes', 'z_step', 'centered_focal_plane',
+    #                                'roi_list_path']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'ROI multicolor scan RAMM':
+    #             if not filename:
+    #                 filename = 'ROI_multicolor_scan_task_RAMM.yml'
+    #             keys_to_extract = ['sample_name', 'dapi', 'rna', 'exposure', 'save_path', 'file_format',
+    #                                'imaging_sequence', 'num_z_planes', 'z_step', 'roi_list_path',
+    #                                'centered_focal_plane']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'ROI multicolor scan Airyscan':
+    #             if not filename:
+    #                 filename = 'ROI_multicolor_scan_task_AIRYSCAN.yml'
+    #             keys_to_extract = ['sample_name', 'dapi', 'rna', 'save_path', 'imaging_sequence', 'num_z_planes',
+    #                                'roi_list_path']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'ROI multicolor scan Airyscan confocal':
+    #             if not filename:
+    #                 filename = 'ROI_multicolor_scan_task_AIRYSCAN_confocal.yml'
+    #             keys_to_extract = ['sample_name', 'save_path', 'roi_list_path']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Fluidics RAMM':
+    #             if not filename:
+    #                 filename = 'fluidics_task_RAMM.yml'
+    #             keys_to_extract = ['injections_path']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Fluidics Airyscan':
+    #             if not filename:
+    #                 filename = 'fluidics_task_AIRYSCAN.yml'
+    #             keys_to_extract = ['injections_path']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Hi-M RAMM':
+    #             if not filename:
+    #                 filename = 'hi_m_task_RAMM.yml'
+    #             keys_to_extract = ['sample_name', 'exposure', 'save_path', 'save_network_path', 'transfer_data',
+    #                                'file_format', 'imaging_sequence', 'num_z_planes', 'z_step', 'centered_focal_plane',
+    #                                'roi_list_path', 'injections_path', 'email']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Hi-M Airyscan Lumencor':
+    #             if not filename:
+    #                 filename = 'hi_m_task_AIRYSCAN.yml'
+    #                 keys_to_extract = ['sample_name', 'save_path', 'imaging_sequence', 'num_z_planes', 'roi_list_path',
+    #                                    'injections_path', 'dapi_path']
+    #                 config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Hi-M Airyscan Epi':
+    #             if not filename:
+    #                 filename = 'hi_m_task_AIRYSCAN_epi.yml'
+    #                 keys_to_extract = ['sample_name', 'imaging_sequence', 'num_z_planes', 'roi_list_path',
+    #                                    'injections_path', 'zen_ref_images_path', 'zen_saving_path',
+    #                                    'save_network_path', 'transfer_data', 'email', 'correlation_threshold']
+    #                 config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Hi-M Autofocus Check Epi':
+    #             if not filename:
+    #                 filename = 'calibration_task_epi.yml'
+    #                 keys_to_extract = ['sample_name', 'num_z_planes', 'roi_list_path', 'zen_ref_images_path',
+    #                                    'zen_saving_path', 'save_network_path', 'transfer_data', 'email']
+    #                 config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Hi-M Airyscan Confocal':
+    #             if not filename:
+    #                 filename = 'hi_m_task_AIRYSCAN_confocal.yml'
+    #                 keys_to_extract = ['sample_name', 'save_path', 'roi_list_path', 'injections_path', 'dapi_path']
+    #                 config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Photobleaching RAMM':
+    #             if not filename:
+    #                 filename = 'photobleaching_task_RAMM.yml'
+    #             keys_to_extract = ['imaging_sequence', 'roi_list_path', 'illumination_time']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Photobleaching Airyscan':
+    #             if not filename:
+    #                 filename = 'photobleaching_task_AIRYSCAN.yml'
+    #             keys_to_extract = ['imaging_sequence', 'roi_list_path', 'illumination_time']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Fast timelapse RAMM':
+    #             if not filename:
+    #                 filename = 'fast_timelapse_task_RAMM.yml'
+    #             keys_to_extract = ['sample_name', 'exposure', 'save_path', 'file_format', 'imaging_sequence',
+    #                                'num_z_planes', 'z_step', 'centered_focal_plane', 'roi_list_path', 'num_iterations',
+    #                                'axial_calibration_path']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Hubble RAMM':
+    #             if not filename:
+    #                 filename = 'hubble_task_RAMM.yml'
+    #             keys_to_extract = ['sample_name', 'exposure', 'save_path', 'file_format', 'imaging_sequence',
+    #                                'num_z_planes', 'z_step', 'centered_focal_plane', 'roi_list_path',
+    #                                'axial_calibration_path']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Timelapse RAMM':
+    #             if not filename:
+    #                 filename = 'timelapse_task_RAMM.yml'
+    #             keys_to_extract = ['sample_name', 'exposure', 'save_path', 'file_format', 'imaging_sequence',
+    #                                'centered_focal_plane', 'roi_list_path', 'num_iterations', 'time_step']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         elif experiment == 'Timelapse PALM':
+    #             if not filename:
+    #                 filename = 'timelapse_task_PALM.yml'
+    #             keys_to_extract = ['sample_name', 'exposure', 'gain', 'save_path', 'file_format', 'imaging_sequence',
+    #                                'centered_focal_plane', 'roi_list_path', 'num_iterations', 'time_step']
+    #             config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+    #
+    #         # add here all additional experiments and select the relevant keys
+    #         else:
+    #             pass
+    #
+    #     except KeyError as e:
+    #         self.log.warning(f'Experiment configuration not saved. Missing information {e}.')
+    #         return
+    #
+    #     config_dict['experiment'] = experiment
+    #     complete_path = os.path.join(path, filename)
+    #     print(complete_path)
+    #     with open(complete_path, 'w') as file:
+    #         yaml.safe_dump(config_dict, file, default_flow_style=False)
+    #     self.log.info('Saved experiment configuration to {}'.format(complete_path))
+
+    # def load_config_file(self, path):
+    #     """ Loads a configuration file and sets the entries of the config_dict accordingly
+    #
+    #     :param: str path: complete path to an experiment configuration file
+    #     :return: None
+    #     """
+    #     with open(path, 'r') as stream:
+    #         data_dict = yaml.safe_load(stream)
+    #
+    #     self.config_dict = data_dict
+    #
+    #     # safety check: is at least the key 'experiment' contained in the file ?
+    #     if 'experiment' not in self.config_dict.keys():
+    #         self.log.warning('The loaded files does not contain necessary parameters. Configuration not loaded.')
+    #         return
+    #     else:
+    #         self.log.info(f'Configuration loaded from {path}')
+    #
+    #     if 'imaging_sequence' in self.config_dict.keys():
+    #
+    #         if self.config_dict['experiment'] == 'Timelapse RAMM':
+    #             self.sigUpdateListModel.emit(1)
+    #             self.is_timelapse_ramm = True
+    #             self.is_timelapse_palm = False
+    #             for item in self.config_dict['imaging_sequence']:
+    #                 lightsource = item['lightsource']
+    #                 intensity = item['intensity']
+    #                 num_z_planes = item['num_z_planes']
+    #                 z_step = item['z_step']
+    #                 self.img_sequence_model_timelapse_ramm.items.append(
+    #                     {'lightsource': lightsource, 'intensity': intensity, 'num_z_planes': num_z_planes,
+    #                      'z_step': z_step})
+    #
+    #         elif self.config_dict['experiment'] == 'Timelapse PALM':
+    #             self.sigUpdateListModel.emit(2)
+    #             self.is_timelapse_palm = True
+    #             self.is_timelapse_ramm = False
+    #             for item in self.config_dict['imaging_sequence']:
+    #                 lightsource = item['lightsource']
+    #                 intensity = item['intensity']
+    #                 num_z_planes = item['num_z_planes']
+    #                 z_step = item['z_step']
+    #                 filter_pos = item['filter_pos']
+    #                 self.img_sequence_model_timelapse_palm.items.append(
+    #                     {'lightsource': lightsource, 'intensity': intensity, 'num_z_planes': num_z_planes,
+    #                      'z_step': z_step, 'filter_pos': filter_pos})
+    #
+    #         else:
+    #             self.sigUpdateListModel.emit(0)
+    #             self.is_timelapse_ramm = False
+    #             self.is_timelapse_palm = False
+    #             # synchronize the listviewmodel with the config_dict['imaging_sequence'] entry
+    #             self.img_sequence_model.items = self.config_dict['imaging_sequence']
+    #
+    #     self.sigConfigLoaded.emit()
+
+    def save_to_exp_config_file(self, path: str, experiment: str, filename=None,) -> None:
+        """Save the current experiment configuration to a YAML file."""
+
+        definition = self._experiment_definitions.get(experiment)
+        if definition is None:
+            self.log.error(f"No experiment definition found for {experiment!r}.")
+            return
+
+        fields = definition.get("fields", {})
+        if not isinstance(fields, dict):
+            self.log.error(f"The fields definition for {experiment!r} is invalid.")
+            return
+
+        # When saving normally, use the filename from the definition.
+        # When saving a copy, the filename selected by the user takes priority.
+        if not filename:
+            filename = definition.get("output_filename")
+
+        if not filename:
+            self.log.error(f"No output filename defined for {experiment!r}.")
+            return
+
+        missing_fields = []
+        for field_name, field_definition in fields.items():
+            if field_definition is None:
+                field_definition = {}
+
+            required = field_definition.get("required", False)
+            value = self.config_dict.get(field_name)
+
+            if required and self._is_missing_value(value):
+                missing_fields.append(field_name)
+
+        if missing_fields:
+            missing_text = ", ".join(missing_fields)
+            self.log.error(
+                f"Experiment configuration not saved. Missing required fields: {missing_text}.")
+            return
+
+        saved_config = {"experiment": experiment,}
+
+        for field_name, field_definition in fields.items():
+            if field_name in self.config_dict:
+                saved_config[field_name] = deepcopy(self.config_dict[field_name] )
+            elif isinstance(field_definition, dict):
+                saved_config[field_name] = deepcopy(field_definition.get("default"))
 
         try:
-            if experiment == 'Multicolor imaging PALM':
-                if not filename:
-                    filename = 'multicolor_imaging_task_PALM.yml'
-                keys_to_extract = ['sample_name', 'filter_pos', 'exposure', 'gain', 'num_frames', 'save_path',
-                                   'imaging_sequence', 'file_format']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
+            os.makedirs(path, exist_ok=True)
+            complete_path = os.path.join(path, filename,)
+            with open(complete_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(
+                    saved_config,
+                    stream,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                )
 
-            elif experiment == 'Multicolor scan PALM':
-                if not filename:
-                    filename = 'multicolor_scan_task_PALM.yml'
-                keys_to_extract = ['sample_name', 'filter_pos', 'exposure', 'gain', 'num_frames', 'save_path',
-                                   'file_format', 'imaging_sequence', 'num_z_planes', 'z_step', 'centered_focal_plane']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Multicolor scan RAMM':
-                if not filename:
-                    filename = 'multicolor_scan_task_RAMM.yml'
-                keys_to_extract = ['sample_name', 'exposure', 'save_path', 'file_format', 'imaging_sequence',
-                                   'num_z_planes', 'z_step', 'centered_focal_plane']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            if experiment == 'PAINT RAMM':
-                if not filename:
-                    filename = 'PAINT_task_RAMM.yml'
-                keys_to_extract = ['sample_name', 'exposure', 'save_path', 'imaging_sequence', 'num_z_planes']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Multicolor scan Airyscan':
-                if not filename:
-                    filename = 'multicolor_scan_task_AIRYSCAN.yml'
-                keys_to_extract = ['imaging_sequence', 'num_z_planes']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'ROI multicolor scan PALM':
-                if not filename:
-                    filename = 'ROI_multicolor_scan_task_PALM.yml'
-                keys_to_extract = ['sample_name', 'filter_pos', 'exposure', 'gain', 'num_frames', 'save_path',
-                                   'file_format', 'imaging_sequence', 'num_z_planes', 'z_step', 'centered_focal_plane',
-                                   'roi_list_path']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'ROI multicolor scan RAMM':
-                if not filename:
-                    filename = 'ROI_multicolor_scan_task_RAMM.yml'
-                keys_to_extract = ['sample_name', 'dapi', 'rna', 'exposure', 'save_path', 'file_format',
-                                   'imaging_sequence', 'num_z_planes', 'z_step', 'roi_list_path',
-                                   'centered_focal_plane']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'ROI multicolor scan Airyscan':
-                if not filename:
-                    filename = 'ROI_multicolor_scan_task_AIRYSCAN.yml'
-                keys_to_extract = ['sample_name', 'dapi', 'rna', 'save_path', 'imaging_sequence', 'num_z_planes',
-                                   'roi_list_path']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'ROI multicolor scan Airyscan confocal':
-                if not filename:
-                    filename = 'ROI_multicolor_scan_task_AIRYSCAN_confocal.yml'
-                keys_to_extract = ['sample_name', 'save_path', 'roi_list_path']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Fluidics RAMM':
-                if not filename:
-                    filename = 'fluidics_task_RAMM.yml'
-                keys_to_extract = ['injections_path']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Fluidics Airyscan':
-                if not filename:
-                    filename = 'fluidics_task_AIRYSCAN.yml'
-                keys_to_extract = ['injections_path']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Hi-M RAMM':
-                if not filename:
-                    filename = 'hi_m_task_RAMM.yml'
-                keys_to_extract = ['sample_name', 'exposure', 'save_path', 'save_network_path', 'transfer_data',
-                                   'file_format', 'imaging_sequence', 'num_z_planes', 'z_step', 'centered_focal_plane',
-                                   'roi_list_path', 'injections_path', 'email']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Hi-M Airyscan Lumencor':
-                if not filename:
-                    filename = 'hi_m_task_AIRYSCAN.yml'
-                    keys_to_extract = ['sample_name', 'save_path', 'imaging_sequence', 'num_z_planes', 'roi_list_path',
-                                       'injections_path', 'dapi_path']
-                    config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Hi-M Airyscan Epi':
-                if not filename:
-                    filename = 'hi_m_task_AIRYSCAN_epi.yml'
-                    keys_to_extract = ['sample_name', 'imaging_sequence', 'num_z_planes', 'roi_list_path',
-                                       'injections_path', 'zen_ref_images_path', 'zen_saving_path',
-                                       'save_network_path', 'transfer_data', 'email', 'correlation_threshold']
-                    config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Hi-M Autofocus Check Epi':
-                if not filename:
-                    filename = 'calibration_task_epi.yml'
-                    keys_to_extract = ['sample_name', 'num_z_planes', 'roi_list_path', 'zen_ref_images_path',
-                                       'zen_saving_path', 'save_network_path', 'transfer_data', 'email']
-                    config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Hi-M Airyscan Confocal':
-                if not filename:
-                    filename = 'hi_m_task_AIRYSCAN_confocal.yml'
-                    keys_to_extract = ['sample_name', 'save_path', 'roi_list_path', 'injections_path', 'dapi_path']
-                    config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Photobleaching RAMM':
-                if not filename:
-                    filename = 'photobleaching_task_RAMM.yml'
-                keys_to_extract = ['imaging_sequence', 'roi_list_path', 'illumination_time']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Photobleaching Airyscan':
-                if not filename:
-                    filename = 'photobleaching_task_AIRYSCAN.yml'
-                keys_to_extract = ['imaging_sequence', 'roi_list_path', 'illumination_time']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Fast timelapse RAMM':
-                if not filename:
-                    filename = 'fast_timelapse_task_RAMM.yml'
-                keys_to_extract = ['sample_name', 'exposure', 'save_path', 'file_format', 'imaging_sequence',
-                                   'num_z_planes', 'z_step', 'centered_focal_plane', 'roi_list_path', 'num_iterations',
-                                   'axial_calibration_path']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Hubble RAMM':
-                if not filename:
-                    filename = 'hubble_task_RAMM.yml'
-                keys_to_extract = ['sample_name', 'exposure', 'save_path', 'file_format', 'imaging_sequence',
-                                   'num_z_planes', 'z_step', 'centered_focal_plane', 'roi_list_path',
-                                   'axial_calibration_path']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Timelapse RAMM':
-                if not filename:
-                    filename = 'timelapse_task_RAMM.yml'
-                keys_to_extract = ['sample_name', 'exposure', 'save_path', 'file_format', 'imaging_sequence',
-                                   'centered_focal_plane', 'roi_list_path', 'num_iterations', 'time_step']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            elif experiment == 'Timelapse PALM':
-                if not filename:
-                    filename = 'timelapse_task_PALM.yml'
-                keys_to_extract = ['sample_name', 'exposure', 'gain', 'save_path', 'file_format', 'imaging_sequence',
-                                   'centered_focal_plane', 'roi_list_path', 'num_iterations', 'time_step']
-                config_dict = {key: self.config_dict[key] for key in keys_to_extract}
-
-            # add here all additional experiments and select the relevant keys
-            else:
-                pass
-
-        except KeyError as e:
-            self.log.warning(f'Experiment configuration not saved. Missing information {e}.')
+        except OSError as error:
+            self.log.error(f"Could not save experiment configuration: {error}")
             return
 
-        config_dict['experiment'] = experiment
-        complete_path = os.path.join(path, filename)
-        print(complete_path)
-        with open(complete_path, 'w') as file:
-            yaml.safe_dump(config_dict, file, default_flow_style=False)
-        self.log.info('Saved experiment configuration to {}'.format(complete_path))
+        self.log.info(f"Saved experiment configuration to {complete_path}")
 
-    def load_config_file(self, path):
-        """ Loads a configuration file and sets the entries of the config_dict accordingly
+    @staticmethod
+    def _is_missing_value(value) -> bool:
+        """Return True when a required configuration value is empty."""
+        if value is None:
+            return True
 
-        :param: str path: complete path to an experiment configuration file
-        :return: None
-        """
-        with open(path, 'r') as stream:
-            data_dict = yaml.safe_load(stream)
+        if isinstance(value, str):
+            return not value.strip()
 
-        self.config_dict = data_dict
+        if isinstance(value, (list, tuple, dict)):
+            return len(value) == 0
 
-        # safety check: is at least the key 'experiment' contained in the file ?
-        if 'experiment' not in self.config_dict.keys():
-            self.log.warning('The loaded files does not contain necessary parameters. Configuration not loaded.')
-            return
-        else:
-            self.log.info(f'Configuration loaded from {path}')
-
-        if 'imaging_sequence' in self.config_dict.keys():
-
-            if self.config_dict['experiment'] == 'Timelapse RAMM':
-                self.sigUpdateListModel.emit(1)
-                self.is_timelapse_ramm = True
-                self.is_timelapse_palm = False
-                for item in self.config_dict['imaging_sequence']:
-                    lightsource = item['lightsource']
-                    intensity = item['intensity']
-                    num_z_planes = item['num_z_planes']
-                    z_step = item['z_step']
-                    self.img_sequence_model_timelapse_ramm.items.append(
-                        {'lightsource': lightsource, 'intensity': intensity, 'num_z_planes': num_z_planes,
-                         'z_step': z_step})
-
-            elif self.config_dict['experiment'] == 'Timelapse PALM':
-                self.sigUpdateListModel.emit(2)
-                self.is_timelapse_palm = True
-                self.is_timelapse_ramm = False
-                for item in self.config_dict['imaging_sequence']:
-                    lightsource = item['lightsource']
-                    intensity = item['intensity']
-                    num_z_planes = item['num_z_planes']
-                    z_step = item['z_step']
-                    filter_pos = item['filter_pos']
-                    self.img_sequence_model_timelapse_palm.items.append(
-                        {'lightsource': lightsource, 'intensity': intensity, 'num_z_planes': num_z_planes,
-                         'z_step': z_step, 'filter_pos': filter_pos})
-
-            else:
-                self.sigUpdateListModel.emit(0)
-                self.is_timelapse_ramm = False
-                self.is_timelapse_palm = False
-                # synchronize the listviewmodel with the config_dict['imaging_sequence'] entry
-                self.img_sequence_model.items = self.config_dict['imaging_sequence']
-
-        self.sigConfigLoaded.emit()
+        return False
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods to update dictionary entries on change of associated GUI element
