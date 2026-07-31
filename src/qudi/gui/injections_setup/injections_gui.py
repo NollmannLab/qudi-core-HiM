@@ -295,8 +295,8 @@ class InjectionsGUI(GuiBase):
         over to the logic where the data is loaded.
         """
         data_directory = self.default_path  # default location to look for the file
-        this_file = QtWidgets.QFileDialog.getOpenFileName(self._mw, 'Load injections', data_directory, 'yml files ('
-                                                                                                       '*.yml)')[0]
+        this_file = QtWidgets.QFileDialog.getOpenFileName(self._mw, 'Load injections', data_directory, 'yaml files ('
+                                                                                                       '*.yaml)')[0]
         if this_file:
             self.sigLoadInjections.emit(this_file)
 
@@ -307,8 +307,9 @@ class InjectionsGUI(GuiBase):
         this_file = QtWidgets.QFileDialog.getSaveFileName(self._mw,
                                                           'Save injection sequence',
                                                           data_directory,
-                                                          'yml files (*.yml)')[0]
+                                                          'yaml files (*.yaml)')[0]
         if this_file:
+            this_file = this_file
             self.sigSaveInjections.emit(this_file)
 
     def show_incomplete_load_warning(self):

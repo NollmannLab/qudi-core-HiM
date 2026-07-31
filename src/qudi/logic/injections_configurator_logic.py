@@ -16,6 +16,8 @@ You should have received a copy of the GNU General Public License along with Qud
 
 import yaml
 import re
+from pathlib import Path
+
 from qtpy import QtCore
 from qudi.core.module import LogicBase
 from qudi.core.configoption import ConfigOption
@@ -331,6 +333,9 @@ class InjectionsLogic(LogicBase):
         dictionary format.
         @param: str path: full path
         """
+        file_path = Path(path)
+        if file_path.suffix.lower() != ".yaml":
+            file_path = file_path.with_suffix(".yaml")
 
         # check consistency in injection sequences
         if self.check_injection_sequence_consistency():
@@ -355,11 +360,10 @@ class InjectionsLogic(LogicBase):
                 entry = self.make_dict_entry(entry_num, item[0], product, item[2], item[3], item[4])
                 photobleaching_list.append(entry)
 
-            # write a complete file containing buffer_dict, probe_dict, hybridization_list and photobleaching_list
-            with open(path, 'w') as file:
+            with open(file_path, 'w') as file:
                 dict_file = {'buffer': self.buffer_dict, 'probes': self.probe_dict, 'hybridization list': hybridization_list, 'photobleaching list': photobleaching_list}
                 yaml.safe_dump(dict_file, file, default_flow_style=False)  # , sort_keys=False
-                self.log.info('Injections saved to {}'.format(path))
+                self.log.info('Injections saved to {}'.format(file_path))
 
     def check_injection_sequence_consistency(self):
         """ check whether the injection method is consistent (the buffers indicated in the injections sequences should
