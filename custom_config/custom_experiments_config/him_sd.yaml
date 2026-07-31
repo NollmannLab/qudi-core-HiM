@@ -1,8 +1,7 @@
-schema_version: 1
+id: hi_m_sd
+description: Configure a fluidics experiment consisting of buffer injections, probe injections, and incubation steps.
 
-id: hi_m_ramm
-label: Hi-M RAMM
-output_filename: hi_m_task_RAMM.yml
+output_filename: hi_m_task_SD.yml
 
 sections:
   general: true
