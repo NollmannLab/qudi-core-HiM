@@ -1,0 +1,97 @@
+schema_version: 1
+
+id: hi_m_ramm
+label: Hi-M RAMM
+output_filename: hi_m_task_RAMM.yml
+
+sections:
+  general: true
+  camera: true
+  imaging: true
+  save: true
+  scan: true
+  documents: true
+  timelapse: false
+  zen_security: false
+
+fields:
+  sample_name:
+    visible: true
+    required: true
+    default: ""
+
+  exposure:
+    visible: true
+    required: true
+    default: 0.05
+    minimum: 0.001
+    unit: s
+
+  save_path:
+    visible: true
+    required: true
+    default_from: setup.default_path_imagedata
+
+  save_network_path:
+    visible: true
+    required: false
+    default_from: setup.default_network_path
+
+  transfer_data:
+    visible: true
+    default: false
+
+  file_format:
+    visible: true
+    required: true
+    default: tif
+    choices:
+      - tif
+      - hdf5
+      - npy
+
+  imaging_sequence:
+    visible: true
+    required: true
+    editor: standard
+
+  num_z_planes:
+    visible: true
+    required: true
+    default: 1
+    minimum: 1
+
+  z_step:
+    visible: true
+    required: true
+    default: 0.2
+    unit: µm
+
+  centered_focal_plane:
+    visible: true
+    default: false
+
+  roi_list_path:
+    visible: true
+    required: true
+    default: ""
+    editor: file
+    file_filter: JSON files (*.json)
+
+  injections_path:
+    visible: true
+    required: true
+    default: ""
+    editor: file
+    file_filter: YAML files (*.yml *.yaml)
+
+  email:
+    visible: true
+    required: false
+    default: ""
+
+imaging_sequence:
+  enabled: true
+  model: standard
+  additional_sources:
+    - Brightfield
