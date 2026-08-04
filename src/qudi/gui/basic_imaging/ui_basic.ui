@@ -762,7 +762,7 @@
   <customwidget>
    <class>ScanPlotWidget</class>
    <extends>QGraphicsView</extends>
-   <header>qtwidgets.scan_plotwidget</header>
+   <header>qudi.qtwidgets.scan_plotwidget</header>
   </customwidget>
  </customwidgets>
  <resources/>
