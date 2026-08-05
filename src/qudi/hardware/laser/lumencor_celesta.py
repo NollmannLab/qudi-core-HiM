@@ -16,38 +16,46 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 import urllib.request
-from qudi.core.module import Base
 from qudi.core.configoption import ConfigOption
-# from interface.lasercontrol_interface import LasercontrolInterface
+from qudi.interface.laser_control_interface import LaserControlInterface
 from time import sleep
 
 
-class LumencorCelesta(Base):
+class LumencorCelesta(LaserControlInterface):
     """ Class representing the Lumencor celesta laser source.
 
     Example config for copy-paste:
 
-  celesta:
-    module.Class: 'laser.lumencor_celesta.LumencorCelesta'
-    options:
-      ip: '192.168.201.200'
-      wavelengths:
-        - "405 nm"
-        - "446 nm"
-        - "477 nm"
-        - "520 nm"
-        - "546 nm"
-        - "638 nm"
-        - "750 nm"
+          celesta:
+            module.Class: 'laser.lumencor_celesta.LumencorCelesta'
+            options:
+              ip: '192.168.201.200'
+              wavelengths_nm:
+                - 405
+                - 477
+                - 546
+                - 638
+                - 750
     """
 
     # config options
     _ip = ConfigOption('ip', missing='error')
-    _wavelengths = ConfigOption('wavelengths', missing='error')
+    _wavelengths = ConfigOption('wavelengths_nm', missing='error', converter=list)
 
     def on_activate(self):
         """ Initialization: test whether the celesta is connected
         """
+
+        # retrieve available wavelengths from config
+        wavelengths = self.get_available_wavelengths()
+
+        if not wavelengths:
+            raise ValueError("No Celesta wavelengths are configured.")
+
+        if len(wavelengths) != len(set(wavelengths)):
+            raise ValueError("Celesta wavelengths must be unique.")
+
+        # test communication
         try:
             message = self.lumencor_httpcommand(self._ip, 'GET VER')
             self.log.info(f"Lumencor source version {message['message']} was found")
@@ -64,7 +72,7 @@ class LumencorCelesta(Base):
 # Celesta status functions
 # ----------------------------------------------------------------------------------------------------------------------
 
-    def status(self):
+    def _status(self):
         """ Ask for the laser source status (0:OK - 6:Standby - 7:Warming up - 1/2/3/4/5:Errors)
         """
         message = self.lumencor_httpcommand(self._ip, 'GET STAT')
@@ -76,7 +84,7 @@ class LumencorCelesta(Base):
             self.log.warning('There is an issue with the celesta source : overheating')
         return status
 
-    def wakeup(self):
+    def _wakeup(self):
         """ Wake up the celesta source when it is in standby mode and wait for the warmup procedure to be done
         """
         self.lumencor_httpcommand(self._ip, 'WAKEUP')
@@ -142,6 +150,10 @@ class LumencorCelesta(Base):
 # Getter and setter functions
 # ----------------------------------------------------------------------------------------------------------------------
 
+    def get_available_wavelengths(self) -> tuple[int, ...]:
+        """Return the nominal wavelengths physically available from the source."""
+        return tuple(int(wavelength) for wavelength in self._wavelengths)
+
     def get_laserline_intensity(self):
         """ Return the intensity of all laser lines
 
@@ -195,12 +207,13 @@ class LumencorCelesta(Base):
 
         self.set_intensity_all_laser_lines(laser_lines_intensity)
 
-    def set_intensity_all_laser_lines(self, intensity):
+    def set_intensity_all_laser_lines(self, intensity_dict):
         """ Set the intensity of all laser lines at once
 
-            intensity : array of int - indicate the laser power (in per thousand)
+            intensity : dictionary containing the wavelengths (int) as entry and the intensity (float) as value
         """
-        command = 'SET MULCHINT {}'.format(' '.join(map(str, intensity)))
+        intensities = [intensity_dict.get(wavelength, 0) for wavelength in self._wavelengths]
+        command = 'SET MULCHINT {}'.format(' '.join(map(str, intensities)))
         self.lumencor_httpcommand(self._ip, command)
 
     def set_selected_laser_line_on_off(self, wavelength, state):

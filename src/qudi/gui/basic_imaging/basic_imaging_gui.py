@@ -44,7 +44,8 @@ from qtpy import uic
 from qudi.core.module import GuiBase
 from qudi.core.connector import Connector
 from qudi.core.configoption import ConfigOption
-from helpers.validators import NameValidator
+from qudi.helpers.validators import NameValidator
+from qudi.qtwidgets.scan_plotwidget import ScanPlotWidget
 from ruamel.yaml import YAML
 
 verbose = True
@@ -58,7 +59,7 @@ def decorator_print_function(function):
 
     def new_function(*args, **kwargs):
         if verbose:
-            print(f'*** DEBUGGING *** Executing {function.__name__} from basic_gui.py')
+            print(f'*** DEBUGGING *** Executing {function.__name__} from basic_imaging_gui.py')
         return function(*args, **kwargs)
     return new_function
 
@@ -214,35 +215,32 @@ class BasicWindowCE(BasicWindow):
 # ======================================================================================================================
 # GUI class
 # ======================================================================================================================
-class BasicGUI(GuiBase):
+class BasicImagingGUI(GuiBase):
     """ Main window containing the basic tools for the fluorescence microscopy setup
 
     Example config for copy-paste:
 
-    Basic Imaging:
-        module.Class: 'fluorescence_microscopy.basic_gui.BasicGUI'
-        default_path: 'E:\DATA'
-        brightfield_control: True
-        Setup: 'RAMM'
-        connect:
-            camera_logic: 'camera_logic'
-            laser_logic: 'lasercontrol_logic'
-            filterwheel_logic: 'filterwheel_logic'
-            brightfield_logic: 'brightfield_logic'
+        basic_imaging:
+          module.Class: 'basic_imaging.basic_imaging_gui.BasicImagingGUI'
+          connect:
+            laser_logic: 'laser_control_logic'
+            filter_wheel_logic: 'filter_wheel_logic'
+          options:
+              default_path: 'E:\DATA'
+              metadata_template: '/home/jb/Repositories/qudi-core-HiM/custom_config/custom_metadata_templates/Spinning_Disk_setup.cfg'
     """
-    # define connectors to logic modules
-    camera_logic = Connector(interface='CameraLogic')
-    laser_logic = Connector(interface='LaserControlLogic')
-    filterwheel_logic = Connector(interface='FilterwheelLogic')
-    brightfield_logic = Connector(interface='BrightfieldLogic', optional=True)
+    # define connectors to logic modules - camera and brightfield control are allowed not to be connected. Filter-wheel is mandatory. All
+    # microscope contains at least one emission filter. In that case, a dummy filter wheel is configurate with a single filter.
+    camera_logic = Connector(name='camera', interface='CameraLogic', optional=True)
+    laser_logic = Connector(name='laser_logic', interface='LaserControlLogic')
+    filterwheel_logic = Connector(name='filter_wheel_logic', interface='FilterWheelLogic')
+    brightfield_logic = Connector(name='brightfield', interface='BrightfieldLogic', optional=True)
 
     # define the default language option as English (to make sure all float have a point as a separator)
     QtCore.QLocale.setDefault(QtCore.QLocale("English"))
 
     # config options
     default_path = ConfigOption('default_path', missing='error')
-    brightfield_control = ConfigOption('brightfield_control', False)
-    setup = ConfigOption('Setup', False)
     metadata_template_path = ConfigOption('metadata_template', missing='error')
 
     # signals
@@ -297,6 +295,7 @@ class BasicGUI(GuiBase):
     def __init__(self, config, **kwargs):
         super().__init__(config=config, **kwargs)
         self.laser_Labels = []
+        self.laser_wavelengths = []
         self.laser_DSpinBoxes = []
         self.bf_Label = None
         self.bf_control_DSpinBox = None
@@ -314,12 +313,20 @@ class BasicGUI(GuiBase):
         self._camera_logic = self.camera_logic()
         self._laser_logic = self.laser_logic()
         self._filterwheel_logic = self.filterwheel_logic()
+        self._brightfield_logic = self.brightfield_logic()
 
-        if self.brightfield_control:
-            self._brightfield_logic = self.brightfield_logic()
+        # Windows
+        self._initialize_common_ui()
 
-        # Inquire the max number of images that the camera can handle for a single acquisition
-        self._max_frames_movie, self._max_frames_spool = self._camera_logic.get_max_frames()
+        # initialize the widget associated to the camera
+        if self._camera_logic is not None:
+            self._initialize_camera_ui()
+        else:
+            self._hide_camera_ui()
+
+        # initialize the widget associated to the brigthfield
+        if self._brightfield_logic is not None:
+            self._initialize_brightfield_ui()
 
         # Load the metadata template
         self.yaml = YAML()
@@ -327,56 +334,13 @@ class BasicGUI(GuiBase):
             self.metadata_template = self.yaml.load(file)
         self.metadata_template = dict(self.metadata_template)
 
-        # Windows
-        self._mw = BasicWindowCE(self.close_function)
-        self._mw.centralwidget.hide()  # everything is in dockwidgets
-        # self._mw.setDockNestingEnabled(True)
-        self.init_camera_settings_ui()
+        # initialize functionalities of the laser and filter-wheel dockwidgets and their toolbars
+        self._initialize_laser_control_ui()
+        self._initialize_filterwheel_ui()
 
-        # make sure that the flags for image rotation are initially false and toggle buttons in options menu unchecked
-        self.rotation_cw = False
-        self.rotation_ccw = False
-        self.rot180 = False
-        self._mw.rotate_image_cw_MenuAction.setChecked(False)
-        self._mw.rotate_image_ccw_MenuAction.setChecked(False)
-        self._mw.rot180_image_MenuAction.setChecked(False)
-
-        # adapt the windows according to the setup
-        if self.setup == "Airyscan":
-            self._mw.camera_DockWidget.hide()
-            self._mw.camera_status_DockWidget.hide()
-            self._mw.toolBar.close()
-        elif self.setup == "RAMM":
-            self._mw.camera_status_DockWidget.hide()
-
-        # Menu bar actions
-        # File menu
-        self._mw.close_MenuAction.triggered.connect(self._mw.close)
-        # Options menu
-        self._mw.camera_settings_Action.triggered.connect(self.open_camera_settings)
-        self._mw.rotate_image_cw_MenuAction.toggled.connect(self.rotate_image_cw_toggled)
-        self._mw.rotate_image_ccw_MenuAction.toggled.connect(self.rotate_image_ccw_toggled)
-        self._mw.rot180_image_MenuAction.toggled.connect(self.rot180_image_toggled)
-        
-        # initialize functionality of the camera dockwidget and its toolbar
-        self.init_camera_dockwidget()
-
-        # initialize functionality of the camera status dockwidget
-        self.init_camera_status_dockwidget()
-
-        # initialize functionality of the laser dockwidget and its toolbar
-        self.init_laser_dockwidget()
-
-        # initialize functionality of the filter dockwidget
-        self.init_filter_dockwidget()
-
-        # connect signals for status bar
-        self._camera_logic.sigProgress.connect(self.update_statusbar)
-        self._camera_logic.sigSaving.connect(self.update_statusbar_saving)
-
-        # initialize the save settings dialog
-        # after initializing the camera dockwidget because some of the values there are needed
-        self.init_save_settings_ui()
+        # initialize the save settings dialog only if the camera is available
+        if self._camera_logic is not None:
+            self.init_save_settings_ui()
 
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
@@ -393,6 +357,14 @@ class BasicGUI(GuiBase):
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods to initialize the dockwidgets and their associated toolbar if there is one
 # ----------------------------------------------------------------------------------------------------------------------
+
+# common dockwidget ----------------------------------------------------------------------------------------------------
+    def _initialize_common_ui(self) -> None:
+        """Create the main window and connect setup-independent actions."""
+        self._mw = BasicWindowCE(self.close_function)
+        self._mw.centralwidget.hide()
+
+        self._mw.close_MenuAction.triggered.connect(self._mw.close)
 
 # camera dockwidget ----------------------------------------------------------------------------------------------------
     def init_camera_dockwidget(self):
@@ -494,6 +466,47 @@ class BasicGUI(GuiBase):
         self._camera_logic.sigEnableCameraActions.connect(self.enable_camera_toolbuttons)
 
 # camera status dockwidget ---------------------------------------------------------------------------------------------
+    def _initialize_camera_ui(self) -> None:
+        """Initialize all controls that depend on a connected camera."""
+
+        # Inquire the max number of images that the camera can handle for a single acquisition
+        self._max_frames_movie, self._max_frames_spool = self._camera_logic.get_max_frames()
+
+        # initialize image rotation menu
+        self.rotation_cw = False
+        self.rotation_ccw = False
+        self.rot180 = False
+        self._mw.rotate_image_cw_MenuAction.setChecked(False)
+        self._mw.rotate_image_ccw_MenuAction.setChecked(False)
+        self._mw.rot180_image_MenuAction.setChecked(False)
+
+        # Options menu
+        self._mw.camera_settings_Action.triggered.connect(self.open_camera_settings)
+        self._mw.rotate_image_cw_MenuAction.toggled.connect(self.rotate_image_cw_toggled)
+        self._mw.rotate_image_ccw_MenuAction.toggled.connect(self.rotate_image_ccw_toggled)
+        self._mw.rot180_image_MenuAction.toggled.connect(self.rot180_image_toggled)
+
+        # initialize layout
+        self.init_camera_settings_ui()
+        self.init_camera_dockwidget()
+        self.init_camera_status_dockwidget()
+        self.init_save_settings_ui()
+
+        # initialize signals
+        self._camera_logic.sigProgress.connect(self.update_statusbar)
+        self._camera_logic.sigSaving.connect(self.update_statusbar_saving)
+
+    def _hide_camera_ui(self) -> None:
+        """Hide controls that require a camera connection."""
+        self._mw.camera_DockWidget.hide()
+        self._mw.camera_status_DockWidget.hide()
+        self._mw.toolBar.hide()
+
+        self._mw.camera_settings_Action.setVisible(False)
+        self._mw.rotate_image_cw_MenuAction.setVisible(False)
+        self._mw.rotate_image_ccw_MenuAction.setVisible(False)
+        self._mw.rot180_image_MenuAction.setVisible(False)
+
     def init_camera_status_dockwidget(self):
         """ Initializes the indicators and connects signals for the camera status dockwidget. """
         # initialize the camera status indicators on the GUI
@@ -530,44 +543,51 @@ class BasicGUI(GuiBase):
         self._camera_logic.sigUpdateCamStatus.connect(self.update_camera_status_display)
 
 # laser dockwidget ---------------------------------------------------------------------------------------------
-    def init_laser_dockwidget(self):
+    def _initialize_brightfield_ui(self) -> None:
+        """Add brightfield controls when a brightfield logic is connected."""
+
+        self.bf_Label = QtWidgets.QLabel('BF')
+        self.bf_control_DSpinBox = QtWidgets.QDoubleSpinBox()
+        self._mw.formLayout_3.addRow(self.bf_Label, self.bf_control_DSpinBox)
+
+        self.brightfield_on_Action = self._mw.toolBar_2.addAction('Brightfield on')
+        self.brightfield_on_Action.setCheckable(True)
+        self.brightfield_on_Action.setChecked(False)
+
+        self.brightfield_on_Action.triggered.connect(self.brightfield_on_clicked)
+
+        self.sigBFOn.connect(self._brightfield_logic.led_control)
+        self.sigBFOff.connect(self._brightfield_logic.led_off)
+
+        # update the physical output when the spinbox value is changed
+        self.bf_control_DSpinBox.valueChanged.connect(self._brightfield_logic.update_intensity)
+        self._brightfield_logic.sigBrightfieldStopped.connect(self.reset_brightfield_toolbutton)
+
+    def _initialize_laser_control_ui(self):
         """ initializes the labels for the lasers given in config and connects signals for the laser control toolbar.
         """
         # create the laser labels and spinboxes according to number of elements given in config file
         self.laser_Labels = []
         self.laser_DSpinBoxes = []
+        self.laser_wavelengths = [int(wavelength) for wavelength in self._laser_logic.laser_dict]
 
-        for key in self._laser_logic._laser_dict.keys():
-            laser_label = QtWidgets.QLabel(self._laser_logic._laser_dict[key]['wavelength'])
+        # define the laser_spinbox that will allow to control the intensity for each laser line
+        for wavelength in self._laser_logic.laser_dict:
+            laser_label = QtWidgets.QLabel(f"{str(wavelength)} nm")
             self.laser_Labels.append(laser_label)
 
             laser_spinbox = QtWidgets.QDoubleSpinBox()
             laser_spinbox.setMaximum(100.00)
             laser_spinbox.setDecimals(1)
-            locale = QtCore.QLocale('English')
-            laser_spinbox.setLocale(locale)
+            laser_spinbox.setLocale(QtCore.QLocale("English"))
+
+            laser_spinbox.valueChanged.connect(
+                lambda value, wavelength=wavelength:
+                self._laser_logic.update_intensity_dict(wavelength, value)
+            )
+
             self.laser_DSpinBoxes.append(laser_spinbox)
-
             self._mw.formLayout_3.addRow(laser_label, laser_spinbox)
-
-        # add brightfield control widgets if applicable
-        if self.brightfield_control:
-            self.bf_Label = QtWidgets.QLabel('BF')
-            self.bf_control_DSpinBox = QtWidgets.QDoubleSpinBox()
-            self._mw.formLayout_3.addRow(self.bf_Label, self.bf_control_DSpinBox)
-
-            self.brightfield_on_Action = self._mw.toolBar_2.addAction('Brightfield on')
-            self.brightfield_on_Action.setCheckable(True)
-            self.brightfield_on_Action.setChecked(False)
-
-            self.brightfield_on_Action.triggered.connect(self.brightfield_on_clicked)
-
-            self.sigBFOn.connect(self._brightfield_logic.led_control)
-            self.sigBFOff.connect(self._brightfield_logic.led_off)
-
-            # update the physical output when the spinbox value is changed
-            self.bf_control_DSpinBox.valueChanged.connect(self._brightfield_logic.update_intensity)
-            self._brightfield_logic.sigBrightfieldStopped.connect(self.reset_brightfield_toolbutton)
 
         # toolbar actions
         self._mw.laser_on_Action.setEnabled(True)
@@ -579,31 +599,8 @@ class BasicGUI(GuiBase):
 
         # Signals to logic
         # starting / stopping the analog output
-        self.sigLaserOn.connect(self._laser_logic.apply_voltage)
-        self.sigLaserOff.connect(self._laser_logic.voltage_off)
-
-        # internal signals
-        # putting this in a loop did not work (only last element is then correctly connected) .. a less elegant alternative :
-        if len(self.laser_DSpinBoxes) > 0:
-            self.laser_DSpinBoxes[0].valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict['laser1']['label'], self.laser_DSpinBoxes[0].value()))
-        if len(self.laser_DSpinBoxes) > 1:
-            self.laser_DSpinBoxes[1].valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict['laser2']['label'], self.laser_DSpinBoxes[1].value()))
-        if len(self.laser_DSpinBoxes) > 2:
-            self.laser_DSpinBoxes[2].valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict['laser3']['label'], self.laser_DSpinBoxes[2].value()))
-        if len(self.laser_DSpinBoxes) > 3:
-            self.laser_DSpinBoxes[3].valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict['laser4']['label'], self.laser_DSpinBoxes[3].value()))
-        if len(self.laser_DSpinBoxes) > 4:
-            self.laser_DSpinBoxes[4].valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict['laser5']['label'], self.laser_DSpinBoxes[4].value()))
-        if len(self.laser_DSpinBoxes) > 5:
-            self.laser_DSpinBoxes[5].valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict['laser6']['label'], self.laser_DSpinBoxes[5].value()))
-        if len(self.laser_DSpinBoxes) > 6:
-            self.laser_DSpinBoxes[6].valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict['laser7']['label'], self.laser_DSpinBoxes[6].value()))
-        if len(self.laser_DSpinBoxes) > 7:
-            self.laser_DSpinBoxes[7].valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict['laser8']['label'], self.laser_DSpinBoxes[7].value()))
-
-        # for i, item in enumerate(self.laser_DSpinBoxes):
-        #     item.valueChanged.connect(lambda: self._laser_logic.update_intensity_dict(self._laser_logic._laser_dict[f'laser{i+1}']['label'], item.value()))
-        # lambda function is used to pass in an additional argument.
+        self.sigLaserOn.connect(self._laser_logic.set_laser_enabled)
+        self.sigLaserOff.connect(self._laser_logic.stop_all)
 
         # Signals from logic
         # update GUI when intensity is changed programatically
@@ -613,14 +610,14 @@ class BasicGUI(GuiBase):
         self._laser_logic.sigEnableLaserActions.connect(self.enable_laser_toolbuttons)
 
 # filter dockwidget ---------------------------------------------------------------------------------------------
-    def init_filter_dockwidget(self):
+    def _initialize_filterwheel_ui(self) -> None:
         """ initializes the filter selection combobox and connects signals.
         """
         # initialize the combobox displaying the available filters
         self.init_filter_selection()
 
         # internal signals
-        self._mw.filter_ComboBox.activated[str].connect(self.change_filter)
+        self._mw.filter_ComboBox.activated[int].connect(self.change_filter)
         # remark: signals currentIndexChanged vs activated:
         # currentIndexChanged is sent regardless of being done programmatically or by user interaction whereas
         # activated is only sent on user interaction.
@@ -738,7 +735,8 @@ class BasicGUI(GuiBase):
         self._save_sd.foldername_LineEdit.setValidator(NameValidator(empty_allowed=True))  # empty_allowed=True should be set or not ?
 
         # populate the file format combobox
-        self._save_sd.file_format_ComboBox.addItems(self._camera_logic.fileformat_list)
+        if self._camera_logic is not None:
+            self._save_sd.file_format_ComboBox.addItems(self._camera_logic.fileformat_list)
 
         # connect the lineedit with the path label
         self._save_sd.foldername_LineEdit.textChanged.connect(self.update_path_label)
@@ -835,7 +833,7 @@ class BasicGUI(GuiBase):
             acq_method = "spool"
         else:
             self.log.error('For some unknown reason, none of the two acquisition methods (video or spool) were properly'
-                           ' set. The error was detected in the "save_video_accepted" in basic_gui.py')
+                           ' set. The error was detected in the "save_video_accepted" in basic_imaging_gui.py')
 
         # Launch the first acquisition
         filename = f'movie_{"{:02d}".format(0)}'
@@ -1377,10 +1375,11 @@ class BasicGUI(GuiBase):
             metadata = update_metadata(metadata, ['Acquisition', 'frame_transfer'], "Not available")
 
         # ----filter------------------------------------------------------------------------------
-        filterpos = self._filterwheel_logic.get_position()
-        filterdict = self._filterwheel_logic.get_filter_dict()
-        label = 'filter{}'.format(filterpos)
-        metadata = update_metadata(metadata, ['Acquisition', 'filter'], filterdict[label]['name'])
+        if self._filterwheel_logic is not None:
+            filterpos = self._filterwheel_logic.get_position()
+            filterdict = self._filterwheel_logic.get_filter_dict()
+            label = 'filter{}'.format(filterpos)
+            metadata = update_metadata(metadata, ['Acquisition', 'filter'], filterdict[label]['name'])
 
         # ----laser-------------------------------------------------------------------------------
         intensity_dict = self._laser_logic._intensity_dict
@@ -1422,7 +1421,7 @@ class BasicGUI(GuiBase):
         Handles the state of the toolbutton and emits a signal that is connected to the physical output.
         Handles also the state of the filter selection combobox to avoid changing filter while lasers are on.
         """
-        if self._laser_logic.enabled:
+        if self._laser_logic.laser_enabled:
             # laser is initially on
             self._mw.laser_on_Action.setText('Laser On')
             self.sigLaserOff.emit()
@@ -1442,7 +1441,7 @@ class BasicGUI(GuiBase):
         for item in self.laser_DSpinBoxes:
             item.setValue(0)
         # also set brightfield control to zero in case it is available
-        if self.brightfield_control:
+        if self._brightfield_logic:
             self.bf_control_DSpinBox.setValue(0)
 
     @QtCore.Slot()
@@ -1464,8 +1463,8 @@ class BasicGUI(GuiBase):
     def update_laser_spinbox(self):
         """ Update values in laser spinboxes if the intensity dictionary in the logic module was changed """
         for index, item in enumerate(self.laser_DSpinBoxes):
-            label = 'laser'+str(index + 1)  # create the label to address the corresponding laser
-            item.setValue(self._laser_logic._intensity_dict[label])
+            wavelength = self.laser_wavelengths[index]
+            item.setValue(self._laser_logic.laser_dict[wavelength]["intensity"])
 
     @QtCore.Slot()
     def reset_laser_toolbutton(self):
@@ -1490,7 +1489,7 @@ class BasicGUI(GuiBase):
         """ disables all toolbuttons of the laser toolbar"""
         self._mw.laser_on_Action.setDisabled(True)
         self._mw.laser_zero_Action.setDisabled(True)
-        if self.brightfield_control:
+        if self._brightfield_logic:
             self.brightfield_on_Action.setDisabled(True)
 
     @QtCore.Slot()
@@ -1498,7 +1497,7 @@ class BasicGUI(GuiBase):
         """ enables all toolbuttons of the camera toolbar"""
         self._mw.laser_on_Action.setDisabled(False)
         self._mw.laser_zero_Action.setDisabled(False)
-        if self.brightfield_control:
+        if self._brightfield_logic:
             self.brightfield_on_Action.setDisabled(False)
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -1508,9 +1507,9 @@ class BasicGUI(GuiBase):
     def init_filter_selection(self):
         """ Initializes the filter selection combobox with the available filters.
         """
-        filter_dict = self._filterwheel_logic.filter_dict
-        for key in filter_dict:
-            text = str(filter_dict[key]['position'])+': '+filter_dict[key]['name']
+        filter_dict = self._filterwheel_logic.get_filter_dict()
+        for filter_pos, filter in filter_dict.items():
+            text = f"{filter_pos}: {filter['name']}"
             self._mw.filter_ComboBox.addItem(text)
 
         # set the active filter position in the list
@@ -1519,8 +1518,7 @@ class BasicGUI(GuiBase):
         self._mw.filter_ComboBox.setCurrentIndex(index)
 
         # disable the laser control spinboxes of lasers that are not allowed to be used with the selected filter
-        key = 'filter'+str(current_filter_position)  # create key which allows to access the corresponding entry in the filter_dict
-        self._disable_laser_control(self._filterwheel_logic.filter_dict[key]['lasers'])  # get the corresponding bool list from the logic module
+        self._disable_laser_control(filter_dict[current_filter_position]["allowed_wavelengths_nm"])  # get the corresponding bool list from the logic module
 
     def change_filter(self):
         """ Slot connected to the filter selection combobox. It sends the (int) number of the selected filter to the
@@ -1532,8 +1530,7 @@ class BasicGUI(GuiBase):
         self.sigFilterChanged.emit(filter_pos)
 
         # disable the laser control spinboxes of lasers that are not allowed to be used with the selected filter
-        key = 'filter'+str(filter_pos)  # create key which allows to access the corresponding entry in the filter_dict
-        self._disable_laser_control(self._filterwheel_logic.filter_dict[key]['lasers'])  # get the corresponding bool list from the logic module
+        self._disable_laser_control(self._filterwheel_logic.filter_dict[filter_pos]['allowed_wavelengths_nm'])  # get the corresponding bool list from the logic module
 
     def update_filter_display(self, position):
         """ Refresh the Combobox entry to ensure that after manually modifying the filter
@@ -1542,16 +1539,13 @@ class BasicGUI(GuiBase):
         index = position - 1  # zero indexing
         self._mw.filter_ComboBox.setCurrentIndex(index)
 
-    def _disable_laser_control(self, bool_list):        
+    def _disable_laser_control(self, allowed_wavelengths):
         """ Disables the control spinboxes of the lasers which are not allowed for a given filter
-        
-        :param: bool_list: list with entries corresponding to laser1 - laserN [True False True False ... True] means
-        that Laser1, laser3 and laserN are allowed, laser2 and laser4 are forbidden.
-        
+        :param: allowed_wavelengths (list) indicate the laser wavelengths that are allowed for the selected filter.
         :return: None
         """
-        for i in range(len(self.laser_DSpinBoxes)):
-            self.laser_DSpinBoxes[i].setEnabled(bool_list[i])
+        for wavelength, spinbox in zip(self.laser_wavelengths, self.laser_DSpinBoxes):
+            spinbox.setEnabled(wavelength in allowed_wavelengths)
 
 # disable/enable user interface actions --------------------------------------------------------------------------------
     @QtCore.Slot()
@@ -1574,15 +1568,16 @@ class BasicGUI(GuiBase):
         """ This method serves as a reimplementation of the close event. Continuous modes (such as camera live,
         laser on, etc. are stopped) when the main window is closed. """
         # stop live mode when window is closed
-        if self._camera_logic.live_enabled:
-            self.start_video_clicked()
-            self.reset_start_video_button()
+        if self._camera_logic:
+            if self._camera_logic.live_enabled:
+                self.start_video_clicked()
+                self.reset_start_video_button()
         # switch laser off when window is closed
         if self._laser_logic.enabled:
             self._laser_logic.voltage_off()
             self.reset_laser_toolbutton()
         # switch brightfield off when window is closed
-        if self.brightfield_control:
+        if self._brightfield_logic:
             if self._brightfield_logic.enabled:
                 self._brightfield_logic.led_off()
                 self.reset_brightfield_toolbutton()

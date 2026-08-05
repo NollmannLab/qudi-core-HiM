@@ -24,10 +24,11 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 from abc import abstractmethod
+
 from qudi.core.module import Base
 
 
-class LasercontrolInterface(Base):
+class LaserControlInterface(Base):
     """Interface for hardware or interfuse_hardware modules controlling lasers."""
 
     @abstractmethod
