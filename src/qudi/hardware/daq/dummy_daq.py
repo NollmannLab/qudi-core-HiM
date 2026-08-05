@@ -113,6 +113,17 @@ class DummyDaq(DaqInterface):
             raise KeyError(f"Unknown DAQ task '{task_name}'.")
         return self._tasks[task_name]["task_handle"]
 
+    def get_task_range(self, task_name):
+        """Return the task range for ``task_name``, if task is associated to an analog channel."""
+        if task_name not in self._tasks:
+            raise KeyError(f"Unknown DAQ task '{task_name}'.")
+
+        task = self._tasks[task_name]
+        if task["type"] == "ao":
+            return task["voltage_range"]
+        else:
+            return None
+
     def _get_task(self, task_name):
         """Return the stored task metadata for ``task_name``."""
         if task_name not in self._tasks:

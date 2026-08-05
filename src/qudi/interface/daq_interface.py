@@ -26,6 +26,11 @@ class DaqInterface(Base):
         pass
 
     @abstractmethod
+    def get_task_range(self, task_name):
+        """Return the voltage range associated to the task handle associated with ``task_name``."""
+        pass
+
+    @abstractmethod
     def write_to_ao_channel(self, taskhandle, voltage, timeout=None, autostart=True):
         """Write a scalar voltage to an analog-output channel."""
         pass
