@@ -28,48 +28,95 @@ class DummyFilterWheel(FilterWheelInterface):
 
     Example config for copy-paste:
 
-    wheel_dummy:
-        module.Class: 'wheels.dummy_filter_wheel.FilterwheelDummy'
+    dummy_filter_wheel:
+      module.Class: 'filter_wheel.dummy_filter_wheel.DummyFilterWheel'
+      options:
         num_filters: 6
-        filterpositions:
-            - 1
-            - 2
-            - 3
-            - 4
-            - 5
-            - 6
-        filters:
-            - '700 +/- 37 nm'
-            - '600 +/- 25 nm'
-            - '488 - 491 / 561 nm'
-            - '525 +/- 22.5 nm'
-            - '617 +/- 36 nm'
-            - '460 +/- 25 nm'
-        allowed_lasers:
-            - [True, True, True, True]
-            - [True, True, True, True]
-            - [True, True, True, True]
-            - [True, True, True, True]
-            - [True, True, True, False]
-            - [True, False, True, True]
+        filter_definitions:
+          - position: 1
+            name: 700 +/- 37 nm
+            allowed_wavelengths_nm:
+              - 405
+              - 488
+              - 561
+              - 640
 
-            # please specify for all elements corresponding information in the same order.
-            # allowed lasers:
-            # entries corresponding to [laser1_allowed, laser2_allowed, laser3_allowed, laser4_allowed, ..]
-            # see also the config for the daq ao output to associate a laser number to a wavelength
+          - position: 2
+            name: 600 +/- 25 nm
+            allowed_wavelengths_nm:
+              - 405
+              - 488
+              - 561
+              - 640
+
+          - position: 3
+            name: 488 - 491 / 561 nm
+            allowed_wavelengths_nm:
+              - 405
+              - 488
+              - 561
+              - 640
+
+          - position: 4
+            name: 525 +/- 22.5 nm
+            allowed_wavelengths_nm:
+              - 405
+              - 488
+              - 561
+              - 640
+
+          - position: 5
+            name: 617 +/- 36 nm
+            allowed_wavelengths_nm:
+              - 405
+              - 488
+              - 561
+
+          - position: 6
+            name: 460 +/- 25 nm
+            allowed_wavelengths_nm:
+              - 405
+              - 561
+              - 640
+
+    # please specify for all elements corresponding information in the same order.
+    # allowed lasers:
+    # entries corresponding to [laser1_allowed, laser2_allowed, laser3_allowed, laser4_allowed, ..]
+    # see also the config for the daq ao output to associate a laser number to a wavelength
     """
     # config options
-    _num_filters = ConfigOption('num_filters', 6)
-    _filternames = ConfigOption('filters', missing='error')
-    _positions = ConfigOption('filter_positions', missing='error')
-    _allowed_lasers = ConfigOption('allowed_lasers', missing='error')
+    _filter_definitions = ConfigOption('filter_definitions', missing='error')
+
+    # attributes
+    _filters_by_position = {}
 
     position = np.random.randint(1, 7)  # generate an arbitrary start value from 1 to 6
 
     def on_activate(self):
-        """ Module activation method. """
-        if len(self._filternames) != self._num_filters or len(self._positions) != self._num_filters or len(self._allowed_lasers) != self._num_filters:
-            self.log.warning('Please specify name, position, and allowed lasers for each filter')
+        """Activate the module and validate & store the configured filter definitions. The dictionary
+        is structured as follows:
+        _filters_by_position [{'position': 1, 'name': '700 +/- 37 nm', 'allowed_wavelengths_nm': [405, 488, 561, 640]},
+                              {'position': 2, 'name': '600 +/- 25 nm', 'allowed_wavelengths_nm': [405, 488, 561, 640]},
+                              {'position': 3, 'name': '488 - 491 / 561 nm', 'allowed_wavelengths_nm': [405, 488, 561, 640]},
+                              {'position': 4, 'name': '525 +/- 22.5 nm', 'allowed_wavelengths_nm': [405, 488, 561, 640]},
+                              {'position': 5, 'name': '617 +/- 36 nm', 'allowed_wavelengths_nm': [405, 488, 561]},
+                              {'position': 6, 'name': '460 +/- 25 nm', 'allowed_wavelengths_nm': [405, 561, 640]}]
+        """
+
+        for definition in self._filter_definitions:
+            position = int(definition["position"])
+
+            if position in self._filters_by_position:
+                self.log.error(f"Filter position {position} is defined more than once.")
+
+            self._filters_by_position[position] = {
+                "name": str(definition["name"]),
+                "allowed_wavelengths_nm": tuple(
+                    int(wavelength)
+                    for wavelength
+                    in definition["allowed_wavelengths_nm"]
+                ),
+            }
 
     def on_deactivate(self):
         """ Module deactivation method. """
@@ -90,37 +137,23 @@ class DummyFilterWheel(FilterWheelInterface):
         :param: int target_position: position number
         :return: int error code: ok = 0
         """
-        if target_position in range(1, self._num_filters + 1):
+        if target_position in self._filters_by_position:
             self.position = target_position
             err = 0
         else:
-            self.log.error(f'Can not go to filter {target_position}. Filterwheel has only {self._num_filters} positions')
+            self.log.error(f'Can not go to filter {target_position}. No filter was defined for the selected position')
             err = -1
         return err
 
     def get_filter_dict(self):
-        """ Retrieves a dictionary with the following entries:
-                    {'filter1': {'label': 'filter1', 'name': str(name), 'position': 1, 'lasers': bool list},
-                     'filter2': {'label': 'filter2', 'name': str(name), 'position': 2, 'lasers': bool list},
-                    ...
-                    }
-
-                    # all positions of the filterwheel must be defined even when empty.
-                    Match the dictionary key 'filter1' to the position 1 etc.
-
-        @returns: filter_dict
+        """ Return the filter definition as a dictionary.
+        {
+            1: {'name': '700 +/- 37 nm', 'allowed_wavelengths_nm': (405, 488, 561, 640)},
+            2: {'name': '600 +/- 25 nm', 'allowed_wavelengths_nm': (405, 488, 561, 640)},
+            3: {'name': '488 - 491 / 561 nm', 'allowed_wavelengths_nm': (405, 488, 561, 640)},
+            4: {'name': '525 +/- 22.5 nm', 'allowed_wavelengths_nm': (405, 488, 561, 640)},
+            5: {'name': '617 +/- 36 nm', 'allowed_wavelengths_nm': (405, 488, 561)},
+            6: {'name': '460 +/- 25 nm', 'allowed_wavelengths_nm': (405, 561, 640)}
+       }
         """
-        filter_dict = {}
-
-        for i, item in enumerate(
-                self._filternames):  # use any of the lists retrieved as config option, just to have an index variable
-            label = 'filter{}'.format(i + 1)  # create a label for the i's element in the list starting from 'filter1'
-
-            dic_entry = {'label': label,
-                         'name': self._filternames[i],
-                         'position': self._positions[i],
-                         'lasers': self._allowed_lasers[i]}
-
-            filter_dict[dic_entry['label']] = dic_entry
-
-        return filter_dict
+        return self._filters_by_position

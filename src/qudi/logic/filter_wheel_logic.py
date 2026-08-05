@@ -32,15 +32,17 @@ class FilterWheelLogic(LogicBase):
     """
     # declare connectors
     wheel = Connector(name='filter_wheel', interface='FilterWheelInterface')
-    lasercontrol = Connector(name='laser', interface='LaserControlLogic')
+    laser_logic = Connector(name='laser_logic', interface='LaserControlLogic')
 
     # signals
-    sigNewFilterSetting = QtCore.Signal(
-        int)  # if position changed using the iPython console, use this signal to update GUI
+    sigNewFilterSetting = QtCore.Signal(int)  # if position changed using the iPython console, use this signal to update GUI
     sigDeactivateLaserControl = QtCore.Signal()
     sigDisableFilterActions = QtCore.Signal()
     sigEnableFilterActions = QtCore.Signal()
 
+    # attributes
+    _wheel = None
+    _laser_control = None
     filter_dict = {}
 
     def __init__(self, config, **kwargs):
@@ -49,11 +51,14 @@ class FilterWheelLogic(LogicBase):
     def on_activate(self):
         """ Initialisation performed during activation of the module.
         """
+        self._wheel = self.wheel()
+        self._laser_logic = self.laser_logic()
         self.filter_dict = self.get_filter_dict()
 
     def on_deactivate(self):
         """ Perform required deactivation. """
-        pass
+        self._wheel = None
+        self._laser_control = None
 
     # ----------------------------------------------------------------------------------------------------------------------
     # Getter and setter methods
@@ -67,32 +72,36 @@ class FilterWheelLogic(LogicBase):
 
         :return: None
         """
-        if not self.lasercontrol().enabled:  # do not allow changing filter while lasers are on
+        if not self._laser_logic.laser_enabled:  # do not allow changing filter while lasers are on
             # Combobox on gui is also disabled but this is an additional security to prevent setting filter via iPython console
-            self.lasercontrol().reset_intensity_dict()  # set all values to 0 before changing the filter
-            err = self.wheel().set_position(position)
+            self._laser_logic.reset_laser_intensities()  # set all values to 0 before changing the filter
+            err = self._wheel.set_position(position)
             if err == 0:
                 self.log.info('Set filter {}'.format(position))
                 self.sigNewFilterSetting.emit(position)
         else:
-            self.log.warn('Laser is on. Can not change filter')
+            self.log.warning('Laser is on. Can not change filter')
 
     def get_position(self):
         """ Get the current position from the hardware.
         :return: int pos: current filter position
         """
-        pos = self.wheel().get_position()
+        pos = self._wheel.get_position()
         return pos
 
     def get_filter_dict(self):
         """ Retrieves a dictionary specified in the configuration of the connected filterwheel with the following entries:
-                    {'filter1': {'label': 'filter1', 'name': str(name), 'position': 1, 'lasers': bool list},
-                     'filter2': {'label': 'filter2', 'name': str(name), 'position': 2, 'lasers': bool list},
-                    ...
-                    }
+            {
+                1: {'name': '700 +/- 37 nm', 'allowed_wavelengths_nm': (405, 488, 561, 640)},
+                2: {'name': '600 +/- 25 nm', 'allowed_wavelengths_nm': (405, 488, 561, 640)},
+                3: {'name': '488 - 491 / 561 nm', 'allowed_wavelengths_nm': (405, 488, 561, 640)},
+                4: {'name': '525 +/- 22.5 nm', 'allowed_wavelengths_nm': (405, 488, 561, 640)},
+                5: {'name': '617 +/- 36 nm', 'allowed_wavelengths_nm': (405, 488, 561)},
+                6: {'name': '460 +/- 25 nm', 'allowed_wavelengths_nm': (405, 561, 640)}
+            }
         :return: dict filter dict
         """
-        filter_dict = self.wheel().get_filter_dict()
+        filter_dict = self._wheel.get_filter_dict()
         return filter_dict
 
     # ----------------------------------------------------------------------------------------------------------------------
@@ -100,7 +109,7 @@ class FilterWheelLogic(LogicBase):
     # ----------------------------------------------------------------------------------------------------------------------
 
     def disable_filter_actions(self):
-        """ This method provides a security to avoid chaning filter from GUI, for example during Tasks. """
+        """ This method provides a security to avoid changing filter from GUI, for example during Tasks. """
         self.sigDisableFilterActions.emit()
 
     def enable_filter_actions(self):
