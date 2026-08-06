@@ -3,14 +3,15 @@
 Author: JB Fiche with codex - adapted for qudi-core-HiM from the previous daq script used in qudi-HiM
 Created: 2026-07-21
 
-Interface for laser control modules used by qudi-core-HiM.
+Interface for laser-control modules used by qudi-core-HiM.
 
-This interface exposes the minimal contract required by the laser-control
-logic and interfuse_hardware layers:
+The concrete drivers in this repository expose the same contract:
 
-- provide a metadata dictionary describing available laser channels
-- apply a control value to one selected laser channel
-- switch all laser channels off
+- report the nominal wavelengths controlled by the device
+- store or apply intensity values for one selected laser line
+- enable or disable all laser lines together
+- put the device in a ready state before enabling output
+- toggle external TTL control when supported
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
@@ -29,19 +30,39 @@ from qudi.core.module import Base
 
 
 class LaserControlInterface(Base):
-    """Interface for hardware or interfuse_hardware modules controlling lasers."""
+    """Interface for hardware or interfuse-hardware modules controlling lasers."""
 
     @abstractmethod
-    def get_dict(self):
-        """Return metadata for the available laser channels."""
+    def get_available_wavelengths(self) -> tuple[int, ...]:
+        """Return the nominal wavelengths supported by the device."""
         pass
 
     @abstractmethod
-    def apply_voltage(self, voltage, channel):
-        """Apply a control voltage/value to one laser channel."""
+    def update_line_intensity(self, wavelength, intensity):
+        """Update the cached intensity state for one laser line."""
         pass
 
     @abstractmethod
-    def disable_all(self):
-        """Set all laser outputs to a safe inactive state."""
+    def apply_line_intensity(self, wavelength, intensity):
+        """Update and immediately apply the intensity of one laser line."""
+        pass
+
+    @abstractmethod
+    def ensure_ready(self):
+        """Prepare the laser source for controlled output if required."""
+        pass
+
+    @abstractmethod
+    def enable_all_lines(self):
+        """Enable all configured laser lines using the stored intensity values."""
+        pass
+
+    @abstractmethod
+    def disable_all_lines(self):
+        """Disable all configured laser lines without clearing stored intensities."""
+        pass
+
+    @abstractmethod
+    def set_ttl(self, ttl_state):
+        """Enable or disable external TTL control."""
         pass

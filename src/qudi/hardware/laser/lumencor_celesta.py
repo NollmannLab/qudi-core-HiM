@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on Thur June 24 2021
 Author: JB Fiche - adapted for qudi-core-HiM
 Created: 2021-06-24 -> translated into qudi-core-HiM on 2026-06-12
+
 This module contains a class representing a Lumencor celesta laser source.
 
 -----------------------------------------------------------------------------------
@@ -22,7 +22,25 @@ from time import sleep
 
 
 class LumencorCelesta(LaserControlInterface):
-    """ Class representing the Lumencor celesta laser source.
+    """Class representing the Lumencor Celesta laser source.
+
+    Configuration structure:
+
+    - ``wavelengths_nm`` is a list of integer nominal wavelengths supported by the
+      source, for example::
+
+          wavelengths_nm:
+            - 405
+            - 477
+            - 546
+            - 638
+
+    Internal state structure:
+
+    - ``_laser_dict`` is a mapping keyed by wavelength (``int``).
+    - each value is a dictionary with:
+      - ``enabled``: ``0`` or ``1`` depending on the source state
+      - ``intensity``: cached intensity value, stored in Celesta units
 
     Example config for copy-paste:
 
@@ -46,8 +64,10 @@ class LumencorCelesta(LaserControlInterface):
     _laser_dict = {}
 
     def on_activate(self):
-        """ Initialization: test whether the celesta is connected and create the _laser_dict to keep
-        the properties for each channel.
+        """Initialize the device, validate the wavelength list, and build ``_laser_dict``.
+
+        The created ``_laser_dict`` is keyed by wavelength and stores the enabled
+        state plus the cached intensity for each source line.
         """
 
         # retrieve available wavelengths from config
@@ -76,8 +96,7 @@ class LumencorCelesta(LaserControlInterface):
             self.log.error(f"Lumencor init failed: {e}")
 
     def on_deactivate(self):
-        """ Close serial port when deactivating the module.
-        """
+        """Disable all output and put the source back into a safe state."""
         self.disable_all_lines()
         self.set_ttl(False)
 
@@ -86,7 +105,10 @@ class LumencorCelesta(LaserControlInterface):
 # ----------------------------------------------------------------------------------------------------------------------
 
     def _status(self):
-        """ Ask for the laser source status (0:OK - 6:Standby - 7:Warming up - 1/2/3/4/5:Errors)
+        """Query and return the Celesta status string.
+
+        The returned value is the raw status message from the device, for example
+        ``A STAT 0`` for normal operation or ``A STAT 7`` for standby.
         """
         message = self._send_httpcommand(self._ip, 'GET STAT')
         status = message['message']
@@ -98,8 +120,7 @@ class LumencorCelesta(LaserControlInterface):
         return status
 
     def _wakeup(self):
-        """ Wake up the celesta source when it is in standby mode and wait for the warmup procedure to be done
-        """
+        """Wake the source from standby and wait until it becomes ready."""
         self._send_httpcommand(self._ip, 'WAKEUP')
         sleep(.1)
         status = self._status()
@@ -120,50 +141,51 @@ class LumencorCelesta(LaserControlInterface):
         return tuple(int(wavelength) for wavelength in self._wavelengths)
 
     def update_line_intensity(self, wavelength, intensity):
-        """ Set laser line associated to wavelength to the indicated intensity.
-            For the lumencor, intensity is coded in "per thousands" values.
+        """Update the cached Celesta intensity for one wavelength.
 
-            wavelength : (int) - indicate the selected laser line. For example ['405 nm']
-            intensity : (float) - indicate the laser power (in per thousand). For example [100]
+        Args:
+            wavelength: Wavelength key present in ``_laser_dict``.
+            intensity: Requested output in percent.
+
+        The value is converted to the Celesta's internal units and stored in
+        ``_laser_dict[wavelength]['intensity']``. The device is updated for all
+        channels after the cache change.
         """
         self._laser_dict[wavelength]["intensity"] = int(intensity * 10)
         self._set_intensity_all_channels()
 
     def apply_line_intensity(self, wavelength, intensity):
-        """ For the indicated wavelength, update the intensity and turn the laser ON """
+        """Update one line and immediately apply the new enabled state to the source."""
         self.update_line_intensity(wavelength, intensity)
-        if intensity >0 :
+        if intensity > 0:
             self._laser_dict[wavelength]["enabled"] = 1
         else:
             self._laser_dict[wavelength]["enabled"] = 0
-            
+
         self._set_state_all_channels()
 
     def ensure_ready(self):
-        """ Make sure the source is in wakeup state """
+        """Ensure the source is awake and ready for controlled output."""
         self._wakeup()
 
     def enable_all_lines(self):
-        """ Enable all the channels, according to the intensity values
-        previously defined
-        """
+        """Enable all channels that currently have a non-zero intensity."""
         for wavelength, channel_state in self._laser_dict.items():
             if (channel_state['intensity'] > 0) and (channel_state['enabled'] == 0):
                 self._laser_dict[wavelength]['enabled'] = 1
         self._set_state_all_channels()
 
     def disable_all_lines(self):
-        """ Disable all laser lines BUT do not change the intensity
-        saved in _laser_dict
-        """
+        """Disable all laser lines without clearing the cached intensities."""
         for wavelength in self._laser_dict:
             self._laser_dict[wavelength]['enabled'] = 0
         self._set_state_all_channels()
 
     def set_ttl(self, ttl_state):
-        """ Define whether the celesta source can be controlled through ttl control.
+        """Enable or disable TTL control on the Celesta source.
 
-            :param: bool ttl_state - indicate whether to allow external trigger control of the source
+        Args:
+            ttl_state: ``True`` enables external TTL control, ``False`` disables it.
         """
         if ttl_state:
             self._send_httpcommand(self._ip, 'SET TTLENABLE 1')
@@ -176,11 +198,7 @@ class LumencorCelesta(LaserControlInterface):
 # ----------------------------------------------------------------------------------------------------------------------
 
     def _send_httpcommand(self, ip, command):
-        """
-        Sends commands to the lumencor system via http.
-        Please find commands here:
-        http://lumencor.com/wp-content/uploads/sites/11/2019/01/57-10018.pdf
-        """
+        """Send an HTTP command to the Celesta and return the parsed response."""
         command_full = f"http://{ip}/service/?command={urllib.parse.quote(command)}"
         with urllib.request.urlopen(command_full) as response:
             message = eval(response.read())  # the default is conveniently JSON so eval creates dictionary
@@ -190,40 +208,28 @@ class LumencorCelesta(LaserControlInterface):
         return message
 
     def _set_intensity_all_channels(self):
-        """ Set the intensity of all laser lines at once
-
-            intensity : dictionary containing the wavelengths (int) as entry and the intensity (float) as value
-        """
+        """Send the cached intensity values for all wavelengths to the source."""
         intensities = [self._laser_dict[wavelength]['intensity']
                        for wavelength in self._laser_dict]
         command = 'SET MULCHINT {}'.format(' '.join(map(str, intensities)))
         self._send_httpcommand(self._ip, command)
 
     def _set_state_all_channels(self):
-        """ Switch all laser lines to the specified state ON or OFF
-
-            state : array of int - indicate 0 to switch OFF the specified line, or 1 to switch it ON.
-        """
+        """Send the cached enabled states for all wavelengths to the source."""
         enabled_states = [self._laser_dict[wavelength]['enabled']
                        for wavelength in self._laser_dict]
         command = 'SET MULCH {}'.format(' '.join(map(str, enabled_states)))
         self._send_httpcommand(self._ip, command)
 
     def _get_laserline_intensity(self):
-        """ Return the intensity of all laser lines
-
-            intensity : array of int - indicate the intensity of each laser line
-        """
+        """Query and return the intensity of all laser lines as a list of integers."""
         message = self._send_httpcommand(self._ip, 'GET MULCHINT')
         intensity = [int(s) for s in message['message'].split() if s.isdigit()]
 
         return intensity
 
     def _get_laserline_state(self):
-        """ Return the status of all laser lines
-
-            status : array of int - indicate the status of each laser line (1=ON, 0=OFF)
-        """
+        """Query and return the state of all laser lines as a list of integers."""
         message = self._send_httpcommand(self._ip, 'GET MULCH')
         status = [int(s) for s in message['message'].split() if s.isdigit()]
 

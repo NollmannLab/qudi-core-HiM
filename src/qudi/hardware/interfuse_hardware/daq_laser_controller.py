@@ -22,7 +22,27 @@ from qudi.interface.laser_control_interface import LaserControlInterface
 
 
 class DaqLaserController(LaserControlInterface):
-    """Expose named DAQ outputs as a laser controller. Typical parameters are:
+    """Expose named DAQ outputs as a laser controller.
+
+    Configuration structure:
+
+    - ``laser_channels`` is a mapping keyed by wavelength, for example::
+
+          laser_channels:
+            405:
+              daq_task: 'laser_405'
+            488:
+              daq_task: 'laser_488'
+
+    Internal state structure:
+
+    - ``_laser_dict`` is a mapping keyed by wavelength (``int``).
+    - each value is a dictionary with the following keys:
+      - ``channel``: a copy of the configuration dictionary for that wavelength
+      - ``voltage``: last computed output voltage as ``float``
+      - ``enabled``: ``bool`` indicating whether the channel is currently active
+
+    Typical parameters are:
 
         daq_laser:
             module.Class: 'interfuse_hardware.daq_laser_controller.DaqLaserController'
@@ -49,7 +69,11 @@ class DaqLaserController(LaserControlInterface):
     _laser_dict = {}
 
     def on_activate(self):
-        """Connect to the generic DAQ module."""
+        """Connect to the DAQ backend and build the per-wavelength state dictionary.
+
+        The resulting ``_laser_dict`` is keyed by wavelength and stores the copied
+        channel configuration, the last computed voltage and the enabled state.
+        """
 
         # connect to daq
         self._daq = self.daq()
@@ -66,11 +90,11 @@ class DaqLaserController(LaserControlInterface):
         self._validate_laser_channels()
 
         # Ensure safe initial state.
-        self.disable_all()
+        self.disable_all_lines()
 
     def on_deactivate(self):
-        """Switch all laser-control voltages off."""
-        self.disable_all()
+        """Switch all outputs off and drop the DAQ connection."""
+        self.disable_all_lines()
         self._daq = None
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -78,46 +102,68 @@ class DaqLaserController(LaserControlInterface):
 # ----------------------------------------------------------------------------------------------------------------------
 
     def get_available_wavelengths(self) -> tuple[int, ...]:
-        """Return the nominal wavelengths controlled through the DAQ."""
+        """Return the nominal wavelengths controlled through the DAQ.
+
+        Returns:
+            Tuple of wavelength keys used by ``_laser_dict`` and the public logic.
+        """
         return tuple(self._laser_dict)
 
-    def update_intensity(self, wavelength, intensity):
-        """ Update the dictionary for the different laser lines controlled by the DAQ.
-            Intensity is converted to voltage accordinf to the selected DAQ channel
-            properties
+    def update_line_intensity(self, wavelength, intensity):
+        """Update the cached voltage for one laser line.
+
+        Args:
+            wavelength: Wavelength key present in ``_laser_dict``.
+            intensity: Requested output in percent of the configured maximum.
+
+        The method stores the converted voltage in ``_laser_dict[wavelength]['voltage']``
+        without writing to the DAQ.
         """
         voltage = self._convert_intensity_to_voltage(wavelength, intensity)
         self._laser_dict[wavelength]["voltage"] = voltage
 
     def apply_line_intensity(self, wavelength, intensity):
-        """Apply voltage to one DAQ-controlled laser channel."""
-        # update the _laser_dict
-        self.update_intensity(wavelength, intensity)
+        """Update one laser line and immediately write the voltage to the DAQ.
 
-        # enable the laser (as a security since it should be already enabled)
+        Args:
+            wavelength: Wavelength key present in ``_laser_dict``.
+            intensity: Requested output in percent of the configured maximum.
+
+        This updates the cached voltage, marks the channel enabled, and writes the
+        corresponding analog output to the configured DAQ task.
+        """
+        self.update_line_intensity(wavelength, intensity)
         self._laser_dict[wavelength]['enabled'] = True
-
-        # write voltage to the corresponding DAQ channel
         voltage = self._laser_dict[wavelength]['voltage']
         channel_config = self._laser_dict[wavelength]['channel']
         self._daq.write_named_ao(channel_config["daq_task"], voltage)
 
     def ensure_ready(self):
-        """ For the DAQ this command does nothing """
+        """Prepare the DAQ backend for use.
+
+        The DAQ implementation does not need a dedicated warm-up step, so this is
+        intentionally a no-op.
+        """
         pass
 
     def enable_all_lines(self):
-        """ Enable all the channels, according to the intensity values previously defined """
+        """Enable every configured laser line using the cached voltages.
+
+        Channels with a cached voltage of zero are marked enabled but do not produce
+        an analog output update.
+        """
         for wavelength, channel_state in self._laser_dict.items():
             voltage = self._laser_dict[wavelength]['voltage']
             self._laser_dict[wavelength]['enabled'] = True
-            if voltage > 0 :
+            if voltage > 0:
                 channel_config = self._laser_dict[wavelength]['channel']
                 self._daq.write_named_ao(channel_config["daq_task"], voltage)
 
     def disable_all_lines(self):
-        """ Disable all laser lines BUT do not change the intensity
-        saved in _laser_dict
+        """Disable all laser lines without clearing cached voltages.
+
+        The ``voltage`` entries in ``_laser_dict`` are preserved so the previous
+        settings can be restored later.
         """
         for wavelength in self._laser_dict:
             self._laser_dict[wavelength]['enabled'] = False
@@ -125,6 +171,11 @@ class DaqLaserController(LaserControlInterface):
             self._daq.write_named_ao(channel_config["daq_task"], 0)
 
     def set_ttl(self, ttl_state):
+        """Set TTL control if supported by the backend.
+
+        The DAQ/FPGA implementation currently does not expose a separate TTL mode,
+        so this is a no-op.
+        """
         pass
 
 
@@ -133,7 +184,14 @@ class DaqLaserController(LaserControlInterface):
 # ----------------------------------------------------------------------------------------------------------------------
 
     def _validate_laser_channels(self) -> None:
-        """Validate wavelength keys and DAQ task assignments."""
+        """Validate the wavelength keys and required DAQ-task mapping.
+
+        Expected structure of each entry in ``_laser_dict``:
+
+        - key: wavelength as a positive ``int``
+        - value: dictionary containing a ``channel`` mapping with at least
+          ``daq_task``
+        """
         if not self._laser_dict:
             raise ValueError("No DAQ-controlled laser channels are configured.")
 
@@ -155,11 +213,13 @@ class DaqLaserController(LaserControlInterface):
                 )
 
     def _get_voltage_range(self, wavelength):
+        """Return the maximum voltage supported by the configured DAQ task."""
         channel_config = self._laser_dict[wavelength]["channel"]
         task_name = channel_config["daq_task"]
         task_voltage_range = self._daq.get_task_range(task_name)
         return max(task_voltage_range)
 
     def _convert_intensity_to_voltage(self, wavelength, intensity):
+        """Convert an intensity percentage into a DAQ voltage."""
         max_voltage = self._get_voltage_range(wavelength)
         return float(intensity * max_voltage / 100)
