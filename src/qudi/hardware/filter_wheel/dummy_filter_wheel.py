@@ -89,8 +89,7 @@ class DummyFilterWheel(FilterWheelInterface):
 
     # attributes
     _filters_by_position = {}
-
-    position = np.random.randint(1, 7)  # generate an arbitrary start value from 1 to 6
+    position = 1
 
     def on_activate(self):
         """Activate the module and validate & store the configured filter definitions. The dictionary

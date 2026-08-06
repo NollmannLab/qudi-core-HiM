@@ -46,8 +46,7 @@ class DaqLaserController(LaserControlInterface):
 
     # attributes
     _daq = None
-    _laser_channels_by_wavelength = {}
-    # _laser_dict = {}
+    _laser_dict = {}
 
     def on_activate(self):
         """Connect to the generic DAQ module."""
@@ -55,12 +54,13 @@ class DaqLaserController(LaserControlInterface):
         # connect to daq
         self._daq = self.daq()
 
-        # # initialize laser dict for daq communication
-        # self._laser_dict = self._build_laser_dict()
-
         # initialize wavelengths list for the logic
-        self._laser_channels_by_wavelength = {
-            int(wavelength): dict(channel_config)
+        self._laser_dict = {
+            int(wavelength): {
+                "channel": dict(channel_config),
+                "voltage": 0.0,
+                "enabled": False
+            }
             for wavelength, channel_config in self._laser_channels.items()
         }
         self._validate_laser_channels()
@@ -79,67 +79,54 @@ class DaqLaserController(LaserControlInterface):
 
     def get_available_wavelengths(self) -> tuple[int, ...]:
         """Return the nominal wavelengths controlled through the DAQ."""
-        return tuple(self._laser_channels_by_wavelength)
+        return tuple(self._laser_dict)
 
+    def update_intensity(self, wavelength, intensity):
+        """ Update the dictionary for the different laser lines controlled by the DAQ.
+            Intensity is converted to voltage accordinf to the selected DAQ channel
+            properties
+        """
+        voltage = self._convert_intensity_to_voltage(wavelength, intensity)
+        self._laser_dict[wavelength]["voltage"] = voltage
 
-    def set_intensity_selected_laser_line(self, wavelength, intensity):
+    def apply_line_intensity(self, wavelength, intensity):
         """Apply voltage to one DAQ-controlled laser channel."""
-        channel_config = self._laser_channels_by_wavelength[wavelength]
-        task_name = channel_config["daq_task"]
-        task_voltage_range = self._daq.get_task_range(task_name)
-        max_voltage = max(task_voltage_range)
+        # update the _laser_dict
+        self.update_intensity(wavelength, intensity)
 
-        voltage = float(intensity * max_voltage / 100)
+        # enable the laser (as a security since it should be already enabled)
+        self._laser_dict[wavelength]['enabled'] = True
 
-        self._daq.write_named_ao(
-            channel_config["daq_task"],
-            voltage,
-        )
+        # write voltage to the corresponding DAQ channel
+        voltage = self._laser_dict[wavelength]['voltage']
+        channel_config = self._laser_dict[wavelength]['channel']
+        self._daq.write_named_ao(channel_config["daq_task"], voltage)
 
-    def set_intensity_all_laser_lines(self, intensity_dict):
-        for wavelength, intensity in intensity_dict.items():
-            self.set_intensity_selected_laser_line(self, wavelength, intensity)
+    def ensure_ready(self):
+        """ For the DAQ this command does nothing """
+        pass
 
-    # def _build_laser_dict(self):
-    #     """Build metadata consumed by LaserControlLogic."""
-    #     laser_dict = {}
-    #
-    #     for index, (laser_name, config) in enumerate(
-    #         self._laser_channels.items(),
-    #         start=1,
-    #     ):
-    #         laser_dict[laser_name] = {
-    #             "label": laser_name,
-    #             "wavelength": config["wavelength"],
-    #             "channel": config["daq_task"],
-    #         }
-    #
-    #     return laser_dict
+    def enable_all_lines(self):
+        """ Enable all the channels, according to the intensity values previously defined """
+        for wavelength, channel_state in self._laser_dict.items():
+            voltage = self._laser_dict[wavelength]['voltage']
+            self._laser_dict[wavelength]['enabled'] = True
+            if voltage > 0 :
+                channel_config = self._laser_dict[wavelength]['channel']
+                self._daq.write_named_ao(channel_config["daq_task"], voltage)
 
-    def get_dict(self):
-        """Return configured laser metadata."""
-        return {
-            name: dict(metadata)
-            for name, metadata in self._laser_dict.items()
-        }
+    def disable_all_lines(self):
+        """ Disable all laser lines BUT do not change the intensity
+        saved in _laser_dict
+        """
+        for wavelength in self._laser_dict:
+            self._laser_dict[wavelength]['enabled'] = False
+            channel_config = self._laser_dict[wavelength]['channel']
+            self._daq.write_named_ao(channel_config["daq_task"], 0)
 
-    def apply_voltage(self, voltage, channel):
-        """Apply voltage to one DAQ-controlled laser channel."""
-        channel_config = self._laser_dict[channel]
-        voltage = float(voltage)
+    def set_ttl(self, ttl_state):
+        pass
 
-        self._daq.write_named_ao(
-            channel_config["channel"],
-            voltage,
-        )
-
-    # def disable_all(self):
-    #     """Set all laser-control outputs to zero volts."""
-    #     for config in self._laser_dict.values():
-    #         self._daq.write_named_ao(voltage
-    #             config["channel"],
-    #             0.0,
-    #         )
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Private methods
@@ -147,13 +134,14 @@ class DaqLaserController(LaserControlInterface):
 
     def _validate_laser_channels(self) -> None:
         """Validate wavelength keys and DAQ task assignments."""
-        if not self._laser_channels_by_wavelength:
+        if not self._laser_dict:
             raise ValueError("No DAQ-controlled laser channels are configured.")
 
-        for wavelength, channel_config in self._laser_channels_by_wavelength.items():
+        for wavelength, property in self._laser_dict.items():
             if wavelength <= 0:
                 raise ValueError(f"Invalid laser wavelength: {wavelength!r}.")
 
+            channel_config = property['channel']
             if not isinstance(channel_config, dict):
                 raise TypeError(
                     f"Configuration for {wavelength} nm must be a dictionary."
@@ -165,3 +153,13 @@ class DaqLaserController(LaserControlInterface):
                 raise ValueError(
                     f"No DAQ task is configured for the {wavelength} nm laser."
                 )
+
+    def _get_voltage_range(self, wavelength):
+        channel_config = self._laser_dict[wavelength]["channel"]
+        task_name = channel_config["daq_task"]
+        task_voltage_range = self._daq.get_task_range(task_name)
+        return max(task_voltage_range)
+
+    def _convert_intensity_to_voltage(self, wavelength, intensity):
+        max_voltage = self._get_voltage_range(wavelength)
+        return float(intensity * max_voltage / 100)

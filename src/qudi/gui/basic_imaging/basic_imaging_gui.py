@@ -296,7 +296,6 @@ class BasicImagingGUI(GuiBase):
         super().__init__(config=config, **kwargs)
         self.laser_Labels = []
         self.laser_wavelengths = []
-        self.laser_DSpinBoxes = []
         self.bf_Label = None
         self.bf_control_DSpinBox = None
         self.brightfield_on_Action = None
@@ -306,6 +305,7 @@ class BasicImagingGUI(GuiBase):
         self._max_frames_spool = None
         self.threadpool = QtCore.QThreadPool()
         self.metadata_template = None
+        self.laser_spinboxes_by_wavelength = {}
 
     def on_activate(self):
         """ Initializes all needed UI files and establishes the connectors.
@@ -568,13 +568,15 @@ class BasicImagingGUI(GuiBase):
         """
         # create the laser labels and spinboxes according to number of elements given in config file
         self.laser_Labels = []
-        self.laser_DSpinBoxes = []
         self.laser_wavelengths = [int(wavelength) for wavelength in self._laser_logic.laser_dict]
 
         # define the laser_spinbox that will allow to control the intensity for each laser line
-        for wavelength in self._laser_logic.laser_dict:
+        for wavelength, line_properties in self._laser_logic.laser_dict.items():
+
+            if not line_properties['allowed'] :
+                continue
+
             laser_label = QtWidgets.QLabel(f"{str(wavelength)} nm")
-            self.laser_Labels.append(laser_label)
 
             laser_spinbox = QtWidgets.QDoubleSpinBox()
             laser_spinbox.setMaximum(100.00)
@@ -583,10 +585,11 @@ class BasicImagingGUI(GuiBase):
 
             laser_spinbox.valueChanged.connect(
                 lambda value, wavelength=wavelength:
-                self._laser_logic.update_intensity_dict(wavelength, value)
+                self._laser_logic.set_laser_line_intensity(wavelength, value)
             )
 
-            self.laser_DSpinBoxes.append(laser_spinbox)
+            self.laser_Labels.append(laser_label)
+            self.laser_spinboxes_by_wavelength[wavelength] = laser_spinbox
             self._mw.formLayout_3.addRow(laser_label, laser_spinbox)
 
         # toolbar actions
@@ -600,7 +603,7 @@ class BasicImagingGUI(GuiBase):
         # Signals to logic
         # starting / stopping the analog output
         self.sigLaserOn.connect(self._laser_logic.set_laser_enabled)
-        self.sigLaserOff.connect(self._laser_logic.stop_all)
+        self.sigLaserOff.connect(self._laser_logic.set_laser_disabled)
 
         # Signals from logic
         # update GUI when intensity is changed programatically
@@ -1438,8 +1441,8 @@ class BasicImagingGUI(GuiBase):
     def laser_set_to_zero(self):
         """ Callback of laser_zero_Action.
         """
-        for item in self.laser_DSpinBoxes:
-            item.setValue(0)
+        self._laser_logic.reset_laser_intensities()
+
         # also set brightfield control to zero in case it is available
         if self._brightfield_logic:
             self.bf_control_DSpinBox.setValue(0)
@@ -1462,9 +1465,10 @@ class BasicImagingGUI(GuiBase):
 # callbacks of signals from logic --------------------------------------------------------------------------------------
     def update_laser_spinbox(self):
         """ Update values in laser spinboxes if the intensity dictionary in the logic module was changed """
-        for index, item in enumerate(self.laser_DSpinBoxes):
-            wavelength = self.laser_wavelengths[index]
-            item.setValue(self._laser_logic.laser_dict[wavelength]["intensity"])
+        for wavelength, spinbox in self.laser_spinboxes_by_wavelength.items():
+            intensity = self._laser_logic.laser_dict[wavelength]["intensity"]
+            with QtCore.QSignalBlocker(spinbox):
+                spinbox.setValue(intensity)
 
     @QtCore.Slot()
     def reset_laser_toolbutton(self):
@@ -1544,7 +1548,7 @@ class BasicImagingGUI(GuiBase):
         :param: allowed_wavelengths (list) indicate the laser wavelengths that are allowed for the selected filter.
         :return: None
         """
-        for wavelength, spinbox in zip(self.laser_wavelengths, self.laser_DSpinBoxes):
+        for wavelength, spinbox in self.laser_spinboxes_by_wavelength.items():
             spinbox.setEnabled(wavelength in allowed_wavelengths)
 
 # disable/enable user interface actions --------------------------------------------------------------------------------
