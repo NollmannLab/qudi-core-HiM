@@ -101,7 +101,32 @@ class ExpConfiguratorWindow(QtWidgets.QMainWindow):
         super().__init__()
         uic.loadUi(ui_file, self)
 
+        # display the window
         self.show()
+
+        # Resize once Qt has created the actual window frame.
+        QtCore.QTimer.singleShot(0, self._fit_to_screen)
+
+
+    def _fit_to_screen(self):
+        """Limit the window height to the available screen height."""
+        screen = self.screen()
+
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+
+        available = screen.availableGeometry()
+
+        # Account for the title bar / window borders.
+        frame_extra = (self.frameGeometry().height() - self.geometry().height())
+        max_height = available.height() - frame_extra - 50
+
+        if self.height() > max_height:
+            self.resize(self.width(), max_height)
+
+        # Make sure the top of the window is on screen.
+        if self.frameGeometry().top() < available.top():
+            self.move(self.x(), available.top())
 
 
 class ExpConfiguratorGUI(GuiBase):
@@ -315,6 +340,8 @@ class ExpConfiguratorGUI(GuiBase):
 
     # config options
     default_location = ConfigOption('default_path', missing='error')
+    default_roi_path = ConfigOption('default_roi_path', default='')
+    default_injections_path = ConfigOption('default_injections_path', default='')
     _ui_window_filename = 'ui_exp_configurator.ui'
 
     # Signals
@@ -441,8 +468,12 @@ class ExpConfiguratorGUI(GuiBase):
 
     def init_configuration_form(self):
         """Populate setup-dependent filter, laser, and file-format choices."""
-        self._mw.filterpos_ComboBox.addItems(list(self._exp_logic.filters or []))
-        self._mw.laser_ComboBox.addItems(list(self._exp_logic.lasers or []))
+        self._mw.filterpos_ComboBox.addItems(
+            [str(filter_name) for filter_name in (self._exp_logic.filters or [])]
+        )
+        self._mw.laser_ComboBox.addItems(
+            [str(wavelength) for wavelength in (self._exp_logic.lasers or [])]
+        )
         self._mw.fileformat_ComboBox.addItems(list(self._exp_logic.supported_fileformats or []))
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -617,7 +648,11 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.imaging_sequence_ListView.setModel(self._exp_logic.img_sequence_model)
 
         self._mw.laser_ComboBox.clear()
-        self._mw.laser_ComboBox.addItems(list(self._exp_logic.lasers or []))
+        excluded_sources = {str(source) for source in imaging_definition.get("excluded_sources",[])}
+        available_sources = [ str(source) for source in (self._exp_logic.lasers or []) if str(source) not in excluded_sources]
+        self._mw.laser_ComboBox.addItems(available_sources)
+        additional_sources = imaging_definition.get("additional_sources",[])
+        self._mw.laser_ComboBox.addItems([str(source) for source in additional_sources])
 
         if "imaging_sequence" not in fields:
             return
@@ -880,20 +915,18 @@ class ExpConfiguratorGUI(GuiBase):
 
     def load_roi_list_clicked(self):
         """Choose a JSON ROI-list file and place its path in the form."""
-        data_directory = os.path.join(self.default_location, 'qudi_roi_lists')
         this_file = QtWidgets.QFileDialog.getOpenFileName(self._mw,
                                                           'Open ROI list',
-                                                          data_directory,
+                                                          self.default_roi_path,
                                                           'json files (*.json)')[0]
         if this_file:
             self._mw.roi_list_path_LineEdit.setText(this_file)
 
     def load_injections_clicked(self):
         """Choose an injection-parameter YAML file and place its path in the form."""
-        data_directory = os.path.join(self.default_location, 'qudi_injection_parameters')
         this_file = QtWidgets.QFileDialog.getOpenFileName(self._mw,
                                                           'Open injections file',
-                                                          data_directory,
+                                                          self.default_injections_path,
                                                           'yaml files (*.yaml)')[0]
         # print(this_file)
         if this_file:

@@ -53,9 +53,9 @@ Adding a new experiment
        experiments_configurator_logic:
          module.Class: experiments_setup.experiment_configurator_logic.ExpConfigLogic
          connect:
-           camera_logic: camera_logic
-           laser_logic: lasercontrol_logic
-           filterwheel_logic: filterwheel_logic
+          camera_logic: 'camera_logic'
+          laser_logic: 'laser_control_logic'
+          filter_logic: 'filter_wheel_logic'
          options:
            experiment_definitions_directory: /path/to/experiment_definitions
            experiments:
@@ -206,9 +206,9 @@ class ExpConfigLogic(LogicBase):
     or populating setup-dependent choices."""
 
     # define connectors to logic modules
-    camera_logic = Connector(interface='CameraLogic', optional=True)
-    laser_logic = Connector(interface='LaserControlLogic', optional=True)
-    filterwheel_logic = Connector(interface='FilterwheelLogic', optional=True)
+    camera_logic = Connector(name='camera_logic', interface='CameraLogic', optional=True)
+    laser_logic = Connector(name='laser_logic', interface='LaserControlLogic', optional=True)
+    filter_logic = Connector(name='filter_logic', interface='FilterWheelLogic', optional=True)
 
     # signals
     sigConfigDictUpdated = QtCore.Signal()
@@ -229,7 +229,7 @@ class ExpConfigLogic(LogicBase):
     config_dict = {}
     _camera_logic = None
     _laser_logic = None
-    _filterwheel_logic = None
+    _filter_logic = None
     filters = None
     lasers = None
     img_sequence_model = None
@@ -246,18 +246,18 @@ class ExpConfigLogic(LogicBase):
         """
         self._camera_logic = self.camera_logic()
         self._laser_logic = self.laser_logic()
-        self._filterwheel_logic = self.filterwheel_logic()
+        self._filter_logic = self.filter_logic()
 
         # prepare the items that will be displayed in the ComboBoxes on the GUI
         self.lasers = []
         if self._laser_logic is not None:
-            laser_dict = self._laser_logic.get_laser_dict()
-            self.lasers = [laser_dict[key]["wavelength"] for key in laser_dict]
+            laser_dict = self._laser_logic.laser_dict
+            self.lasers = [wavelength for wavelength in laser_dict]
 
         self.filters = []
-        if self._filterwheel_logic  is not None:
-            filter_dict = self._filterwheel_logic.get_filter_dict()
-            self.filters = [filter_dict[key]['name'] for key in filter_dict]
+        if self._filter_logic  is not None:
+            filter_dict = self._filter_logic.get_filter_dict()
+            self.filters = [filter['name'] for filter in filter_dict.values()]
 
         self.img_sequence_model = ImagingSequenceModel()
         self.img_sequence_model_timelapse_ramm = ImagingSequenceModelTimelapseRAMM()
@@ -291,7 +291,7 @@ class ExpConfigLogic(LogicBase):
     @property
     def filterwheel_available(self) -> bool:
         """Return ``True`` when filter-wheel logic is connected."""
-        return self._filterwheel_logic is not None
+        return self._filter_logic is not None
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods to load template file for experiments
@@ -888,7 +888,7 @@ class ExpConfigLogic(LogicBase):
 
     def get_filterpos(self):
         """Read the current filter-wheel position and copy it into the config."""
-        filterpos = self._filterwheel_logic.get_position()
+        filterpos = self._filter_logic.get_position()
         self.config_dict['filter_pos'] = filterpos
         self.sigConfigDictUpdated.emit()
 
