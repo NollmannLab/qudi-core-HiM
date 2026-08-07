@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1238</width>
+    <width>1327</width>
     <height>938</height>
    </rect>
   </property>
@@ -23,8 +23,8 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1238</width>
-     <height>21</height>
+     <width>1327</width>
+     <height>22</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">
@@ -109,8 +109,8 @@
    </property>
    <property name="minimumSize">
     <size>
-     <width>910</width>
-     <height>500</height>
+     <width>999</width>
+     <height>512</height>
     </size>
    </property>
    <attribute name="dockWidgetArea">
@@ -208,6 +208,68 @@
        </item>
        <item>
         <spacer name="verticalSpacer_2">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeType">
+          <enum>QSizePolicy::Fixed</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QLabel" name="label_contrast">
+         <property name="text">
+          <string>Contrast control</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QFormLayout" name="formLayout_6">
+         <item row="0" column="0">
+          <widget class="QLabel" name="min_contrast_Label">
+           <property name="text">
+            <string>Min contrast:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="QSpinBox" name="Min_contrast_spinBox">
+           <property name="maximum">
+            <number>65000</number>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="gain_label_3">
+           <property name="text">
+            <string>Max contrast:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="QSpinBox" name="Max_contrast_spinbox">
+           <property name="maximum">
+            <number>65000</number>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="0">
+          <widget class="QCheckBox" name="autocontrast_checkBox">
+           <property name="text">
+            <string>Auto contrast</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <spacer name="verticalSpacer_3">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
          </property>
@@ -414,7 +476,7 @@
    </property>
    <property name="minimumSize">
     <size>
-     <width>466</width>
+     <width>522</width>
      <height>250</height>
     </size>
    </property>

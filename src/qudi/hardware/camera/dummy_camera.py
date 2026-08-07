@@ -62,9 +62,9 @@ class CameraDummy(CameraInterface):
     _trigger_mode = _default_trigger_mode
     _exposure_out_mode = _default_exposure_out_mode
     _acquisition_mode = _default_acquisition_mode
-    _gain = 0
+    _gain = 1
     n_frames = 1
-    image_size = _resolution
+    image_size = ()
     _progress = 0
 
 
@@ -78,8 +78,9 @@ class CameraDummy(CameraInterface):
     def on_activate(self):
         """ Initialisation performed during activation of the module.
         """
-        self._full_width = self._resolution[1]
-        self._full_height = self._resolution[0]
+        self._full_width = int(self._resolution[1])
+        self._full_height = int(self._resolution[0])
+        self.image_size = (self._full_width, self._full_height)
 
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
@@ -171,6 +172,13 @@ class CameraDummy(CameraInterface):
         """
         self.image_size = (abs(vend-vstart)+1, abs(hend-hstart)+1, )  # rows, cols
         return 0
+
+    def get_image_size(self):
+        """
+        Get the size of the image (after setting an ROI for example)
+        @return: (tuple) height and width of the image
+        """
+        return self.image_size
 
     def get_progress(self):
         """ Retrieves the total number of acquired images during a movie acquisition.
@@ -371,8 +379,10 @@ class CameraDummy(CameraInterface):
         :param: int tuple size (width, height) or (depth, width, height)
         :return: np.array(float) data
         """
-        data = np.random.normal(size=size)
-        return data
+        image = np.clip(
+            np.random.normal(loc=100, scale=15, size=size),
+            0, 255).astype(np.uint8)
+        return image
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Simulation of Andor camera

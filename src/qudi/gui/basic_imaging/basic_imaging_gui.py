@@ -231,7 +231,7 @@ class BasicImagingGUI(GuiBase):
     """
     # define connectors to logic modules - camera and brightfield control are allowed not to be connected. Filter-wheel is mandatory. All
     # microscope contains at least one emission filter. In that case, a dummy filter wheel is configurate with a single filter.
-    camera_logic = Connector(name='camera', interface='CameraLogic', optional=True)
+    camera_logic = Connector(name='camera_logic', interface='CameraLogic', optional=True)
     laser_logic = Connector(name='laser_logic', interface='LaserControlLogic')
     filterwheel_logic = Connector(name='filter_wheel_logic', interface='FilterWheelLogic')
     brightfield_logic = Connector(name='brightfield', interface='BrightfieldLogic', optional=True)
@@ -272,12 +272,14 @@ class BasicImagingGUI(GuiBase):
     sigFilterChanged = QtCore.Signal(int)
 
     # attributes
-    _image = []
     _camera_logic = None
     _laser_logic = None
     _filterwheel_logic = None
     _brightfield_logic = None
     _mw = None
+
+    # for the images
+    _image = []
     region_selector_enabled = False
     imageitem = None
 
@@ -491,6 +493,14 @@ class BasicImagingGUI(GuiBase):
         self.init_camera_dockwidget()
         self.init_camera_status_dockwidget()
         self.init_save_settings_ui()
+
+        # initialize contrast tools
+        self._mw.Min_contrast_spinBox.valueChanged.connect(self._update_contrast_from_spinboxes)
+        self._mw.Min_contrast_spinBox.setRange(0, 65535)
+        self._mw.Max_contrast_spinbox.valueChanged.connect(self._update_contrast_from_spinboxes)
+        self._mw.Max_contrast_spinbox.setRange(0, 65535)
+        self._mw.autocontrast_checkBox.setChecked(True)  # set autocontrast True when starting
+        self._mw.histogram_Widget.sigLevelsChanged.connect(self._update_contrast_spinboxes)
 
         # initialize signals
         self._camera_logic.sigProgress.connect(self.update_statusbar)
@@ -720,6 +730,30 @@ class BasicImagingGUI(GuiBase):
         """ Opens the settings menu. 
         """
         self._cam_sd.exec_()
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Methods associated to the control of the contrast
+# ----------------------------------------------------------------------------------------------------------------------
+    def _update_contrast_from_spinboxes(self):
+        """Apply manually selected display levels."""
+        minimum = (self._mw.Min_contrast_spinBox.value())
+        maximum = (self._mw.Max_contrast_spinbox.value())
+
+        if maximum <= minimum:
+            return
+
+        self._mw.autocontrast_checkBox.setChecked(False)
+        self._mw.histogram_Widget.setLevels(minimum, maximum)
+
+    def _update_contrast_spinboxes(self):
+        """Synchronize numerical controls with histogram handles."""
+        minimum, maximum = (self._mw.histogram_Widget.getLevels())
+
+        with QtCore.QSignalBlocker(self._mw.Min_contrast_spinBox):
+            self._mw.Min_contrast_spinBox.setValue(int(minimum))
+
+        with QtCore.QSignalBlocker(self._mw.Max_contrast_spinbox):
+            self._mw.Max_contrast_spinbox.setValue(float(maximum))
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods belonging to the save settings window
@@ -1023,7 +1057,13 @@ class BasicImagingGUI(GuiBase):
             image_data = np.rot90(image_data, 1)  # eventually replace by faster rotation method T and invert
         if self.rot180:
             image_data = np.rot90(image_data, 2)
-        self.imageitem.setImage(image_data.T)
+
+        auto_contrast = self._mw.autocontrast_checkBox.isChecked()
+        self.imageitem.setImage(
+            image_data.T,
+            autoLevels=auto_contrast,
+        )
+
         # transposing the data makes the rotations behave as they should when axisOrder row-major is used (set in
         # initialization of ImageItem). See also https://github.com/pyqtgraph/pyqtgraph/issues/315
 
@@ -1188,12 +1228,17 @@ class BasicImagingGUI(GuiBase):
             self.imageitem.getViewBox().rbScaleBox.hide()
 
     @QtCore.Slot(QtCore.QRectF)
-    @decorator_print_function
     def mouse_area_selected(self, rect):
         """ This slot is called when the user has selected an area of the camera image using the rubberband tool.
         Allows to reduce the used area of the camera sensor.
         @param: (QRectF) rect: Qt object defining the corners of a rectangle selected in an image item.
         """
+        if verbose:
+            print(
+                "*** DEBUGGING *** Executing mouse_area_selected "
+                "from basic_imaging_gui.py"
+            )
+
         exposure_time = self._cam_sd.exposure_doubleSpinBox.value()
         live_enabled = self._camera_logic.live_enabled
 
@@ -1381,17 +1426,14 @@ class BasicImagingGUI(GuiBase):
         if self._filterwheel_logic is not None:
             filterpos = self._filterwheel_logic.get_position()
             filterdict = self._filterwheel_logic.get_filter_dict()
-            label = 'filter{}'.format(filterpos)
-            metadata = update_metadata(metadata, ['Acquisition', 'filter'], filterdict[label]['name'])
+            metadata = update_metadata(metadata, ['Acquisition', 'filter'], filterdict[filterpos]['name'])
 
         # ----laser-------------------------------------------------------------------------------
-        intensity_dict = self._laser_logic._intensity_dict
-        keylist = [key for key in intensity_dict if intensity_dict[key] != 0]
-        laser_dict = self._laser_logic.get_laser_dict()
-        for key in keylist:
-            metadata = update_metadata(metadata, ['Acquisition', 'laser_lines'], laser_dict[key]['wavelength'],
+        laser_dict = self._laser_logic.laser_dict
+        for wavelength, laser_properties in laser_dict.items():
+            metadata = update_metadata(metadata, ['Acquisition', 'laser_lines'], f"{wavelength} nm",
                                        action="append")
-            metadata = update_metadata(metadata, ['Acquisition', 'laser_power_(%)'], intensity_dict[key],
+            metadata = update_metadata(metadata, ['Acquisition', 'laser_power_(%)'], laser_properties["intensity"],
                                        action="append")
         # if not metadata['Acquisition']['laser_lines']:  # for compliance with fits header conventions ([] is forbidden)
         #     metadata['Acquisition']['laser_lines'] = None
