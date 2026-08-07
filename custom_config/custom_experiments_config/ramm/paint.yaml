@@ -1,0 +1,34 @@
+experiment: paint
+
+description: >
+  Configure a PAINT acquisition on the RAMM microscope.
+
+output_filename: paint_task_ramm.yml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  exposure:
+    required: true
+    default: 0.05
+    minimum: 0.001
+    unit: s
+
+  imaging_sequence:
+    required: true
+    default: []
+    model: standard
+    additional_sources:
+      - Brightfield
+
+  save_path:
+    required: true
+    default_from: default_path_imagedata
+
+  num_z_planes:
+    required: true
+    default: 1
+    minimum: 1

@@ -1,0 +1,18 @@
+experiment: multicolor_scan
+
+description: >
+  Configure a multicolor z-stack acquisition on the Spinning_disk microscope.
+
+output_filename: multicolor_scan_task_sd.yml
+
+fields:
+
+  imaging_sequence:
+    required: true
+    default: []
+    model: standard
+
+  num_z_planes:
+    required: true
+    default: 1
+    minimum: 1

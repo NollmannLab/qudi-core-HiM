@@ -1,0 +1,73 @@
+experiment: Timelapse RAMM
+
+description: >
+  Configure a timelapse acquisition on the RAMM microscope.
+  Each imaging-sequence entry defines its illumination source,
+  intensity, number of z planes, and z step.
+
+output_filename: timelapse_task_RAMM.yml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  exposure:
+    required: true
+    default: 0.05
+    minimum: 0.001
+    unit: s
+
+  imaging_sequence:
+    required: true
+    default: []
+    model: timelapse_ramm
+    additional_sources:
+      - Brightfield
+
+  filter_pos:
+    visible: true
+    required: true
+    default: 1
+
+  save_path:
+    required: true
+    default_from: default_path_imagedata
+
+  file_format:
+    required: true
+    default: tif
+
+  num_z_planes:
+    visible: true
+    required: false
+    default: 1
+    minimum: 1
+    save: false
+
+  z_step:
+    visible: true
+    required: false
+    default: 0.2
+    unit: µm
+    save: false
+
+  centered_focal_plane:
+    required: false
+    default: false
+
+  roi_list_path:
+    required: true
+    default: ""
+
+  num_iterations:
+    required: true
+    default: 1
+    minimum: 1
+
+  time_step:
+    required: true
+    default: 0
+    minimum: 0
+    unit: s

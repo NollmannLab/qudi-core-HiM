@@ -1,4 +1,4 @@
-experiment: hi_m
+experiment: hi_m_ramm
 description: Configure a HiM experiments for the RAMM microscope, including fluidics / ROI / imaging /saving parameters
 
 output_filename: hi_m_task_ramm.yaml
@@ -77,14 +77,12 @@ fields:
   roi_list_path:
     visible: true
     required: true
-    default: ""
     editor: file
     file_filter: JSON files (*.json)
 
   injections_path:
     visible: true
     required: true
-    default: ""
     editor: file
     file_filter: YAML files (*.yml *.yaml)
 

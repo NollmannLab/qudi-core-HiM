@@ -1,7 +1,7 @@
 experiment: sequential_injections_sd
 description: Configure a fluidics experiment consisting of buffer injections, probe injections, and incubation steps.
 
-output_filename: fluidics_task_SD.yaml
+output_filename: fluidics_task_sd.yaml
 
 sections:
   documents: true
@@ -9,4 +9,3 @@ sections:
 fields:
   injections_path:
     required: true
-    default: ""

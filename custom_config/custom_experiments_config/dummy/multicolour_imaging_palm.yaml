@@ -1,0 +1,44 @@
+experiment: multicolor_imaging
+
+description: >
+  Configure a multicolor imaging experiment on the PALM microscope.
+
+output_filename: multicolor_imaging_task_palm.yml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  filter_pos:
+    required: true
+    default: 1
+
+  exposure:
+    required: true
+    default: 0.05
+    minimum: 0.001
+    unit: s
+
+  gain:
+    required: true
+    default: 0
+
+  num_frames:
+    required: true
+    default: 1
+    minimum: 1
+
+  imaging_sequence:
+    required: true
+    default: []
+    model: standard
+
+  save_path:
+    required: true
+    default_from: default_path_imagedata
+
+  file_format:
+    required: true
+    default: tif

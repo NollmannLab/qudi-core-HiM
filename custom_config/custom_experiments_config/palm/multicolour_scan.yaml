@@ -1,0 +1,58 @@
+experiment: multicolor_scan
+
+description: >
+  Configure a multicolor z-stack acquisition on the PALM microscope.
+
+output_filename: multicolor_scan_task_palm.yml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  filter_pos:
+    required: true
+    default: 1
+
+  exposure:
+    required: true
+    default: 0.05
+    minimum: 0.001
+    unit: s
+
+  gain:
+    required: true
+    default: 0
+
+  num_frames:
+    required: true
+    default: 1
+    minimum: 1
+
+  imaging_sequence:
+    required: true
+    default: []
+    model: standard
+
+  save_path:
+    required: true
+    default_from: default_path_imagedata
+
+  file_format:
+    required: true
+    default: tif
+
+  num_z_planes:
+    required: true
+    default: 1
+    minimum: 1
+
+  z_step:
+    required: true
+    default: 0.2
+    unit: µm
+
+  centered_focal_plane:
+    required: false
+    default: false

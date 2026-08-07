@@ -1,0 +1,67 @@
+experiment: Fast timelapse RAMM
+
+description: >
+  Configure a fast timelapse acquisition on the RAMM microscope,
+  including multicolor imaging, z-stack acquisition, repeated
+  iterations, ROI selection, and axial calibration.
+
+output_filename: fast_timelapse_task_RAMM.yml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  exposure:
+    required: true
+    default: 0.05
+    minimum: 0.001
+    unit: s
+
+  imaging_sequence:
+    required: true
+    default: []
+    model: standard
+    additional_sources:
+      - Brightfield
+  
+  filter_pos:
+    visible: true
+    required: true
+    default: 1
+
+  save_path:
+    required: true
+    default_from: default_path_imagedata
+
+  file_format:
+    required: true
+    default: tif
+
+  num_z_planes:
+    required: true
+    default: 1
+    minimum: 1
+
+  z_step:
+    required: true
+    default: 0.2
+    unit: µm
+
+  centered_focal_plane:
+    required: false
+    default: false
+
+  roi_list_path:
+    required: true
+    default: ""
+
+  num_iterations:
+    required: true
+    default: 1
+    minimum: 1
+
+  axial_calibration_path:
+    required: true
+    default: ""

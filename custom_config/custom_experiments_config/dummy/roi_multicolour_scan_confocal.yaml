@@ -1,0 +1,20 @@
+experiment: ROI multicolor scan Airyscan confocal
+
+description: >
+  Configure a confocal Airyscan acquisition over a predefined ROI list.
+
+output_filename: ROI_multicolor_scan_task_AIRYSCAN_confocal.yml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  save_path:
+    required: true
+    default_from: default_path_imagedata
+
+  roi_list_path:
+    required: true
+    default: ""

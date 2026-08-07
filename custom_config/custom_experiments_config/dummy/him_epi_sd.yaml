@@ -1,0 +1,55 @@
+experiment: Hi-M Airyscan Epi
+
+description: >
+  Configure a Hi-M experiment using the Spining disk microscope in
+  epifluorescence mode.
+
+output_filename: hi_m_task_AIRYSCAN_epi.yml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  imaging_sequence:
+    required: true
+    default: []
+    model: standard
+
+  num_z_planes:
+    required: true
+    default: 1
+    minimum: 1
+
+  roi_list_path:
+    required: true
+    default: ""
+
+  injections_path:
+    required: true
+    default: ""
+
+  zen_ref_images_path:
+    required: true
+    default: ""
+
+  zen_saving_path:
+    required: true
+    default: ""
+
+  save_network_path:
+    required: false
+    default_from: default_network_path
+
+  transfer_data:
+    required: false
+    default: false
+
+  email:
+    required: false
+    default: ""
+
+  correlation_threshold:
+    required: true
+    default: 0.6

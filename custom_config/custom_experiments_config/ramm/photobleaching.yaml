@@ -1,0 +1,29 @@
+experiment: photobleaching
+
+description: >
+  Configure a photobleaching experiment on the RAMM microscope.
+
+output_filename: photobleaching_task_ramm.yml
+
+fields:
+
+  imaging_sequence:
+    visible: true
+    required: true
+    default: []
+    model: standard
+    excluded_sources:
+      - 405
+
+  roi_list_path:
+    visible: true
+    required: true
+    default: ""
+    editor: file
+    file_filter: JSON files (*.json)
+
+  illumination_time:
+    visible: true
+    required: true
+    default: 0.0
+    unit: s
