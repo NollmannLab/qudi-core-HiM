@@ -75,6 +75,7 @@
    <addaction name="abort_video_Action"/>
    <addaction name="separator"/>
    <addaction name="set_sensor_Action"/>
+   <addaction name="use_last_sensor_ROI_Action"/>
   </widget>
   <widget class="QToolBar" name="toolBar_2">
    <property name="windowTitle">
@@ -811,6 +812,11 @@
    </property>
    <property name="toolTip">
     <string>abort acquisition of a video</string>
+   </property>
+  </action>
+  <action name="use_last_sensor_ROI_Action">
+   <property name="text">
+    <string>Reuse last sensor ROI</string>
    </property>
   </action>
  </widget>

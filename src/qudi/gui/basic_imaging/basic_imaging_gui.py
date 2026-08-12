@@ -308,6 +308,7 @@ class BasicImagingGUI(GuiBase):
         self.threadpool = QtCore.QThreadPool()
         self.metadata_template = None
         self.laser_spinboxes_by_wavelength = {}
+        self._last_sensor_roi = None
 
     def on_activate(self):
         """ Initializes all needed UI files and establishes the connectors.
@@ -367,105 +368,6 @@ class BasicImagingGUI(GuiBase):
         self._mw.centralwidget.hide()
 
         self._mw.close_MenuAction.triggered.connect(self._mw.close)
-
-# camera dockwidget ----------------------------------------------------------------------------------------------------
-    def init_camera_dockwidget(self):
-        """ Initializes the image item and the indicators on the GUI.
-        Connects signals for the camera dockwidget and the camera toolbar.
-        """
-        # initialize the imageitem (display of camera image) qnd its histogram
-        self.imageitem = pg.ImageItem(axisOrder='row-major', invertY=True)
-        self._mw.camera_ScanPlotWidget.addItem(self.imageitem)
-        self._mw.camera_ScanPlotWidget.setAspectLocked(True)
-        self._mw.camera_ScanPlotWidget.sigMouseAreaSelected.connect(self.mouse_area_selected)
-        self._mw.histogram_Widget.setImageItem(self.imageitem)
-
-        # set the default path
-        self._mw.save_path_LineEdit.setText(self.default_path)
-        # add validators to the sample name and the default path lineedits
-        self._mw.save_path_LineEdit.setValidator(NameValidator(path=True))
-        self._mw.samplename_LineEdit.setValidator(NameValidator(empty_allowed=False))
-        # synchronize the samplename_LineEdit with the LineEdit in the save settings dialog
-        self._mw.samplename_LineEdit.textChanged[str].connect(self.update_sample_name)
-
-        # initialize the camera setting indicators on the GUI
-        # use the kinetic time for andor camera, exposure time for all others
-        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (self._camera_logic.get_name() == 'iXon Ultra 888'):
-            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_kinetic_time()))
-            self._mw.exposure_Label.setText('Kinetic time (s):')
-        else:
-            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_exposure()))
-            self._mw.exposure_Label.setText('Exposure time (s):')
-
-        self._mw.gain_LineEdit.setText(str(self._camera_logic.get_gain()))
-
-        if not self._camera_logic.has_temp:
-            self._mw.temp_setpoint_LineEdit.setText('')
-            self._mw.temp_setpoint_LineEdit.setEnabled(False)
-            self._mw.temp_setpoint_Label.setEnabled(False)
-        else:
-            self._mw.temp_setpoint_LineEdit.setText(str(self._camera_logic.temperature_setpoint))
-
-        # camera toolbar
-        # configure the toolbar action buttons and connect internal signals
-        self._mw.take_image_Action.setEnabled(True)
-        self._mw.take_image_Action.setChecked(self._camera_logic.live_enabled)
-        self._mw.take_image_Action.triggered.connect(self.take_image_clicked)
-
-        self._mw.start_video_Action.setEnabled(True)
-        self._mw.start_video_Action.setChecked(self._camera_logic.live_enabled)
-        self._mw.start_video_Action.triggered.connect(self.start_video_clicked)
-
-        self._mw.save_last_image_Action.triggered.connect(self.save_last_image_clicked)
-
-        self._mw.save_video_Action.setEnabled(True)
-        self._mw.save_video_Action.setChecked(self._camera_logic.saving)
-        self._mw.save_video_Action.triggered.connect(self.save_video_clicked)
-
-        self._mw.video_quickstart_Action.triggered.connect(self.video_quickstart_clicked)
-
-        self._mw.abort_video_Action.triggered.connect(self.abort_video_clicked)
-        self._mw.abort_video_Action.setEnabled(False)
-
-        self._mw.set_sensor_Action.setEnabled(True)
-        self._mw.set_sensor_Action.setChecked(self.region_selector_enabled)
-        self._mw.set_sensor_Action.triggered.connect(self.select_sensor_region)
-
-        # signals
-        self._mw.select_folder_pushButton.clicked.connect(self.load_saving_path_clicked)
-
-        # signals to logic
-        self.sigImageStart.connect(self._camera_logic.start_single_acquisition)
-        self.sigVideoStart.connect(self._camera_logic.start_loop)
-        self.sigVideoStop.connect(self._camera_logic.stop_loop)
-        self.sigVideoSavingStart.connect(self._camera_logic.start_save_video)
-        self.sigSpoolingStart.connect(self._camera_logic.start_spooling)
-        # self.sigInterruptLive.connect(self._camera_logic.interrupt_live)
-        # self.sigResumeLive.connect(self._camera_logic.resume_live)
-        self.sigSetSensor.connect(self._camera_logic.set_sensor_region)
-        self.sigResetSensor.connect(self._camera_logic.reset_sensor_region)
-        self.sigReadTemperature.connect(self._camera_logic.get_temperature)
-
-        # signals from logic
-        # update the camera setting indicators when value changed (via settings window or iPython console)
-        self._camera_logic.sigExposureChanged.connect(self.update_exposure)
-        self._camera_logic.sigGainChanged.connect(self.update_gain)
-        self._camera_logic.sigTemperatureChanged.connect(self.update_temperature)
-        self._camera_logic.sigDisableFrameTransfer.connect(self.disable_frame_transfer)
-
-        # data acquisition signals
-        self._camera_logic.sigUpdateDisplay.connect(self.update_data)
-        self._camera_logic.sigAcquisitionFinished.connect(self.acquisition_finished)  # for single acquisition
-        self._camera_logic.sigVideoFinished.connect(self.enable_camera_toolbuttons)
-        self._camera_logic.sigVideoSavingFinished.connect(self.video_saving_finished)
-        self._camera_logic.sigSpoolingFinished.connect(self.video_saving_finished)
-        self._camera_logic.sigCleanStatusbar.connect(self.clean_statusbar)
-
-        # control of the UI state by logic
-        self._camera_logic.sigLiveStopped.connect(self.reset_start_video_button)
-        self._camera_logic.sigLiveStarted.connect(self.start_video_clicked)
-        self._camera_logic.sigDisableCameraActions.connect(self.disable_camera_toolbuttons)
-        self._camera_logic.sigEnableCameraActions.connect(self.enable_camera_toolbuttons)
 
 # camera status dockwidget ---------------------------------------------------------------------------------------------
     def _initialize_camera_ui(self) -> None:
@@ -551,6 +453,108 @@ class BasicImagingGUI(GuiBase):
 
         # connect signal from logic
         self._camera_logic.sigUpdateCamStatus.connect(self.update_camera_status_display)
+
+    def init_camera_dockwidget(self):
+        """ Initializes the image item and the indicators on the GUI.
+        Connects signals for the camera dockwidget and the camera toolbar.
+        """
+        # initialize the imageitem (display of camera image) qnd its histogram
+        self.imageitem = pg.ImageItem(axisOrder='row-major', invertY=True)
+        self._mw.camera_ScanPlotWidget.addItem(self.imageitem)
+        self._mw.camera_ScanPlotWidget.setAspectLocked(True)
+        self._mw.camera_ScanPlotWidget.sigMouseAreaSelected.connect(self.mouse_area_selected)
+        self._mw.histogram_Widget.setImageItem(self.imageitem)
+
+        # set the default path
+        self._mw.save_path_LineEdit.setText(self.default_path)
+        # add validators to the sample name and the default path lineedits
+        self._mw.save_path_LineEdit.setValidator(NameValidator(path=True))
+        self._mw.samplename_LineEdit.setValidator(NameValidator(empty_allowed=False))
+        # synchronize the samplename_LineEdit with the LineEdit in the save settings dialog
+        self._mw.samplename_LineEdit.textChanged[str].connect(self.update_sample_name)
+
+        # initialize the camera setting indicators on the GUI
+        # use the kinetic time for andor camera, exposure time for all others
+        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (
+                self._camera_logic.get_name() == 'iXon Ultra 888'):
+            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_kinetic_time()))
+            self._mw.exposure_Label.setText('Kinetic time (s):')
+        else:
+            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_exposure()))
+            self._mw.exposure_Label.setText('Exposure time (s):')
+
+        self._mw.gain_LineEdit.setText(str(self._camera_logic.get_gain()))
+
+        if not self._camera_logic.has_temp:
+            self._mw.temp_setpoint_LineEdit.setText('')
+            self._mw.temp_setpoint_LineEdit.setEnabled(False)
+            self._mw.temp_setpoint_Label.setEnabled(False)
+        else:
+            self._mw.temp_setpoint_LineEdit.setText(str(self._camera_logic.temperature_setpoint))
+
+        # camera toolbar
+        # configure the toolbar action buttons and connect internal signals
+        self._mw.take_image_Action.setEnabled(True)
+        self._mw.take_image_Action.setChecked(self._camera_logic.live_enabled)
+        self._mw.take_image_Action.triggered.connect(self.take_image_clicked)
+
+        self._mw.start_video_Action.setEnabled(True)
+        self._mw.start_video_Action.setChecked(self._camera_logic.live_enabled)
+        self._mw.start_video_Action.triggered.connect(self.start_video_clicked)
+
+        self._mw.save_last_image_Action.triggered.connect(self.save_last_image_clicked)
+
+        self._mw.save_video_Action.setEnabled(True)
+        self._mw.save_video_Action.setChecked(self._camera_logic.saving)
+        self._mw.save_video_Action.triggered.connect(self.save_video_clicked)
+
+        self._mw.video_quickstart_Action.triggered.connect(self.video_quickstart_clicked)
+
+        self._mw.abort_video_Action.triggered.connect(self.abort_video_clicked)
+        self._mw.abort_video_Action.setEnabled(False)
+
+        self._mw.set_sensor_Action.setEnabled(True)
+        self._mw.set_sensor_Action.setChecked(self.region_selector_enabled)
+        self._mw.set_sensor_Action.triggered.connect(self.select_sensor_region)
+
+        self._mw.use_last_sensor_ROI_Action.setEnabled(False)
+        self._mw.use_last_sensor_ROI_Action.triggered.connect(self.reuse_last_sensor_roi)
+
+        # signals
+        self._mw.select_folder_pushButton.clicked.connect(self.load_saving_path_clicked)
+
+        # signals to logic
+        self.sigImageStart.connect(self._camera_logic.start_single_acquisition)
+        self.sigVideoStart.connect(self._camera_logic.start_loop)
+        self.sigVideoStop.connect(self._camera_logic.stop_loop)
+        self.sigVideoSavingStart.connect(self._camera_logic.start_save_video)
+        self.sigSpoolingStart.connect(self._camera_logic.start_spooling)
+        # self.sigInterruptLive.connect(self._camera_logic.interrupt_live)
+        # self.sigResumeLive.connect(self._camera_logic.resume_live)
+        self.sigSetSensor.connect(self._camera_logic.set_sensor_region)
+        self.sigResetSensor.connect(self._camera_logic.reset_sensor_region)
+        self.sigReadTemperature.connect(self._camera_logic.get_temperature)
+
+        # signals from logic
+        # update the camera setting indicators when value changed (via settings window or iPython console)
+        self._camera_logic.sigExposureChanged.connect(self.update_exposure)
+        self._camera_logic.sigGainChanged.connect(self.update_gain)
+        self._camera_logic.sigTemperatureChanged.connect(self.update_temperature)
+        self._camera_logic.sigDisableFrameTransfer.connect(self.disable_frame_transfer)
+
+        # data acquisition signals
+        self._camera_logic.sigUpdateDisplay.connect(self.update_data)
+        self._camera_logic.sigAcquisitionFinished.connect(self.acquisition_finished)  # for single acquisition
+        self._camera_logic.sigVideoFinished.connect(self.enable_camera_toolbuttons)
+        self._camera_logic.sigVideoSavingFinished.connect(self.video_saving_finished)
+        self._camera_logic.sigSpoolingFinished.connect(self.video_saving_finished)
+        self._camera_logic.sigCleanStatusbar.connect(self.clean_statusbar)
+
+        # control of the UI state by logic
+        self._camera_logic.sigLiveStopped.connect(self.reset_start_video_button)
+        self._camera_logic.sigLiveStarted.connect(self.start_video_clicked)
+        self._camera_logic.sigDisableCameraActions.connect(self.disable_camera_toolbuttons)
+        self._camera_logic.sigEnableCameraActions.connect(self.enable_camera_toolbuttons)
 
 # laser dockwidget ---------------------------------------------------------------------------------------------
     def _initialize_brightfield_ui(self) -> None:
@@ -1234,13 +1238,7 @@ class BasicImagingGUI(GuiBase):
         @param: (QRectF) rect: Qt object defining the corners of a rectangle selected in an image item.
         """
         if verbose:
-            print(
-                "*** DEBUGGING *** Executing mouse_area_selected "
-                "from basic_imaging_gui.py"
-            )
-
-        exposure_time = self._cam_sd.exposure_doubleSpinBox.value()
-        live_enabled = self._camera_logic.live_enabled
+            print("*** DEBUGGING *** Executing mouse_area_selected from basic_imaging_gui.py")
 
         # read the coordinates of the selected region
         hstart, vstart, hend, vend = rect.getCoords()
@@ -1260,21 +1258,49 @@ class BasicImagingGUI(GuiBase):
         # ('vstart' needs to be smaller than 'vend')
         num_px_y = self._camera_logic.get_max_size()[1]  # height is stored in the second return value of get_size
 
+        # set ROI for the camera
+        sensor_roi = (hstart_, hend_, num_px_y - vend_, num_px_y - vstart_)
+        self._apply_sensor_roi(sensor_roi)
+
+        # save the ROI parameters to allow reusing it later
+        self._last_sensor_roi = sensor_roi
+        self._mw.use_last_sensor_ROI_Action.setEnabled(True)
+
+    @QtCore.Slot()
+    def reuse_last_sensor_roi(self):
+        """Reapply the last manually selected sensor ROI."""
+        if self._last_sensor_roi is None:
+            return
+
+        self._apply_sensor_roi(self._last_sensor_roi)
+
+        # set the ROI action to allow resetting the camera sensor to maximum size
+        self.region_selector_enabled = True
+        self._mw.set_sensor_Action.setText('Reset sensor to default size')
+        self._mw.set_sensor_Action.setChecked(True)
+
+    def _apply_sensor_roi(self, roi):
+        """Apply a sensor ROI given as absolute sensor coordinates."""
+
+        # retrieve roi parameters
+        hstart, hend, vstart, vend = roi
+
+        # check acquisition settings
+        exposure_time = self._cam_sd.exposure_doubleSpinBox.value()
+        live_enabled = self._camera_logic.live_enabled
+
         # if live acquisition, stop the live in order to update the parameters
         if live_enabled:
             self.sigVideoStop.emit()
             sleep(1)
 
         # update the new sensor size
-        self.sigSetSensor.emit(1, 1, hstart_, hend_, num_px_y - vend_, num_px_y - vstart_, exposure_time)
+        self.sigSetSensor.emit(1, 1, hstart, hend, vstart, vend, exposure_time)
 
-        # if the camera was in live mode, launch it
+        # if live was enabled, start it again
         if live_enabled:
             self.sigVideoStart.emit()
-            self.imageitem.getViewBox().rbScaleBox.hide()  # hide rubberband selector directly
-
-        # # Recalculate the camera settings (in particular the exposure time) according to the new size of the FoV
-        # self.cam_update_settings()
+            self.imageitem.getViewBox().rbScaleBox.hide()
 
 # menubar options belonging to camera image ---------------------------------------------------------------------------
     @QtCore.Slot()
