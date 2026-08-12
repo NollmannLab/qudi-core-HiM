@@ -167,7 +167,11 @@ class PIMultiAxisStage(MultiAxisStageInterface):
             for axis_label in self.axis_list:
                 self._initialize_axis(axis_label)
                 self._device_axes[axis_label] = self._resolve_device_axis(axis_label)
-                self._get_reference_status(axis_label)
+                ref = self._get_reference_status(axis_label)
+                if not ref:
+                    self.log.info(f"Axis {axis_label} is being referenced...")
+                    self.calibrate([axis_label])
+
                 device = self._devices[axis_label]
                 self.log.info(
                     f'PI axis {axis_label!r} connected through '
