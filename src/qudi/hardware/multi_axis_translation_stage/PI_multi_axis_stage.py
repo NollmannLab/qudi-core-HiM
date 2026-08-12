@@ -167,6 +167,7 @@ class PIMultiAxisStage(MultiAxisStageInterface):
             for axis_label in self.axis_list:
                 self._initialize_axis(axis_label)
                 self._device_axes[axis_label] = self._resolve_device_axis(axis_label)
+                self._get_reference_status(axis_label)
                 device = self._devices[axis_label]
                 self.log.info(
                     f'PI axis {axis_label!r} connected through '
@@ -608,6 +609,20 @@ class PIMultiAxisStage(MultiAxisStageInterface):
             f'Configured device_axis {configured_axis!r} for logical axis '
             f'{axis_label!r} is not among {available_axes}.'
         )
+
+    def _get_reference_status(self, axis_label):
+        """Return reference state of each configured axis."""
+
+        device = self._devices[axis_label]
+        device_axis = self._device_axes[axis_label]
+
+        try:
+            status = bool(device.qFRF(device_axis)[device_axis])
+        except Exception as error:
+            self.log.warning(f"Could not determine reference state of axis {axis_label}: {error}")
+            status = None
+
+        return status
 
     def _selected_axes(self,  param_list: Optional[List[str]] = None) -> List[str]:
         """Return valid selected axes while warning about unknown labels."""

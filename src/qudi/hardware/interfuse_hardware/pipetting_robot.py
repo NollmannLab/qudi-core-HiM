@@ -309,7 +309,8 @@ class PipettingRobot(PipettingRobotInterface):
     def move_rel(self, param_dict):
         """Move selected robot axes by relative distances or angles.
 
-        :param dict param_dict: Relative movements indexed by robot axis label.
+        :param dict param_dict: Relative movements indexed by robot axis label. For example : {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        if the axis are defined as x, y, z.
         :return: ``True`` if at least one movement command was accepted.
         :rtype: bool
         """
@@ -323,7 +324,8 @@ class PipettingRobot(PipettingRobotInterface):
         in-plane, and final-Z sequence. Use :meth:`park` for the dedicated robot
         parking sequence.
 
-        :param dict param_dict: Absolute targets indexed by robot axis label.
+        :param dict param_dict: Absolute targets indexed by robot axis label. For example : {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        if the axis are defined as x, y, z.
         :return: ``True`` if at least one movement command was accepted.
         :rtype: bool
         """
@@ -342,7 +344,8 @@ class PipettingRobot(PipettingRobotInterface):
 
         :param list param_list: Optional robot axis labels. All axes are returned
             when omitted.
-        :return: Positions indexed by robot axis label.
+        :return: Positions indexed by robot axis label. The format is : {'x': 0.0, 'y': 0.0, 'z': 0.0} or
+        {'r': 0.0, 'phi': 0.0, 'z': 0.0} depending on the selected robot axes.
         :rtype: dict
         """
         return self._motor.get_pos(self._selected_axes(param_list))
