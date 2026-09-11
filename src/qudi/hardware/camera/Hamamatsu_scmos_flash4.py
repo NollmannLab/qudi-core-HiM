@@ -19,12 +19,12 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-import ctypes
 import numpy as np
 from time import sleep
 from qudi.core.configoption import ConfigOption
 from qudi.interface.camera_interface import CameraInterface
-from .hamamatsu_python_driver import HamamatsuCamera
+from qudi.helpers.Hamamatsu_python_ctypes_SDK import HamamatsuCamera
+
 
 class HCam(CameraInterface):
     """ Hardware class for Hamamatsu Orca Flash Camera
