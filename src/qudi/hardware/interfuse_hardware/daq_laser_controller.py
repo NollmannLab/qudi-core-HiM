@@ -63,6 +63,7 @@ class DaqLaserController(LaserControlInterface):
 
     daq = Connector(name="daq", interface="DaqInterface")
     _laser_channels = ConfigOption("laser_channels", missing="error")
+    _blanking_channel = ConfigOption("blanking_channel", default=None)
 
     # attributes
     _daq = None
@@ -137,6 +138,7 @@ class DaqLaserController(LaserControlInterface):
         voltage = self._laser_dict[wavelength]['voltage']
         channel_config = self._laser_dict[wavelength]['channel']
         self._daq.write_named_ao(channel_config["daq_task"], voltage)
+        self._set_blanking(True)
 
     def ensure_ready(self):
         """Prepare the DAQ backend for use.
@@ -158,6 +160,7 @@ class DaqLaserController(LaserControlInterface):
             if voltage > 0:
                 channel_config = self._laser_dict[wavelength]['channel']
                 self._daq.write_named_ao(channel_config["daq_task"], voltage)
+        self._set_blanking(True)
 
     def disable_all_lines(self):
         """Disable all laser lines without clearing cached voltages.
@@ -165,6 +168,7 @@ class DaqLaserController(LaserControlInterface):
         The ``voltage`` entries in ``_laser_dict`` are preserved so the previous
         settings can be restored later.
         """
+        self._set_blanking(False)
         for wavelength in self._laser_dict:
             self._laser_dict[wavelength]['enabled'] = False
             channel_config = self._laser_dict[wavelength]['channel']
@@ -223,3 +227,16 @@ class DaqLaserController(LaserControlInterface):
         """Convert an intensity percentage into a DAQ voltage."""
         max_voltage = self._get_voltage_range(wavelength)
         return float(intensity * max_voltage / 100)
+
+    def _set_blanking(self, enabled: bool) -> None:
+        """Set the optional global AOTF blanking/gate output."""
+        if self._blanking_channel is None:
+            return
+
+        voltage_key = ("enabled_voltage" if enabled else "disabled_voltage")
+        voltage = self._blanking_channel[voltage_key]
+
+        self._daq.write_named_ao(
+            self._blanking_channel["daq_task"],
+            voltage,
+        )

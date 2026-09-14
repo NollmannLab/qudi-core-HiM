@@ -81,51 +81,120 @@ class NIDAQ(DaqInterface):
         if daq is None:
             raise RuntimeError("PyDAQmx is not available on this system.")
 
-        self._tasks = {}
-        self._channel_data = {}
-        self._ao_voltage_ranges = {}
+        self._reset_task_registry()
 
-        for task_name, ao_spec in dict(self._ao_channels).items():
-            channel, voltage_range = ao_spec
-            self._tasks[task_name] = self.create_taskhandle()
-            self.set_up_ao_channel(self._tasks[task_name], channel, voltage_range)
-            self._ao_voltage_ranges[task_name] = tuple(voltage_range)
-            self._channel_data[task_name] = 0.0
+        if self._ao_channels:
+            self._register_channels(self._ao_channels, channel_type="ao", default_value=0.0)
 
-        for task_name, ai_spec in dict(self._ai_channels).items():
-            channel, voltage_range = ai_spec
-            self._tasks[task_name] = self.create_taskhandle()
-            self.set_up_ai_channel(self._tasks[task_name], channel, voltage_range)
-            self._channel_data[task_name] = 0.0
+        if self._ai_channels:
+            self._register_channels(self._ai_channels, channel_type="ai", default_value=0.0)
 
-        for task_name, channel in dict(self._do_channels).items():
-            self._tasks[task_name] = self.create_taskhandle()
-            self.set_up_do_channel(self._tasks[task_name], channel)
-            self._channel_data[task_name] = np.uint8(0)
+        if self._do_channels:
+            self._register_channels(self._do_channels, channel_type="do", default_value=np.uint8(0))
 
-        for task_name, channel in dict(self._di_channels).items():
-            self._tasks[task_name] = self.create_taskhandle()
-            self.set_up_di_channel(self._tasks[task_name], channel)
-            self._channel_data[task_name] = np.uint8(0)
+        if self._di_channels:
+            self._register_channels(self._di_channels, channel_type="di", default_value=np.uint8(0))
 
         self.log.info("NI DAQ activated.")
 
     def on_deactivate(self):
         """Close all tasks and release the internal task registry."""
-        for task_name, taskhandle in list(self._tasks.items()):
+        for task_name, task in list(self._tasks.items()):
             try:
-                self.close_task(taskhandle)
+                self.close_task(task["task_handle"])
             except Exception as exc:
                 self.log.warning(f"Could not close DAQ task '{task_name}': {exc}")
+
+        self._reset_task_registry()
+        self.log.info("NI DAQ deactivated.")
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # private methods handling tasks
+    # ------------------------------------------------------------------------------------------------------------------
+
+    def _reset_task_registry(self):
+        """Create a fresh in-memory registry for all configured tasks."""
         self._tasks = {}
         self._channel_data = {}
-        self._ao_voltage_ranges = {}
 
-    def get_taskhandle(self, task_name):
-        """Return the DAQ task handle registered under ``task_name``."""
+    def _register_channels(self, channel_map, channel_type, default_value):
+        """Register configured channels in the NI-DAQ task registry.
+
+        Args:
+            channel_map (dict): Mapping of task name to physical channel string.
+            channel_type (str): One of ``ao``, ``ai``, ``do`` or ``di``.
+            default_value: Initial value cached for the task.
+        """
+        for task_name, spec in dict(channel_map).items():
+            if channel_type in {"ao", "ai"}:
+                channel, voltage_range = spec
+            else:
+                channel = spec
+                voltage_range = None
+
+            taskhandle = self.create_taskhandle()
+
+            # Configure the physical NI channel
+            if channel_type == "ao":
+                self.set_up_ao_channel(taskhandle, channel, voltage_range)
+            elif channel_type == "ai":
+                self.set_up_ai_channel(taskhandle, channel, voltage_range)
+            elif channel_type == "do":
+                self.set_up_do_channel(taskhandle, channel)
+            elif channel_type == "di":
+                self.set_up_di_channel(taskhandle, channel)
+            else:
+                self.log.error( f"Unknown DAQ channel type: {channel_type!r}")
+
+            # Register metadata
+            self._tasks[task_name] = {
+                "task_handle": taskhandle,
+                "task_name": task_name,
+                "channel": channel,
+                "type": channel_type,
+            }
+
+            if channel_type in {"ao", "ai"}:
+                self._tasks[task_name]["voltage_range"] = tuple(voltage_range)
+            self._channel_data[task_name] = default_value
+
+    def _get_task(self, task_name):
+        """Return the stored task metadata for ``task_name``."""
         if task_name not in self._tasks:
             raise KeyError(f"Unknown DAQ task '{task_name}'.")
         return self._tasks[task_name]
+
+    def _get_task_name_from_handle(self, taskhandle):
+        """Return the task name associated with ``taskhandle``."""
+        for task_name, task in self._tasks.items():
+            if task["task_handle"] is taskhandle:
+                return task_name
+        raise RuntimeError("Error: No task handle specified.")
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # callable methods to get task properties
+    # ------------------------------------------------------------------------------------------------------------------
+
+    def get_taskhandle(self, task_name):
+        """Return the NI-DAQ task handle for ``task_name``."""
+        if task_name not in self._tasks:
+            raise KeyError(f"Unknown DAQ task '{task_name}'.")
+        return self._tasks[task_name]["task_handle"]
+
+    def get_task_range(self, task_name):
+        """Return the task range for ``task_name``, if task is associated to an analog channel."""
+        if task_name not in self._tasks:
+            raise KeyError(f"Unknown DAQ task '{task_name}'.")
+
+        task = self._tasks[task_name]
+        if task["type"] == "ao":
+            return task["voltage_range"]
+        else:
+            return None
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # create and close tasks
+    # ------------------------------------------------------------------------------------------------------------------
 
     @staticmethod
     def create_taskhandle():
@@ -142,6 +211,13 @@ class NIDAQ(DaqInterface):
         return taskhandle
 
     @staticmethod
+    def close_task(taskhandle):
+        """Stop and clear a DAQ task, then reset the handle to ``None``."""
+        daq.DAQmxStopTask(taskhandle)
+        daq.DAQmxClearTask(taskhandle)
+        taskhandle.value = None
+
+    @staticmethod
     def set_up_ao_channel(taskhandle, channel, voltage_range):
         """Create and configure one analog-output virtual channel."""
         daq.DAQmxCreateTask('', daq.byref(taskhandle))
@@ -154,6 +230,37 @@ class NIDAQ(DaqInterface):
             daq.DAQmx_Val_Volts,
             None,
         )
+
+    @staticmethod
+    def set_up_ai_channel(taskhandle, channel, voltage_range):
+        """Create and configure one analog-input virtual channel."""
+        daq.DAQmxCreateTask('', daq.byref(taskhandle))
+        daq.DAQmxCreateAIVoltageChan(
+            taskhandle,
+            channel,
+            '',
+            daq.DAQmx_Val_RSE,
+            voltage_range[0],
+            voltage_range[1],
+            daq.DAQmx_Val_Volts,
+            None,
+        )
+
+    @staticmethod
+    def set_up_do_channel(taskhandle, channel):
+        """Create and configure one digital-output virtual channel."""
+        daq.DAQmxCreateTask('DigitalOut', daq.byref(taskhandle))
+        daq.DAQmxCreateDOChan(taskhandle, channel, '', daq.DAQmx_Val_ChanForAllLines)
+
+    @staticmethod
+    def set_up_di_channel(taskhandle, channel):
+        """Create and configure one digital-input virtual channel."""
+        daq.DAQmxCreateTask('DigitalIn', daq.byref(taskhandle))
+        daq.DAQmxCreateDIChan(taskhandle, channel, '', daq.DAQmx_Val_ChanPerLine)
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # read / write tasks
+    # ------------------------------------------------------------------------------------------------------------------
 
     def write_to_ao_channel(self, taskhandle, voltage, voltage_range=None, timeout=None, autostart=True):
         """Write a scalar voltage to an analog-output task."""
@@ -170,21 +277,6 @@ class NIDAQ(DaqInterface):
         daq.WriteAnalogScalarF64(taskhandle, autostart, timeout, float(voltage), None)
         daq.DAQmxStartTask(taskhandle)
         daq.DAQmxStopTask(taskhandle)
-
-    @staticmethod
-    def set_up_ai_channel(taskhandle, channel, voltage_range):
-        """Create and configure one analog-input virtual channel."""
-        daq.DAQmxCreateTask('', daq.byref(taskhandle))
-        daq.DAQmxCreateAIVoltageChan(
-            taskhandle,
-            channel,
-            '',
-            daq.DAQmx_Val_RSE,
-            voltage_range[0],
-            voltage_range[1],
-            daq.DAQmx_Val_Volts,
-            None,
-        )
 
     def read_ai_channel(self, taskhandle):
         """Read one scalar voltage from an analog-input task."""
@@ -204,12 +296,6 @@ class NIDAQ(DaqInterface):
         daq.DAQmxStopTask(taskhandle)
         return float(data[0])
 
-    @staticmethod
-    def set_up_do_channel(taskhandle, channel):
-        """Create and configure one digital-output virtual channel."""
-        daq.DAQmxCreateTask('DigitalOut', daq.byref(taskhandle))
-        daq.DAQmxCreateDOChan(taskhandle, channel, '', daq.DAQmx_Val_ChanForAllLines)
-
     def write_to_do_channel(self, taskhandle, num_samp, digital_write):
         """Write one or more digital values to a digital-output task."""
         num_samples_per_channel = daq.c_int32(num_samp)
@@ -227,12 +313,6 @@ class NIDAQ(DaqInterface):
         )
         daq.DAQmxStopTask(taskhandle)
         return digital_read
-
-    @staticmethod
-    def set_up_di_channel(taskhandle, channel):
-        """Create and configure one digital-input virtual channel."""
-        daq.DAQmxCreateTask('DigitalIn', daq.byref(taskhandle))
-        daq.DAQmxCreateDIChan(taskhandle, channel, '', daq.DAQmx_Val_ChanPerLine)
 
     def read_di_channel(self, taskhandle, num_samp):
         """Read one or more digital values from a digital-input task."""
@@ -255,37 +335,33 @@ class NIDAQ(DaqInterface):
         daq.DAQmxStopTask(taskhandle)
         return data
 
-    @staticmethod
-    def close_task(taskhandle):
-        """Stop and clear a DAQ task, then reset the handle to ``None``."""
-        daq.DAQmxStopTask(taskhandle)
-        daq.DAQmxClearTask(taskhandle)
-        taskhandle.value = None
-
     def write_named_ao(self, task_name, voltage):
         """Write a scalar voltage to the named analog-output task."""
-        self._channel_data[task_name] = float(voltage)
-        self.write_to_ao_channel(
-            self.get_taskhandle(task_name),
+        task = self._get_task(task_name)
+        return self.write_to_ao_channel(
+            task["task_handle"],
             voltage,
-            self._ao_voltage_ranges.get(task_name, self._ao_voltage_range),
+            task.get("voltage_range"),
         )
 
     def read_named_ai(self, task_name):
         """Read and cache the latest scalar voltage from the named AI task."""
-        value = self.read_ai_channel(self.get_taskhandle(task_name))
-        self._channel_data[task_name] = float(value)
+        task = self._get_task(task_name)
+        value = float(self.read_ai_channel(task["task_handle"]))
+        self._channel_data[task_name] = value
         return value
 
     def write_named_do(self, task_name, value):
         """Write a single digital value to the named DO task."""
         digital_value = np.array([np.uint8(value)], dtype=np.uint8)
+        task = self._get_task(task_name)
         self._channel_data[task_name] = np.uint8(value)
-        return self.write_to_do_channel(self.get_taskhandle(task_name), 1, digital_value)
+        return self.write_to_do_channel(task["task_handle"], 1, digital_value)
 
     def read_named_di(self, task_name, num_samp=1):
         """Read and cache one or more digital values from the named DI task."""
-        value = self.read_di_channel(self.get_taskhandle(task_name), num_samp)
+        task = self._get_task(task_name)
+        value = self.read_di_channel(task["task_handle"], num_samp)
         self._channel_data[task_name] = value
         return value
 
