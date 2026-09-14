@@ -56,7 +56,7 @@ def decorator_print_function(function):
 
 class WorkerSignals(QtCore.QObject):
     """ Defines the signals available from a running worker thread """
-    sigFinished = QtCore.Signal(object)
+    sigFinished = QtCore.Signal()
     sigStepFinished = QtCore.Signal(str, str, str, int, bool, dict, bool, bool)
     sigSpoolingStepFinished = QtCore.Signal(str, str, str, bool, dict)
 
@@ -67,24 +67,16 @@ class LiveImageWorker(QtCore.QRunnable):
     The worker handles only the waiting time, and emits a signal that serves to trigger the update indicators
     """
 
-    def __init__(self, time_constant, worker_id, termination_flags, finished_conditions):
+    def __init__(self, time_constant):
         super(LiveImageWorker, self).__init__()
         self.signals = WorkerSignals()
         self.time_constant = time_constant
-        self.worker_id = worker_id
-        self.termination_flags = termination_flags
-        self.finished_condition = finished_conditions
 
     @QtCore.Slot()
     def run(self):
         """ """
-        try:
-            if not self.termination_flags.get(self.worker_id, False):
-                sleep(self.time_constant)  # Simulate work
-                self.signals.sigFinished.emit(self.worker_id)
-        finally:
-            # Notify the stop condition that the worker has finished
-            self.finished_condition.wakeAll()
+        sleep(self.time_constant)  # Simulate work
+        self.signals.sigFinished.emit()
 
 
 class SaveProgressWorker(QtCore.QRunnable):
@@ -161,8 +153,8 @@ class CameraLogic(LogicBase):
     # declare available file formats
     fileformat_list = ConfigOption('fileformat_list', missing='error')
 
-    # config options
-    _max_fps = ConfigOption('default_exposure', 20)
+    # maximum speed for the live
+    _max_fps = ConfigOption('max_live_speed_(fps)', 20)
 
     # signals
     sigUpdateDisplay = QtCore.Signal()
@@ -282,7 +274,7 @@ class CameraLogic(LogicBase):
         @param: time (float): desired new exposure time in seconds
         """
         self._hardware.set_exposure(time)
-        # self.get_exposure()  # updates also the attribute self._exposure and self._fps
+        self.get_exposure()  # updates also the attribute self._exposure and self._fps
         self.sigExposureChanged.emit()
 
     def get_exposure(self):
@@ -578,72 +570,23 @@ class CameraLogic(LogicBase):
 
     # Methods invoked by live button on GUI --------------------------------------------------------------------------------
 
-    #     def start_loop(self):
-    #         """ Start the live display mode.
-    #         """
-    #         self.live_enabled = True
-    #         if self._security_shutter is not None:
-    #             self._security_shutter.camera_security(acquiring=True)
-    #
-    #         worker = LiveImageWorker(1 / self._fps)
-    #         worker.signals.sigFinished.connect(self.loop)
-    #         self.threadpool.start(worker)
-    #
-    #         if self._hardware.support_live_acquisition():
-    #             self._hardware.start_live_acquisition()
-    #         else:
-    #             self._hardware.start_single_acquisition()
-
-    # def loop(self):
-    #     """ Execute one step in the live display loop.
-    #     """
-    #     if self.live_enabled:
-    #         if self.cam_type == "KinetixCam":
-    #             self._last_image, _ = self._hardware.get_most_recent_image(copy=False)
-    #         else:
-    #             self._last_image = self._hardware.get_acquired_data()
-    #         self.sigUpdateDisplay.emit()
-    #
-    #         worker = LiveImageWorker(1 / self._fps)
-    #         worker.signals.sigFinished.connect(self.loop)
-    #         self.threadpool.start(worker)
-    #
-    #         # In case live mode does not exist, launch a new snap acquisition
-    #         if not self._hardware.support_live_acquisition():
-    #             self._hardware.start_single_acquisition()  # the hardware has to check it's not busy
+    def _schedule_live_update(self):
+        worker = LiveImageWorker(1 / self._fps)
+        worker.signals.sigFinished.connect(self.loop)
+        self.threadpool.start(worker)
 
     def start_loop(self, worker_id="live_worker"):
         """ Start the live display mode.
         """
         # For safety - make sure there is no multiple live being launched at the same time
         if self.live_enabled:
-            self.log.warn('Live display is already running - skip start_loop in camera_logic!')
+            self.log.warning('Live display is already running - skip start_loop in camera_logic!')
             return
-
-        # Ensure a lock and a termination flag exist for this worker - note that the worker associated to live imaging
-        # will always have an id called live_worker
-        if worker_id not in self.worker_locks:
-            self.worker_locks[worker_id] = QtCore.QMutex()
-        self.termination_flags[worker_id] = False  # initialize the termination flag
 
         # Indicate that a live acquisition is starting
         self.live_enabled = True
         if self._security_shutter is not None:
             self._security_shutter.camera_security(acquiring=True)
-
-        # start the worker
-        worker = LiveImageWorker(1 / self._fps, worker_id, self.termination_flags, self.stop_condition)
-
-        # safely disconnect any previous workers
-        try:
-            worker.signals.sigFinished.disconnect(self.worker_finished)
-            worker.signals.sigFinished.disconnect(lambda: self.loop(worker_id))
-        except TypeError:
-            pass  # Ignore if no connections exist
-
-        worker.signals.sigFinished.connect(self.worker_finished)
-        worker.signals.sigFinished.connect(lambda: self.loop(worker_id))
-        self.threadpool.start(worker)
 
         # start the camera
         if self._hardware.support_live_acquisition():
@@ -651,55 +594,38 @@ class CameraLogic(LogicBase):
         else:
             self._hardware.start_single_acquisition()
 
+        # Start display polling
+        self._schedule_live_update()
+
     def loop(self, worker_id="live_worker"):
         """ Execute one step in the live display loop.
         """
+
         # Skip if live mode is disabled
         if not self.live_enabled:
-            return
-
-        # Ensure a lock exists for this worker - skip if it is not the case
-        if (worker_id not in self.worker_locks) or (worker_id not in self.termination_flags):
-            print(f"Warning: The worker {worker_id} is no longer active!")
-            return
-        worker_lock = self.worker_locks[worker_id]
-
-        # Skip if a worker is already running
-        if not worker_lock.tryLock():
-            print(f"Warning: A worker {worker_id} is already running!")
             return
 
         try:
             # Get the latest image acquired by the camera
             if self.cam_type == "KinetixCam":
                 self._last_image, _ = self._hardware.get_most_recent_image(copy=False)
+                self.log.info(f"Retrieving images...")
             else:
                 self._last_image = self._hardware.get_acquired_data()
 
             self.sigUpdateDisplay.emit()
-
-            # Launch a worker - Disconnect any existing connections to avoid duplicate handlers
-            worker = LiveImageWorker(1 / self._fps, worker_id, self.termination_flags, self.stop_condition)
-            try:
-                worker.signals.sigFinished.disconnect(self.worker_finished)
-                worker.signals.sigFinished.disconnect(lambda: self.loop(worker_id))
-            except TypeError:
-                pass  # Ignore if there are no connections
-
-            worker.signals.sigFinished.connect(self.worker_finished)
-            worker.signals.sigFinished.connect(lambda: self.loop(worker_id))  # Continue the loop
-            self.threadpool.start(worker)
 
             # Launch a new snap acquisition if live acquisition isn't supported
             if not self._hardware.support_live_acquisition():
                 self._hardware.start_single_acquisition()
 
         except Exception as e:
-            print(f"Error in loop: {e}")
-            worker_lock.release()  # Ensure lock is released on error
+            self.log.exception(f"Error during live camera update: {exc}")
+            self.live_enabled = False
+            return
 
-        finally:
-            worker_lock.unlock()  # Ensure lock is released even on errors
+        if self.live_enabled:
+            self._schedule_live_update()
 
     def stop_loop(self, worker_id="live_worker"):
         """ Stop the live display loop.
@@ -712,9 +638,6 @@ class CameraLogic(LogicBase):
         # Turn live_enabled to False and stop the loop
         self.live_enabled = False
 
-        # Wait workers and terminate them
-        self.wait_for_worker_lock(worker_id)
-
         # in the case of the Kinetix camera, no copy of the images is performed during live acquisition (to avoid
         # lagging). However, a copy is performed before stopping the camera and removing all the images from the buffer.
         # This copy is required for the GUI's display.
@@ -725,19 +648,6 @@ class CameraLogic(LogicBase):
         self._hardware.stop_acquisition()
         if self._security_shutter is not None:
             self._security_shutter.camera_security(acquiring=False)
-
-        # self.sigVideoFinished.emit()
-
-    ## DEPRECATED - old version for handling sensor region handling but was creating bugs for KINETIX camera
-    # Helper methods to interrupt/restart the camera live mode to give access to camera settings etc. ----------------------
-    #     def interrupt_live(self):
-    #         """ Interrupt the live display loop, for example to update camera settings. """
-    #         self._hardware.stop_acquisition()
-    #         # note that enabled attribute is not modified, to resume the state of the live display
-    #
-    #     def resume_live(self):
-    #         """ Restart the live display loop """
-    #         self._hardware.start_live_acquisition()
 
     # Method invoked by save last image button on GUI ----------------------------------------------------------------------
     def save_last_image(self, path, metadata, fileformat='.tif'):
