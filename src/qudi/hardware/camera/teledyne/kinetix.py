@@ -59,7 +59,7 @@ class KinetixCam(CameraInterface):
     camera_id = ConfigOption('camera_id', 0)
     _max_frames_number_video = ConfigOption('max_N_images_movie', missing='error')
     _default_trigger_mode = ConfigOption('default_trigger_mode', 'INTERNAL')
-    _dafault_exposure_out_mode = ConfigOption('default_exposure_out_mode', 'ALL_ROWS')
+    _default_exposure_out_mode = ConfigOption('default_exposure_out_mode', 'ALL_ROWS')
     _has_temp = ConfigOption('temperature_control', False)
     _has_shutter = ConfigOption('mechanical_shutter', False)
     _has_gain = ConfigOption('gain_control', False)
@@ -68,13 +68,14 @@ class KinetixCam(CameraInterface):
     _frame_transfer = ConfigOption('frame_transfer', missing='error')
 
     # camera attributes
+    _camera = None
     _width = 0  # current width
     _height = 0  # current height
     _full_width = 0  # maximum width of the sensor
     _full_height = 0  # maximum height of the sensor
     _exposure = _default_exposure
     _trigger_mode = _default_trigger_mode
-    _exposure_out_mode = _dafault_exposure_out_mode
+    _exposure_out_mode = _default_exposure_out_mode
     _acquisition_mode = _default_acquisition_mode
     _gain = 0
     n_frames = 1
@@ -90,8 +91,8 @@ class KinetixCam(CameraInterface):
             self.log.error('More than one camera was detected - this program does not handle multiple camera')
         else:
             try:
-                self.camera = next(Camera.detect_camera())  # Use generator to find first camera.
-                self.camera.open()  # Open the camera.
+                self._camera = next(Camera.detect_camera())  # Use generator to find first camera.
+                self._camera.open()  # Open the camera.
 
                 self.get_size()  # update the values _weight, _height of the full sensor when starting the cam
                 self._width = self._full_width
@@ -100,16 +101,15 @@ class KinetixCam(CameraInterface):
                 # set some default parameters value - note the camera is already set to 'Dynamic Range' in order to get
                 # the same intensity values for the displayed and saved data
                 self.set_exposure(self._exposure)
-                self._set_acquisition_mode(str(self._acquisition_mode))  # Set the camera in 'Dynamic Range' mode
-                self._set_trigger_source(str(self._trigger_mode))  # Set the camera in 'Internal Trigger' mode
-                self._set_exposure_out_mode(
-                    str(self._exposure_out_mode))  # Set the exposure out mode to the default value
+                self._set_acquisition_mode(self._acquisition_mode)  # Set the camera in 'Dynamic Range' mode
+                self._set_trigger_source(self._trigger_mode)  # Set the camera in 'Internal Trigger' mode
+                self._set_exposure_out_mode(self._exposure_out_mode)  # Set the exposure out mode to the default value
 
                 # initialize the default acquisition parameters by launching a brief live acquisition - this step is
                 # required to have access to the "check_frame_status" method without throwing an error
                 self._start_acquisition(mode='Live')
                 sleep(self._exposure * 2)
-                self.camera.finish()
+                self._camera.finish()
 
             except Exception as e:
                 self.log.error(e)
@@ -117,7 +117,7 @@ class KinetixCam(CameraInterface):
     def on_deactivate(self):
         """ Camera will be deactivated and stopped during execution of this module.
         """
-        self.camera.close()
+        self._camera.close()
         pvc.uninit_pvcam()
 
     # ======================================================================================================================
@@ -141,7 +141,7 @@ class KinetixCam(CameraInterface):
         Retrieve size of the FULL sensor in pixel
         @return: (array) all sensor size
         """
-        sensor_size = self.camera.sensor_size
+        sensor_size = self._camera.sensor_size
         self._full_width = sensor_size[0]
         self._full_height = sensor_size[1]
         return sensor_size
@@ -151,15 +151,15 @@ class KinetixCam(CameraInterface):
         Set the exposure time in ms.
         @param: exposure (float): desired new exposure time in s (but beware that default unit for Kinetix camera is ms)
         """
-        self.camera.exp_time = exposure * 1000
-        self._exposure = self.camera.exp_time / 1000
+        self._camera.exp_time = exposure * 1000
+        self._exposure = self._camera.exp_time / 1000
 
     def get_exposure(self):
         """
         Get the exposure time in seconds.
         @return: exposure time (float)
         """
-        self._exposure = self.camera.exp_time / 1000
+        self._exposure = self._camera.exp_time / 1000
         return self._exposure
 
     @staticmethod
@@ -175,7 +175,7 @@ class KinetixCam(CameraInterface):
         Get the sensor temperature in degrees Celsius.
         @return: temp (float) sensor temperature
         """
-        temp = pvc.get_param(self.camera.handle, constants.PARAM_TEMP, constants.ATTR_CURRENT)
+        temp = pvc.get_param(self._camera.handle, constants.PARAM_TEMP, constants.ATTR_CURRENT)
         return temp
 
     def set_gain(self, gain):
@@ -198,7 +198,7 @@ class KinetixCam(CameraInterface):
         Is the camera ready for an acquisition ?
         @return: ready ? (bool)
         """
-        status = self.camera.check_frame_status()
+        status = self._camera.check_frame_status()
         if (status == "EXPOSURE_IN_PROGRESS") or (status == "READOUT_IN_PROGRESS") or (status == "READOUT_FAILED"):
             return False
         else:
@@ -218,7 +218,7 @@ class KinetixCam(CameraInterface):
         try:
             self._width = int(vend - vstart)
             self._height = int(hend - hstart)
-            self.camera.set_roi(vstart, hstart, self._height, self._width)
+            self._camera.set_roi(vstart, hstart, self._height, self._width)
             self.log.info(f'Set subarray: {self._height} x {self._width} pixels (rows x cols)')
             return False
         except Exception as e:
@@ -230,7 +230,7 @@ class KinetixCam(CameraInterface):
         Get the size of the image (after setting an ROI for example)
         @return: (tuple) height and width of the image
         """
-        im_size = self.camera.shape()
+        im_size = self._camera.shape()
         return im_size
 
     def get_progress(self):
@@ -321,7 +321,7 @@ class KinetixCam(CameraInterface):
         @return: bool: Success ?
         """
         try:
-            self.camera.finish()
+            self._camera.finish()
             return True
         except Exception as e:
             self.log.error(f"The following error was encountered in stop_acquisition : {e}")
@@ -354,7 +354,7 @@ class KinetixCam(CameraInterface):
         @return: bool: Success ?
         """
         try:
-            self.camera.finish()
+            self._camera.finish()
             self.n_frames = 1  # reset to default
             return True
         except Exception as e:
@@ -418,7 +418,7 @@ class KinetixCam(CameraInterface):
         frame_count (int): number of acquired frames
         """
         try:
-            frame, _, frame_count = self.camera.poll_frame(timeout_ms=1000, oldestFrame=False, copyData=copy)
+            frame, _, frame_count = self._camera.poll_frame(timeout_ms=1000, oldestFrame=False, copyData=copy)
             self.log.info(f"Frame : {frame['pixel_data'].shape}")
             return frame['pixel_data'], frame_count
         except Exception as e:
@@ -434,13 +434,13 @@ class KinetixCam(CameraInterface):
 
         @return: (numpy ndarray) im_seq : data in format [n_frames, im_width, im_height]
         """
-        status = self.camera.check_frame_status()
+        status = self._camera.check_frame_status()
 
         if (status == "FRAME_AVAILABLE") or (status == "READOUT_COMPLETE"):
             self.log.info(f'Loading {self.n_frames} frames ...')
             im_seq = np.zeros((self.n_frames, self._width, self._height), dtype=np.uint16)
             for frame in range(self.n_frames):
-                im, _, _ = self.camera.poll_frame(timeout_ms=1000, oldestFrame=True, copyData=False)
+                im, _, _ = self._camera.poll_frame(timeout_ms=1000, oldestFrame=True, copyData=False)
                 im_seq[frame, :, :] = im['pixel_data']
 
         elif (status == "READOUT_IN_PROGRESS") or (status == "EXPOSURE_IN_PROGRESS"):
@@ -465,7 +465,7 @@ class KinetixCam(CameraInterface):
         'Sub-electron')
         @return: acq_mode (int): return a number according to the mode currently in use
         """
-        acq_mode = self.camera.readout_port
+        acq_mode = self._camera.readout_port
         return acq_mode
 
     def _set_acquisition_mode(self, mode):
@@ -484,12 +484,12 @@ class KinetixCam(CameraInterface):
         elif mode == 'Sub-Electron':
             port_value = 3
         else:
-            self.log.warn('The readout mode selected does not exist - The camera is set to "Dynamic Range" as default')
+            self.log.warning('The readout mode selected does not exist - The camera is set to "Dynamic Range" as default')
             port_value = 2
 
         # set the mode
         try:
-            self.camera.readout_port = port_value
+            self._camera.readout_port = port_value
         except Exception as e:
             self.log.error(e)
         else:
@@ -508,11 +508,11 @@ class KinetixCam(CameraInterface):
         @return: frame (numpy array): latest acquired frame - only for the 'Single image' mode
         """
         if mode == 'Live':
-            self.camera.start_live(exp_time=int(self._exposure * 1000))
+            self._camera.start_live(exp_time=int(self._exposure * 1000))
         elif mode == 'Sequence':
-            self.camera.start_seq(exp_time=int(self._exposure * 1000), num_frames=self.n_frames)
+            self._camera.start_seq(exp_time=int(self._exposure * 1000), num_frames=self.n_frames)
         elif mode == 'Single image':
-            frame = self.camera.get_frame(exp_time=int(self._exposure * 1000))
+            frame = self._camera.get_frame(exp_time=int(self._exposure * 1000))
             return frame
         else:
             self.log.warning("The mode requested does not exist - Acquisition will not start")
@@ -521,7 +521,7 @@ class KinetixCam(CameraInterface):
         """ Abort an acquisition prior completion.
         """
         try:
-            self.camera.abort()
+            self._camera.abort()
         except Exception as e:
             self.log.error(f"Error in _abort_acquisition : {e}")
 
@@ -548,7 +548,7 @@ class KinetixCam(CameraInterface):
             self.log.warning('Unknown trigger source')
             return -1
 
-        self.camera.exp_out_mode = exposure_out_mode
+        self._camera.exp_out_mode = exposure_out_mode
 
         # wait 100ms and check the mode was properly changed
         sleep(0.1)
@@ -576,7 +576,7 @@ class KinetixCam(CameraInterface):
             self.log.warning('Unknown trigger source')
             return -1
 
-        self.camera.exp_mode = exposure_mode
+        self._camera.exp_mode = exposure_mode
 
         # wait 100ms and check the mode was properly changed
         sleep(0.1)
@@ -591,7 +591,7 @@ class KinetixCam(CameraInterface):
         Return the trigger source currently used for the camera
         @return: trigger_source (str): indicates the type of trigger mode
         """
-        trigger_source = self.camera.exp_mode
+        trigger_source = self._camera.exp_mode
         return trigger_source
 
     def _get_exposure_out_mode(self):
@@ -599,5 +599,5 @@ class KinetixCam(CameraInterface):
         Return the exposure out mode currently used for the camera
         @return: exposure_out_mode (str): indicates the type of exposure mode
         """
-        exposure_out_mode = self.camera.exp_out_mode
+        exposure_out_mode = self._camera.exp_out_mode
         return exposure_out_mode

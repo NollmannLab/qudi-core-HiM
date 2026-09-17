@@ -19,9 +19,14 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
+# TODO : Test the _set_trigger_source to make sure the errors are working properly. Make sure the warning is working properly.
+# TODO: For the moment, the methods _set_exposure_mode and _set_acquisition_mode were removed (as compared to Kinetix) since there is no equivalent properties for ORCA
+
 import numpy as np
 from time import sleep
 from qudi.core.configoption import ConfigOption
+
+from hardware.camera.hamamatsu.dcamapi4 import DCAMPROP
 from qudi.interface.camera_interface import CameraInterface
 from qudi.hardware.camera.hamamatsu.dcam import *
 
@@ -31,17 +36,37 @@ class HCam(CameraInterface):
 
     Example config for copy-paste:
 
-    hamamatsu_camera:
-        module.Class: 'camera.hamamatsu.hamamatsu.HCam'
-        camera_id: 0
-        default_exposure: 0.01
-        default_acquisition_mode: 'run_till_abort'
+      widefield_camera:
+        module.Class: 'camera.hamamatsu.orca_flash4.HCam'
+        options:
+          camera_name: 'widefield_camera'
+          resolution:
+            - 2048
+            - 2048
+          temperature_control: False
+          gain_control: False
+          mechanical_shutter: False
+          support_live_acquisition: True
+          frame_transfer: False
+          default_exposure: 0.05  # in s
+          default_acquisition_mode: 'Dynamic Range'  # for 16-bit images
+          default_trigger_mode: 'INTERNAL'
+          default_exposure_out_mode: 'ALL_ROWS'
+          max_N_images_movie: 205
 
     """
     # config options
-    _default_exposure = ConfigOption('default_exposure', 0.01)  # in seconds
-    _default_acquisition_mode = ConfigOption('default_acquisition_mode', 'run_till_abort')
+    _default_exposure = ConfigOption('default_exposure', 0.05)  # in seconds
     camera_id = ConfigOption('camera_id', 0)
+    _max_frames_number_video = ConfigOption('max_N_images_movie', missing='error')
+    _default_trigger_mode = ConfigOption('default_trigger_mode', 'INTERNAL')
+    _default_exposure_out_mode = ConfigOption('default_exposure_out_mode', 'ALL_ROWS')
+    _has_temp = ConfigOption('temperature_control', False)
+    _has_shutter = ConfigOption('mechanical_shutter', False)
+    _has_gain = ConfigOption('gain_control', False)
+    _support_live_acquisition = ConfigOption('support_live_acquisition', False)
+    _camera_name = ConfigOption('camera_name', missing='error')
+    _frame_transfer = ConfigOption('frame_transfer', missing='error')
 
     # camera attributes
     _camera = None
@@ -50,12 +75,16 @@ class HCam(CameraInterface):
     _full_width = 0  # maximum width of the sensor
     _full_height = 0  # maximum height of the sensor
     _exposure = _default_exposure
+    _trigger_mode = _default_trigger_mode
+    _exposure_out_mode = _default_exposure_out_mode
     _gain = 0
     n_frames = 1
 
     def on_activate(self):
         """ Initialisation performed during activation of the module.
         """
+
+        # Look for a camera and returned its specification
         try:
             if Dcamapi.init():
                 n = Dcamapi.get_devicecount()
@@ -64,20 +93,17 @@ class HCam(CameraInterface):
                                    'closed.')
                 elif n==1:
                     self._camera = Dcam(0)
-                    output = '#{}: '.format(0)
-                    model = self._camera.dev_getstring(DCAM_IDSTR.MODEL)
-                    if model is False:
-                        output = output + 'No DCAM_IDSTR.MODEL'
-                    else:
-                        output = output + 'MODEL={}'.format(model)
 
-                    cameraid = self._camera.dev_getstring(DCAM_IDSTR.CAMERAID)
-                    if cameraid is False:
-                        output = output + ', No DCAM_IDSTR.CAMERAID'
-                    else:
-                        output = output + ', CAMERAID={}'.format(cameraid)
+                    # open the connection to the camera
+                    if not self._camera.dev_open():
+                        self.log.error(f"Could not open Hamamatsu camera: {self._camera.lasterr()}")
 
-                    self.log.info(output)
+                    self.get_size()  # update the values _weight, _height of the full sensor when starting the cam
+                    self._width = self._full_width
+                    self._height = self._full_height
+                    self.set_exposure(self._exposure)
+                    self._set_trigger_source(self._trigger_mode)  # Set the camera in 'Internal Trigger' mode
+
 
                 elif n>1:
                     self.log.error("More than one camera detected.")
@@ -85,16 +111,14 @@ class HCam(CameraInterface):
             else:
                 print('-NG: Dcamapi.init() fails with error {}'.format(Dcamapi.lasterr()))
 
-            # self.get_size()  # update the values _weight, _height
-            # self._full_width = self._width
-            # self._full_height = self._height
-            #
-            # # # set some default values
+           # # # set some default values
             # # self._camera.setACQMode(self._default_acquisition_mode)
             # self.set_exposure(self._exposure)
 
         except Exception as e:
             self.log.error(f'Camera initialization returned the following error: {e}')
+
+
 
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
@@ -118,34 +142,56 @@ class HCam(CameraInterface):
 
         :return: string: name for the camera
         """
-        camera_name = self._camera.getModelInfo(self.camera_id)
-        return camera_name
+        output = '#{}: '.format(0)
+        model = self._camera.dev_getstring(DCAM_IDSTR.MODEL)
+        if model is False:
+            output = output + 'No DCAM_IDSTR.MODEL'
+        else:
+            output = output + f'MODEL={model}'
+
+        cameraid = self._camera.dev_getstring(DCAM_IDSTR.CAMERAID)
+        if cameraid is False:
+            output = output + ', No DCAM_IDSTR.CAMERAID'
+        else:
+            output = output + f', CAMERAID={cameraid}'
+
+        self.log.info(output)
+        self._camera_name = f"{model}_{cameraid}"
+        return self._camera_name
+
+    def get_size(self):
+        """
+        Retrieve size of the FULL sensor in pixel
+        @return: (array) all sensor size
+        """
+        sensor_size = self.camera.sensor_size
+        self._full_width = sensor_size[0]
+        self._full_height = sensor_size[1]
+        return sensor_size
 
     def get_size(self):
         """ Retrieve size of the image in pixel.
 
-        :return: tuple (int, int): Size (width, height)
+        @return: tuple (int, int): Size (width, height)
         """
-        self._width = self._camera.getPropertyValue('image_width')[0]
-        self._height = self._camera.getPropertyValue('image_height')[0]
-        return self._width, self._height
+        self._full_width = self._camera.prop_getvalue(DCAM_IDPROP.IMAGEDETECTOR_PIXELNUMHORZ)
+        self._full_height = self._camera.prop_getvalue(DCAM_IDPROP.IMAGEDETECTOR_PIXELNUMVERT)
+
+        return [self._full_width, self._full_height]
 
     def set_exposure(self, exposure):
         """ Set the exposure time in seconds.
 
-        :param: float exposure: desired new exposure time
-
-        :return: bool: success ?
+        @param: float exposure: desired new exposure time in seconds
+        @return: bool: returns True when the exposure time has been set. False otherwise.
         """
-        new_exp = self._camera.setPropertyValue('exposure_time',
-                                               exposure)  # return value new_exp: float if new exposure set (eventually corrected to be inside the allowed range); False if error
-        # update the attribute
-        if isinstance(new_exp, float):
-            self._exposure = self._camera.getPropertyValue('exposure_time')[0]
-            return True
-        else:
+        new_exp = self._camera.prop_setgetvalue(DCAM_IDPROP.EXPOSURETIME, exposure)
+        if new_exp is False:
+            self._log_dcam_error(f"Setting exposure to {exposure}s")
             return False
-        # is this error check sufficient ?
+        else:
+            self._exposure = new_exp
+            return True
 
     def get_exposure(self):
         """ Get the exposure time in seconds.
@@ -422,24 +468,6 @@ class HCam(CameraInterface):
             self.log.info('Your aquisition mode is not covered yet.')
         return image_array
 
-# ======================================================================================================================
-# Non-Interface functions
-# ======================================================================================================================
-
-# ----------------------------------------------------------------------------------------------------------------------
-# Non-interface functions to handle acquisitions
-# ----------------------------------------------------------------------------------------------------------------------
-
-    def get_acquisition_mode(self):
-        acq_mode = self._camera.acquisition_mode
-        return acq_mode
-
-    def _set_acquisition_mode(self, mode, n_frames=None):
-        self._camera.setACQMode(mode, n_frames)
-        # add error handling etc.
-
-    def _start_acquisition(self):
-        self._camera.startAcquisition()
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Trigger
@@ -447,17 +475,39 @@ class HCam(CameraInterface):
 
     def _set_trigger_source(self, source):
         """
-        Set the trigger source.
-        @param string source: string corresponding to certain TriggerMode 'INTERNAL', 'EXTERNAL', 'SOFTWARE', 'MASTER PULSE'
-        @return int check_val: ok: 0, not ok: -1
-        """
-        # the supported trigger sources can be found as follows:
-        # self._camera.getPropertyText('trigger_source') returns {'INTERNAL': 1, 'EXTERNAL': 2, 'SOFTWARE': 3, 'MASTER PULSE': 4}
-        check_val = self._camera.setPropertyValue('trigger_source', source)
-        if isinstance(check_val, float):
-            return 0
-        else:
-            return -1
+        Set the trigger source. Four modes are available for this camera :
+        'INTERNAL': 1,
+        'EXTERNAL': 2,
+        'SOFTWARE': 3,
+        'MASTER PULSE': 4
+
+        @param string source: string corresponding to certain TriggerMode 'INTERNAL', 'EXTERNAL', 'SOFTWARE', 'MASTERPULSE'
+        @return bool : True when operation was completed with success - False otherwise
+    """
+
+        trigger_sources = {
+            "INTERNAL": DCAMPROP.TRIGGERSOURCE.INTERNAL,
+            "EXTERNAL": DCAMPROP.TRIGGERSOURCE.EXTERNAL,
+            "SOFTWARE": DCAMPROP.TRIGGERSOURCE.SOFTWARE,
+            "MASTERPULSE": DCAMPROP.TRIGGERSOURCE.MASTERPULSE,
+        }
+
+        source = source.upper().replace(" ", "")
+        if source not in trigger_sources:
+            self.log.error(f"The requested trigger source {source} is not available.")
+            return False
+
+        source_requested = trigger_sources[source]
+        source_value = self._camera.prop_setgetvalue(DCAM_IDPROP.TRIGGERSOURCE, source_requested)
+        if not source_value:
+            self._log_dcam_error(f"Setting trigger source to {source}")
+            return False
+
+        if source_value != source_requested:
+            self.log.warning(f"The returned trigger source is not the one requested.")
+            return False
+
+        return True
 
     def _get_trigger_source(self):
         trigger_source = self._camera.getPropertyValue('trigger_source')  # returns a list [value, type] such as [1, 'MODE']
@@ -489,3 +539,12 @@ class HCam(CameraInterface):
         print(trigger_kind)
         trigger_polarity = self._camera.setPropertyValue(f'output_trigger_polarity[{channel}]', output_trigger_polarity)
         print(trigger_polarity)
+
+    # ----------------------------------------------------------------------------------------------------------------------
+    # Error handling
+    # ----------------------------------------------------------------------------------------------------------------------
+
+    def _log_dcam_error(self, operation):
+        """Log the latest DCAM API error."""
+        error = self._camera.lasterr()
+        self.log.error(f"{operation} failed. DCAM error: {error}")
