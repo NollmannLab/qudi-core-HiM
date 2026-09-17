@@ -23,7 +23,6 @@ import numpy as np
 from time import sleep
 from qudi.core.configoption import ConfigOption
 from qudi.interface.camera_interface import CameraInterface
-from qudi.helpers.Hamamatsu_python_ctypes_SDK import HamamatsuCamera
 from qudi.hardware.camera.hamamatsu.dcam import *
 
 
