@@ -2,6 +2,7 @@
 """
 Author: F. Barho & JB Fiche - adapted for qudi-core-HiM by JB Fiche
 Created: 2026-08-06
+Modified: 2026-09-20 using Claude code
 
 This module contains the logic to control a microscope camera.
 
@@ -199,6 +200,7 @@ class CameraLogic(LogicBase):
     _temperature = 0  # use any value. It will be overwritten during on_activate if sensor temperature is available
     temperature_setpoint = _temperature
     _last_image = None
+    _n_frames_prepared = None  # number of frames requested in prepare_camera_for_multichannel_imaging
     _kinetic_time = None
     _max_frames_movie = None
     _max_frames_spool = None
@@ -267,7 +269,8 @@ class CameraLogic(LogicBase):
         """ Retrieve maximum size of the sensor in pixel.
         @return tuple (int, int): Size (width, height)
         """
-        return self._hardware._full_width, self._hardware._full_height
+        width, height = self._hardware.get_size()
+        return width, height
 
     def set_exposure(self, time):
         """ Set the exposure time of the camera. Inform the GUI that a new value was set.
@@ -446,11 +449,11 @@ class CameraLogic(LogicBase):
         #     sleep(1)
 
         # update the new sensor limits
-        err = self._hardware.set_image(hbin, vbin, hstart, hend, vstart, vend)
-        if err:
-            self.log.warn('Sensor region not set')
-        else:
+        success = self._hardware.set_image(hbin, vbin, hstart, hend, vstart, vend)
+        if success:
             self.log.info('Sensor region set to {} x {}'.format(vend - vstart + 1, hend - hstart + 1))
+        else:
+            self.log.warning('Sensor region not set')
 
         # update the exposure time (required for certain camera since the time between two acquisition strongly depends
         # on the sensor size (e.g emCCD)
@@ -469,13 +472,12 @@ class CameraLogic(LogicBase):
         #     self.interrupt_live()
 
         # reset the sensor to its default size
-        width = self._hardware._full_width
-        height = self._hardware._full_height
-        err = self._hardware.set_image(1, 1, 1, width, 1, height)
-        if err:
-            self.log.warn('Sensor region not reset to default')
-        else:
+        width, height = self._hardware.get_size()
+        success = self._hardware.set_image(1, 1, 1, width, 1, height)
+        if success:
             self.log.info('Sensor region reset to default: {} x {}'.format(height, width))
+        else:
+            self.log.warning('Sensor region not reset to default')
 
         # update the exposure time
         self.set_exposure(exp)
@@ -491,7 +493,7 @@ class CameraLogic(LogicBase):
         """
         err = self._hardware._set_frame_transfer(int(activate))
         if err:
-            self.log.warn(f'Frametransfer is disabled!')
+            self.log.warning(f'Frametransfer is disabled!')
             self.disable_frame_transfer()
         else:
             self.log.info(f'Frametransfer mode activated: {activate}')
@@ -514,15 +516,15 @@ class CameraLogic(LogicBase):
         if self._security_shutter is not None:
             self._security_shutter.camera_security(acquiring=True)
 
-        # Depending on the type of camera, image retrieval will be different
-        if self.cam_type == "KinetixCam":
-            self._last_image = self._hardware.start_single_acquisition()
-        else:
-            self._hardware.start_single_acquisition()
-            self._last_image = self._hardware.get_acquired_data()
+        # Take the image (the hardware returns the frame, or None if the acquisition failed)
+        image = self._hardware.start_single_acquisition()
 
         # Send signal to GUi for image display
-        self.sigUpdateDisplay.emit()
+        if self._is_valid_image(image):
+            self._last_image = image
+            self.sigUpdateDisplay.emit()
+        else:
+            self.log.warning('The camera did not return any image.')
         self._hardware.stop_acquisition()  # this in needed to reset the acquisition mode to default
         self.sigAcquisitionFinished.emit()
 
@@ -588,11 +590,11 @@ class CameraLogic(LogicBase):
         if self._security_shutter is not None:
             self._security_shutter.camera_security(acquiring=True)
 
-        # start the camera
+        # start the camera. If the camera cannot handle live acquisition, the images are obtained by repeated single
+        # acquisitions in the loop method.
         if self._hardware.support_live_acquisition():
-            self._hardware.start_live_acquisition()
-        else:
-            self._hardware.start_single_acquisition()
+            if not self._hardware.start_live_acquisition():
+                self.log.warning('The live acquisition did not start properly.')
 
         # Start display polling
         self._schedule_live_update()
@@ -606,21 +608,21 @@ class CameraLogic(LogicBase):
             return
 
         try:
-            # Get the latest image acquired by the camera
-            if self.cam_type == "KinetixCam":
-                self._last_image, _ = self._hardware.get_most_recent_image(copy=False)
-                self.log.info(f"Retrieving images...")
+            # Get the latest image acquired by the camera (or take a new one if live acquisition isn't supported).
+            # No copy of the images is performed during live acquisition (to avoid lagging).
+            if self._hardware.support_live_acquisition():
+                image, _ = self._hardware.get_most_recent_image(copy=False)
             else:
-                self._last_image = self._hardware.get_acquired_data()
+                image = self._hardware.start_single_acquisition()
 
-            self.sigUpdateDisplay.emit()
-
-            # Launch a new snap acquisition if live acquisition isn't supported
-            if not self._hardware.support_live_acquisition():
-                self._hardware.start_single_acquisition()
+            # The display is updated only if a frame is available (none is available right after the acquisition was
+            # started, or if the exposure time is long) - otherwise the previous image is kept.
+            if self._is_valid_image(image):
+                self._last_image = image
+                self.sigUpdateDisplay.emit()
 
         except Exception as e:
-            self.log.exception(f"Error during live camera update: {exc}")
+            self.log.exception(f"Error during live camera update: {e}")
             self.live_enabled = False
             return
 
@@ -638,11 +640,13 @@ class CameraLogic(LogicBase):
         # Turn live_enabled to False and stop the loop
         self.live_enabled = False
 
-        # in the case of the Kinetix camera, no copy of the images is performed during live acquisition (to avoid
-        # lagging). However, a copy is performed before stopping the camera and removing all the images from the buffer.
-        # This copy is required for the GUI's display.
-        if self.cam_type == "KinetixCam":
-            self._last_image, _ = self._hardware.get_most_recent_image(copy=True)
+        # no copy of the images is performed during live acquisition (to avoid lagging). However, a copy is performed
+        # before stopping the camera and removing all the images from the buffer. This copy is required for the GUI's
+        # display.
+        if self._hardware.support_live_acquisition():
+            image, _ = self._hardware.get_most_recent_image(copy=True)
+            if self._is_valid_image(image):
+                self._last_image = image
 
         # stop acquisition
         self._hardware.stop_acquisition()
@@ -698,8 +702,8 @@ class CameraLogic(LogicBase):
             self._security_shutter.camera_security(acquiring=True)
 
         # start movie acquisition
-        err = self._hardware.start_movie_acquisition(n_frames)
-        if err:
+        started = self._hardware.start_movie_acquisition(n_frames)
+        if not started:
             self.log.warning('Video acquisition did not start')
             self.finish_save_video(filenamestem, filename, fileformat, n_frames, metadata, addfile, emit_signal=True)
             return
@@ -732,19 +736,14 @@ class CameraLogic(LogicBase):
         # Check if the camera is still acquiring
         ready = self._hardware.get_ready_state()
 
-        # Handle progress and display - note that for the Kinetix camera, progress & display are handled in the same
-        # function.
+        # Handle progress and display - progress & display are handled in the same function, since the camera returns
+        # the number of acquired frames together with the most recent image.
         if (not ready) and (not self.acquisition_aborted):
-            if self.cam_type == "KinetixCam":
-                self._last_image, progress = self._hardware.get_most_recent_image()
-                self.sigProgress.emit(progress)
+            image, progress = self._hardware.get_most_recent_image()
+            self.sigProgress.emit(int(progress))
+            if self._is_valid_image(image):
+                self._last_image = image
                 if is_display:
-                    self.sigUpdateDisplay.emit()
-            else:
-                progress = self._hardware.get_progress()
-                self.sigProgress.emit(progress)
-                if is_display:
-                    self._last_image = self._hardware.get_most_recent_image()
                     self.sigUpdateDisplay.emit()
 
             # restart a worker if acquisition still ongoing
@@ -878,8 +877,8 @@ class CameraLogic(LogicBase):
         err_spool = self._hardware.set_spool(1, method, path, 10)
 
         # Start acquisition
-        err_acq = self._hardware.start_movie_acquisition(n_frames)  # setting kinetics acquisition mode, make sure
-        if err_spool or err_acq:
+        started = self._hardware.start_movie_acquisition(n_frames)  # setting kinetics acquisition mode, make sure
+        if err_spool or not started:
             self.log.warning('Spooling did not start')
 
         # start a worker thread that will monitor the status of the saving
@@ -905,8 +904,10 @@ class CameraLogic(LogicBase):
             self.sigProgress.emit(spoolprogress)
 
             if is_display:
-                self._last_image = self._hardware.get_most_recent_image()
-                self.sigUpdateDisplay.emit()
+                image, _ = self._hardware.get_most_recent_image()
+                if self._is_valid_image(image):
+                    self._last_image = image
+                    self.sigUpdateDisplay.emit()
 
             # restart a worker if acquisition still ongoing
             worker = SpoolProgressWorker(1 / self._fps, filenamestem, path, fileformat, is_display, metadata)
@@ -979,6 +980,7 @@ class CameraLogic(LogicBase):
         @param: str save_path:
         @param: str file_format:
         """
+        self._n_frames_prepared = frames  # number of frames of the sequence launched by start_acquisition
         self._hardware.prepare_camera_for_multichannel_imaging(frames, exposure, gain, save_path, file_format)
 
     def reset_camera_after_multichannel_imaging(self):
@@ -999,11 +1001,15 @@ class CameraLogic(LogicBase):
         if self._security_shutter is not None:
             self._security_shutter.camera_security(acquiring=True)
 
-        # launch acquisition
-        if self.cam_type == "KinetixCam":
-            self._hardware._start_acquisition(mode='Sequence')
-        else:
-            self._hardware._start_acquisition()
+        # launch the acquisition of the sequence defined in prepare_camera_for_multichannel_imaging
+        if self._n_frames_prepared is None:
+            self.log.error('The camera was not prepared (prepare_camera_for_multichannel_imaging) - the acquisition '
+                           'cannot start.')
+            return False
+        started = self._hardware.start_movie_acquisition(self._n_frames_prepared)
+        if not started:
+            self.log.error('The acquisition did not start.')
+        return started
 
     def stop_acquisition(self):  # used in Hi-M Task RAMM
         self._hardware.stop_acquisition()
@@ -1011,7 +1017,7 @@ class CameraLogic(LogicBase):
             self._security_shutter.camera_security(acquiring=False)
 
     def abort_acquisition(self):  # used in multicolor imaging PALM  -> can this be combined with stop_acquisition ?
-        self._hardware._abort_acquisition()  # not on camera interface
+        self._hardware.abort_movie_acquisition()
 
     # ----------------------------------------------------------------------------------------------------------------------
     # Filename and data handling
@@ -1022,6 +1028,15 @@ class CameraLogic(LogicBase):
 
         :return: np.ndarray self._last_image """
         return self._last_image
+
+    @staticmethod
+    def _is_valid_image(image):
+        """ Check that the camera returned an image. None (or an empty array) is returned by the cameras when no frame
+        is available.
+
+        :param: image: object returned by the camera
+        :return: bool: True if image contains data """
+        return image is not None and np.size(image) > 0
 
     def create_generic_filename(self, filenamestem, folder, file, fileformat, addfile):
         """ This method creates a generic filename using the following format:

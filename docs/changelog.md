@@ -4,7 +4,72 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-07-30
+Last updated: 2026-09-19
+
+### Cameras
+
+#### Added
+
+- Completed the Hamamatsu ORCA-Flash4.0 hardware module (`HCam`) on top of the
+  official DCAM-API v4 bindings (`dcam.py`, `dcamapi4.py`), following the
+  structure and conventions of the Kinetix module:
+  - live acquisition in a DCAM ring buffer, single-image acquisition, and
+    fixed-length movie acquisition (buffer allocated at each start);
+  - `get_most_recent_image` returns `(frame, number of acquired frames)` and
+    `get_acquired_data` returns a `[n_frames, height, width]` stack;
+  - ROI selection (1-based, inclusive limits) automatically enlarged to the
+    steps accepted by the camera;
+  - external-trigger acquisition for the synchronized Hi-M imaging (external
+    edge trigger, "trigger ready" and exposure output triggers);
+  - new config options: `live_buffer_frames`, `trigger_ready_channel`,
+    `exposure_out_channel`, `output_trigger_polarity`.
+- Added `abort_movie_acquisition` (default: stop the acquisition) to
+  `CameraInterface`.
+
+#### Changed
+
+- `CameraInterface.get_gain_limits` is no longer abstract (default `(0, 0)`),
+  so that cameras without gain control (Kinetix, ORCA) can be instantiated.
+- `CameraInterface.get_most_recent_image` now has the `copy` argument used by
+  `camera_logic`; the return conventions of the acquisition methods are
+  documented in the interface.
+- `CameraInterface` now documents one contract shared by all cameras (Kinetix,
+  ORCA, dummy): `True` = success for every bool-returning method, 2D images
+  `[h, w]` / stacks `[n, h, w]`, `get_size` = full sensor `(width, height)`,
+  `start_single_acquisition` returns the frame (or `None`),
+  `get_most_recent_image` returns `(image | None, frame_count)`.
+- `camera_logic` no longer depends on the camera type: the `cam_type` /
+  `POLLING_CAMERAS` branching was removed (only the Andor-specific temperature
+  setpoint test remains). It uses the public hardware calls only, ignores
+  frames that are `None`/empty (`_is_valid_image`) and remembers the frame
+  count given to `prepare_camera_for_multichannel_imaging` (`_n_frames_prepared`)
+  so that `start_acquisition` needs no camera-specific argument. Its public API
+  is unchanged (`basic_imaging_gui` untouched).
+- Kinetix and ORCA: `set_image` and `start_movie_acquisition` now return
+  `True` on success; `get_most_recent_image` returns `(None, 0)` when no frame
+  is available; Kinetix `start_single_acquisition` returns `None` on failure.
+- The dummy camera was rewritten as a time-based simulation (frames produced at
+  the exposure rate, synthetic scene with orientation marker, ROI, live, movie,
+  abort, no-live mode) following the same contract, so it can be used to test
+  the GUI and the tasks without hardware. Andor-specific simulation helpers
+  were kept.
+- The ORCA module now raises an error when the camera cannot be initialized
+  (instead of logging it and staying active in an unusable state), and uses
+  `camera_id` to select the camera when several are connected.
+
+#### Removed
+
+- Removed the ORCA code inherited from the legacy `hamamatsu_camera` wrapper
+  (`setPropertyValue`, `getFrames`, ...), which is not available with DCAM-API v4.
+- Removed the ORCA acquisition-mode methods (no equivalent property on the
+  ORCA-Flash4.0).
+
+#### Fixed
+
+- Fixed the undefined variable `exc` in the exception handler of the live loop
+  of `camera_logic`.
+- Fixed the ORCA imports and the duplicated `get_size` definition.
+- Kinetix `set_image` now clears the previous ROI (`reset_rois()`) before setting the new one: pyvcam appends ROIs on sensors supporting several regions, which made the reset to full sensor fail with "New ROI overlaps existing ROI".
 
 ### Pipetting robot
 

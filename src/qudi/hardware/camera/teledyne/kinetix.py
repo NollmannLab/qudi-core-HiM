@@ -10,6 +10,7 @@ An extension to Qudi.
 
 @author: JB Fiche
 Created on Mon July 22, 2024 - Modified for qudi-core Mon Sept 14, 2026
+Modified: 2026-09-20 using Claude code
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -213,17 +214,20 @@ class KinetixCam(CameraInterface):
         @param: hend: (int) End column
         @param: vstart: (int) Start row
         @param: vend: (int) End row
-        @return: (bool) return True if an error was detected
+        @return: (bool) return True if the ROI was set, False if an error was detected
         """
         try:
             self._width = int(vend - vstart)
             self._height = int(hend - hstart)
+            # pyvcam appends the new ROI to the existing ones when the sensor supports several ROIs, and raises
+            # "New ROI overlaps existing ROI" - the previous ROI must be cleared first.
+            self._camera.reset_rois()
             self._camera.set_roi(vstart, hstart, self._height, self._width)
             self.log.info(f'Set subarray: {self._height} x {self._width} pixels (rows x cols)')
-            return False
+            return True
         except Exception as e:
             self.log.error(f"The following error was encountered in set_image : {e}")
-            return True
+            return False
 
     def get_image_size(self):
         """
@@ -296,10 +300,13 @@ class KinetixCam(CameraInterface):
     def start_single_acquisition(self):
         """
         Start acquisition for a single frame (snap mode) and return the acquired frame
-        @return: frame (numpy array): acquired frame
+        @return: frame (numpy array): acquired frame (None if the acquisition failed)
         """
-        frame = self._start_acquisition(mode='Single image')
-        return frame
+        try:
+            return self._start_acquisition(mode='Single image')
+        except Exception as e:
+            self.log.error(f'The following error was encountered in start_single_acquisition : {e}')
+            return None
 
     @decorator_print_function
     def start_live_acquisition(self):
@@ -334,18 +341,18 @@ class KinetixCam(CameraInterface):
         Set the conditions to save a movie and start the acquisition (fixed length mode).
 
         @param: (int) n_frames: number of frames
-        @return: bool: Error ?
+        @return: bool: True if the acquisition started, False if an error was detected
         """
         self.n_frames = n_frames  # needed to choose the correct case in get_acquired_data method
         try:
             self._start_acquisition(mode='Sequence')
-            return False
+            return True
         except Exception as e:
             if "PL_ERR_TOO_MANY_FRAMES" in str(e):
                 self.log.error(f"{e} - The number of images is too large for the memory. Try using a smaller ROI")
             else:
                 self.log.error(f"Error in start_movie_acquisition : {e}")
-            return True
+            return False
 
     @decorator_print_function
     def finish_movie_acquisition(self):
@@ -414,7 +421,7 @@ class KinetixCam(CameraInterface):
 
         @param: (bool) copy : indicate whether the frame should be copied
         @return:
-        frame (numpy array): latest acquired frame
+        frame (numpy array): latest acquired frame (None if no frame is available)
         frame_count (int): number of acquired frames
         """
         try:
@@ -423,7 +430,7 @@ class KinetixCam(CameraInterface):
             return frame['pixel_data'], frame_count
         except Exception as e:
             self.log.error(f"The following error was encountered in get_most_recent_image : {e}")
-            return [], 0
+            return None, 0
 
     def get_acquired_data(self):
         """
