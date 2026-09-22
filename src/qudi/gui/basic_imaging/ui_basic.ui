@@ -111,7 +111,7 @@
    <property name="minimumSize">
     <size>
      <width>999</width>
-     <height>512</height>
+     <height>658</height>
     </size>
    </property>
    <attribute name="dockWidgetArea">
@@ -122,7 +122,46 @@
      <item>
       <layout class="QVBoxLayout" name="verticalLayout_5">
        <item>
-        <widget class="QLabel" name="label_12">
+        <widget class="QLabel" name="label_select_camera">
+         <property name="text">
+          <string>Select camera</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QComboBox" name="camera_comboBox"/>
+       </item>
+       <item>
+        <spacer name="verticalSpacer_5">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeType">
+          <enum>QSizePolicy::Fixed</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>30</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+       <item>
+        <spacer name="verticalSpacer_4">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QLabel" name="label_camera_settings">
          <property name="text">
           <string>Camera settings</string>
          </property>
@@ -218,7 +257,7 @@
          <property name="sizeHint" stdset="0">
           <size>
            <width>20</width>
-           <height>40</height>
+           <height>30</height>
           </size>
          </property>
         </spacer>
@@ -280,13 +319,13 @@
          <property name="sizeHint" stdset="0">
           <size>
            <width>20</width>
-           <height>40</height>
+           <height>30</height>
           </size>
          </property>
         </spacer>
        </item>
        <item>
-        <widget class="QLabel" name="label_16">
+        <widget class="QLabel" name="label_default_saving_path">
          <property name="text">
           <string>Default path:</string>
          </property>
@@ -313,7 +352,23 @@
         </widget>
        </item>
        <item>
-        <widget class="QLabel" name="label_17">
+        <spacer name="verticalSpacer_6">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeType">
+          <enum>QSizePolicy::Fixed</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>30</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+       <item>
+        <widget class="QLabel" name="label_sample_name">
          <property name="text">
           <string>Sample name:</string>
          </property>

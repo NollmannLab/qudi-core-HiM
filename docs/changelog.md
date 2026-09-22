@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-09-19
+Last updated: 2026-09-22
 
 ### Cameras
 
@@ -25,6 +25,47 @@ Last updated: 2026-09-19
     `exposure_out_channel`, `output_trigger_polarity`.
 - Added `abort_movie_acquisition` (default: stop the acquisition) to
   `CameraInterface`.
+- Multi-camera support (2026-09-21), to select one camera among up to three on
+  microscopes that have several cameras:
+  - new interfuse `hardware/interfuse_hardware/camera_interfuse.py`
+    (`CameraInterfuse`): three connectors (`camera_1` mandatory, `camera_2` and
+    `camera_3` optional) and one active camera to which every call of
+    `CameraInterface` is forwarded; a camera that fails to activate is removed
+    from the list; duplicated camera names are made unique; the selected camera
+    is reset to its default state (exposure and gain measured at activation,
+    full sensor); other attributes (e.g. Andor-specific methods) are forwarded
+    to the active camera;
+  - `CameraInterface`: optional `get_available_cameras`, `get_active_camera`,
+    `set_active_camera` and `get_camera_type` (defaults for a single camera);
+  - `camera_logic`: `get_available_cameras`, `get_active_camera`,
+    `select_camera(name)` and the signal `sigCameraChanged(str)`; the switch is
+    refused while the camera is busy (live, saving, synchronized acquisition);
+    the initialization from the hardware was moved to `_init_from_hardware()`
+    so that the capabilities are read again after each switch;
+  - `basic_imaging_gui`: the `camera_comboBox` is filled from the logic
+    (hidden if only one camera is available) and emits `sigSwitchCamera`; it is
+    disabled unless the camera is idle and the lasers and the brightfield are
+    off; after a switch the indicators, the settings dialogs, the ROI selection,
+    the image rotation, the contrast, the displayed image and the save settings
+    are reset (`_refresh_camera_ui`);
+  - `custom_config/dummy_config.cfg` now uses three dummy cameras of different
+    sizes behind the interfuse to test the selection in the GUI.
+- Camera activation failures (2026-09-22): a camera module that cannot be
+  initialized now logs the error instead of raising it (Kinetix as before,
+  ORCA changed) and reports it with the new optional
+  `CameraInterface.is_available()` (default `True`). The camera interfuse
+  leaves such a camera out of the list (so it is not in the combo box) while the
+  interfuse, the logic and the GUI are still activated with the other cameras;
+  the interfuse (or the logic, for a single camera) only raises a clear error if
+  no camera is available. The Kinetix `on_deactivate` no longer fails when the
+  camera was not initialized.
+- Dummy camera: new option `simulate_activation_failure` (default `False`) to
+  simulate a camera that cannot be initialized (error logged, `is_available()`
+  returns `False`), so that this behavior of the interfuse, the logic and the
+  GUI can be tested with the dummy config (`dummy_config.cfg`).
+- `basic_imaging_gui`: the display is fully reset when the camera is changed
+  (image, rubberband, contrast controls, and the view is fitted to the size of
+  the first image of the new camera).
 
 #### Changed
 
@@ -69,6 +110,7 @@ Last updated: 2026-09-19
 - Fixed the undefined variable `exc` in the exception handler of the live loop
   of `camera_logic`.
 - Fixed the ORCA imports and the duplicated `get_size` definition.
+- Removed the duplicated call of `init_save_settings_ui()` in `basic_imaging_gui.on_activate`, which created the save dialog twice.
 - Kinetix `set_image` now clears the previous ROI (`reset_rois()`) before setting the new one: pyvcam appends ROIs on sensors supporting several regions, which made the reset to full sensor fail with "New ROI overlaps existing ROI".
 
 ### Pipetting robot

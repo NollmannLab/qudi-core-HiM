@@ -10,7 +10,13 @@ module (camera/teledyne/kinetix.py), so that camera_logic can drive both cameras
 An extension to Qudi.
 
 @author: F. Barho - adapted for qudi-core-HiM by JB Fiche
-Modified: 2026-09-20 using Claude code
+Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
+  2026-09-19    : module completed on the DCAM-API v4 bindings (activation, single / live / movie acquisition, ring
+                  buffer (live_buffer_frames), ROI, trigger and output-trigger configuration, exposure, get_acquired_data).
+  2026-09-20    : common contract of camera_interface.py: set_image and start_movie_acquisition return True on success,
+                  get_most_recent_image returns (None, 0) when no frame is available.
+  2026-09-22    : an activation failure is only logged (no error raised): new is_available method, so that the camera
+                  can be left out of a camera interfuse.
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -133,6 +139,7 @@ class HCam(CameraInterface):
 
     # camera attributes
     _camera = None
+    _available = False  # True once the camera was successfully initialized in on_activate
     _device_name = None  # model and serial number, read from the camera
     _width = 0  # current width
     _height = 0  # current height
@@ -154,21 +161,26 @@ class HCam(CameraInterface):
         self._buffer_frames = 0
         self.n_frames = 1
 
+        self._available = False
+
         # Initialize the DCAM-API (a previous initialization by another module is not an error)
         if not Dcamapi.init() and Dcamapi.lasterr() != DCAMERR.ALREADYINITIALIZED:
             error = Dcamapi.lasterr()
             Dcamapi.uninit()
-            raise RuntimeError(f"Hamamatsu DCAM-API initialization failed. DCAM error: {error}")
+            self.log.error(f"Hamamatsu DCAM-API initialization failed. DCAM error: {error}")
+            return
 
         # Look for the camera
         n_cam = Dcamapi.get_devicecount()
         if not n_cam:
             Dcamapi.uninit()
-            raise RuntimeError('No Hamamatsu camera detected - check the camera is switched ON and properly connected, '
-                               'and that HCImageLive is closed.')
+            self.log.error('No Hamamatsu camera detected - check the camera is switched ON and properly connected, '
+                           'and that HCImageLive is closed.')
+            return
         if self.camera_id >= n_cam:
             Dcamapi.uninit()
-            raise RuntimeError(f'Camera {self.camera_id} was requested but only {n_cam} camera(s) were detected.')
+            self.log.error(f'Camera {self.camera_id} was requested but only {n_cam} camera(s) were detected.')
+            return
         if n_cam > 1:
             self.log.info(f'{n_cam} cameras were detected - the camera with index {self.camera_id} is used.')
 
@@ -178,7 +190,8 @@ class HCam(CameraInterface):
             error = self._camera.lasterr()
             self._camera = None
             Dcamapi.uninit()
-            raise RuntimeError(f"Could not open the Hamamatsu camera. DCAM error: {error}")
+            self.log.error(f"Could not open the Hamamatsu camera. DCAM error: {error}")
+            return
 
         # Set the default parameters. Failures are logged by the setters but are not fatal.
         self.get_size()  # update the values _full_width, _full_height of the full sensor when starting the cam
@@ -189,6 +202,12 @@ class HCam(CameraInterface):
         self.set_exposure(self._exposure)
         self._set_trigger_source(self._default_trigger_mode)  # Set the camera in 'Internal Trigger' mode
         self._set_exposure_out_mode(self._default_exposure_out_mode)  # Set the exposure out mode to the default value
+
+        self._available = True
+
+    def is_available(self):
+        """ Return False if the camera could not be initialized in on_activate (the error was logged). """
+        return self._available
 
     def on_deactivate(self):
         """ Camera will be deactivated and stopped during execution of this module.

@@ -2,7 +2,17 @@
 """
 Author: F. Barho & JB Fiche - adapted for qudi-core-HiM by JB Fiche
 Created: 2026-08-06
-Modified: 2026-09-20 using Claude code
+Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
+  2026-09-19/20 : logic independent of the camera type (no more cam_type / POLLING_CAMERAS branching) following the
+                  common contract of camera_interface.py: get_max_size, set_sensor_region, reset_sensor_region,
+                  start_single_acquisition, start_loop, loop, stop_loop, start_save_video, save_video_loop,
+                  start_spooling, spooling_loop, start_acquisition (uses _n_frames_prepared, set in
+                  prepare_camera_for_multichannel_imaging), abort_acquisition; new _is_valid_image guard; fix of the
+                  undefined variable 'exc' in the live loop.
+  2026-09-21    : selection of the camera among several cameras: get_available_cameras, get_active_camera,
+                  select_camera, signal sigCameraChanged; on_activate split into on_activate and
+                  _init_from_hardware (re-read at each camera change); cam_type read with get_camera_type.
+  2026-09-22    : on_activate raises a clear error if the (single) camera is not available (is_available).
 
 This module contains the logic to control a microscope camera.
 
@@ -175,6 +185,7 @@ class CameraLogic(LogicBase):
     sigDisableCameraActions = QtCore.Signal()
     sigEnableCameraActions = QtCore.Signal()
     sigDisableFrameTransfer = QtCore.Signal()
+    sigCameraChanged = QtCore.Signal(str)  # name of the camera that is active after a call of select_camera
 
     # worker lock to avoid race conditions
     worker_locks = {}
@@ -218,18 +229,35 @@ class CameraLogic(LogicBase):
         self._hardware = self.hardware()
         self._security_shutter = self.shutter()
 
-        # indicate the type of camera used
-        self.cam_type = self._hardware.__class__.__name__
+        if not self._hardware.is_available():
+            raise RuntimeError('The camera could not be initialized (see the error logged by the hardware module).')
 
         self.live_enabled = False
         self.saving = False
         self.restart_live = False
+
+        # read the properties and the current settings of the camera
+        self._init_from_hardware()
+
+    def _init_from_hardware(self):
+        """ Read the type, the capabilities and the current settings of the (active) camera. It is called when the module
+        is activated and each time another camera is selected (select_camera), since these properties depend on the
+        camera.
+        """
+        # indicate the type of camera used (the class of the hardware module that really drives the active camera)
+        self.cam_type = self._hardware.get_camera_type()
+
+        self._last_image = None
+        self._kinetic_time = None
         self.has_temp = self._hardware.has_temp()
         if self.has_temp:
             self.temperature_setpoint = self._hardware._default_temperature
+        else:
+            self.temperature_setpoint = 0
         self.has_shutter = self._hardware.has_shutter()
         self.has_gain = self._hardware.has_gain()
         self.support_frame_transfer = self._hardware.support_frame_transfer()
+        self.frame_transfer = False
 
         # update the private variables _exposure, _gain, _temperature
         self.get_exposure()
@@ -252,6 +280,57 @@ class CameraLogic(LogicBase):
     # (Low-level) methods making the camera interface functions accessible from the GUI.
     # Getter and setter methods for camera attributes.
     # ----------------------------------------------------------------------------------------------------------------------
+
+    # ----------------------------------------------------------------------------------------------------------------------
+    # Selection of the camera (only relevant if several cameras are available on the microscope)
+    # ----------------------------------------------------------------------------------------------------------------------
+
+    def get_available_cameras(self):
+        """ Get the names of the cameras that can be selected (a single name if only one camera is available).
+        @return: (list of str) names of the cameras
+        """
+        return list(self._hardware.get_available_cameras())
+
+    def get_active_camera(self):
+        """ Get the name of the camera that is currently used.
+        @return: (str) name of the active camera
+        """
+        return self._hardware.get_active_camera()
+
+    @QtCore.Slot(str)
+    def select_camera(self, name):
+        """ Switch to another camera. The camera can only be changed when it is idle (no live, no movie, no synchronized
+        acquisition armed). All the settings are reset : the new camera starts with its default exposure, gain and the
+        full sensor size, and the properties of the logic are read again from the new camera. The signal
+        sigCameraChanged is emitted with the name of the camera that is active at the end of the call, also if the
+        switch was refused, so that the GUI can restore its selection.
+        @param: (str) name: name of the camera to activate
+        @return: (bool) True if the requested camera is active
+        """
+        current = self._hardware.get_active_camera()
+        if name == current:
+            return True
+
+        if name not in self._hardware.get_available_cameras():
+            self.log.warning(f'Camera {name} is not available - the camera is not changed.')
+            self.sigCameraChanged.emit(current)
+            return False
+
+        if self.live_enabled or self.saving or not self._hardware.get_ready_state():
+            self.log.warning('The camera cannot be changed while an acquisition is running.')
+            self.sigCameraChanged.emit(current)
+            return False
+
+        if not self._hardware.set_active_camera(name):
+            self.log.error(f'The camera could not be changed to {name}.')
+            self.sigCameraChanged.emit(self._hardware.get_active_camera())
+            return False
+
+        self._n_frames_prepared = None
+        self._init_from_hardware()
+        self.log.info(f'Camera changed to {name}.')
+        self.sigCameraChanged.emit(name)
+        return True
 
     def get_name(self):
         """ Retrieve an identifier of the camera that the GUI can print.

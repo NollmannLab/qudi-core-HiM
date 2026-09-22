@@ -10,6 +10,17 @@ An extension to Qudi.
 @author: F. Barho - JB. Fiche for updates and later modifications
 
 Created on Thu Oct 29 2020
+
+Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
+  2026-09-21    : selection of the camera among several cameras (camera_comboBox): signal sigSwitchCamera, methods
+                  _init_camera_combobox, camera_selected, camera_changed, _refresh_camera_ui, _camera_switch_allowed
+                  (the camera can only be changed when it is idle and the lasers / brightfield are off) and
+                  _update_camera_combo_state (called by the camera toolbar, live, laser and brightfield callbacks);
+                  the camera-dependent part of the initialization was moved to _update_camera_status_widgets,
+                  _update_camera_setting_widgets and _update_camera_settings_dialog so that it can be repeated after a
+                  camera change; the duplicated call of init_save_settings_ui in on_activate was removed.
+  2026-09-22    : the display is fully reset at a camera change (image, rubberband, contrast controls, view fitted to the
+                  size of the first image of the new camera, see _autorange_next_image in update_data).
 -----------------------------------------------------------------------------------
 
 Qudi is free software: you can redistribute it and/or modify
@@ -260,6 +271,8 @@ class BasicImagingGUI(GuiBase):
     
     sigReadTemperature = QtCore.Signal()
 
+    sigSwitchCamera = QtCore.Signal(str)  # name of the camera to use (only if several cameras are available)
+
     # signals to laser control logic
     sigLaserOn = QtCore.Signal()
     sigLaserOff = QtCore.Signal()
@@ -309,6 +322,8 @@ class BasicImagingGUI(GuiBase):
         self.metadata_template = None
         self.laser_spinboxes_by_wavelength = {}
         self._last_sensor_roi = None
+        self._active_camera_name = None  # name of the camera currently displayed in the GUI
+        self._autorange_next_image = False  # True after a camera change : fit the view to the next image
 
     def on_activate(self):
         """ Initializes all needed UI files and establishes the connectors.
@@ -340,10 +355,6 @@ class BasicImagingGUI(GuiBase):
         # initialize functionalities of the laser and filter-wheel dockwidgets and their toolbars
         self._initialize_laser_control_ui()
         self._initialize_filterwheel_ui()
-
-        # initialize the save settings dialog only if the camera is available
-        if self._camera_logic is not None:
-            self.init_save_settings_ui()
 
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
@@ -395,6 +406,7 @@ class BasicImagingGUI(GuiBase):
         self.init_camera_dockwidget()
         self.init_camera_status_dockwidget()
         self.init_save_settings_ui()
+        self._init_camera_combobox()
 
         # initialize contrast tools
         self._mw.Min_contrast_spinBox.valueChanged.connect(self._update_contrast_from_spinboxes)
@@ -407,6 +419,7 @@ class BasicImagingGUI(GuiBase):
         # initialize signals
         self._camera_logic.sigProgress.connect(self.update_statusbar)
         self._camera_logic.sigSaving.connect(self.update_statusbar_saving)
+        self._camera_logic.sigCameraChanged.connect(self.camera_changed)
 
     def _hide_camera_ui(self) -> None:
         """Hide controls that require a camera connection."""
@@ -422,30 +435,7 @@ class BasicImagingGUI(GuiBase):
     def init_camera_status_dockwidget(self):
         """ Initializes the indicators and connects signals for the camera status dockwidget. """
         # initialize the camera status indicators on the GUI
-        self._mw.camera_status_LineEdit.setText(self._camera_logic.get_ready_state())
-        if not self._camera_logic.has_shutter:
-            self._mw.shutter_status_LineEdit.setText('')
-            self._mw.shutter_status_LineEdit.setEnabled(False)
-            self._mw.shutter_Label.setEnabled(False)
-        else:
-            self._mw.shutter_status_LineEdit.setText(self._camera_logic.get_shutter_state())
-
-        if not self._camera_logic.has_temp:
-            self._mw.cooler_status_LineEdit.setText('')
-            self._mw.cooler_status_LineEdit.setEnabled(False)
-            self._mw.cooler_Label.setEnabled(False)
-            self._mw.temperature_LineEdit.setText('')
-            self._mw.temperature_LineEdit.setEnabled(False)
-            self._mw.temperature_Label.setEnabled(False)
-        else:
-            self._mw.cooler_status_LineEdit.setText(self._camera_logic.get_cooler_state())
-            self._mw.temperature_LineEdit.setText(str(self._camera_logic.get_temperature()))
-
-        if not self._camera_logic.has_gain:
-            self._mw.gain_label.setEnabled(False)
-            self._mw.gain_LineEdit.setEnabled(False)
-        else:
-            self._mw.gain_LineEdit.setText(str(self._camera_logic.get_gain()))
+        self._update_camera_status_widgets()
 
         # signals
         # update the indicators when pushbutton is clicked
@@ -453,6 +443,48 @@ class BasicImagingGUI(GuiBase):
 
         # connect signal from logic
         self._camera_logic.sigUpdateCamStatus.connect(self.update_camera_status_display)
+
+    def _update_camera_status_widgets(self):
+        """ Set the camera status indicators according to the capabilities of the (active) camera. The widgets are
+        enabled or disabled, so that the method can also be used after another camera was selected. """
+        self._mw.camera_status_LineEdit.setText(self._camera_logic.get_ready_state())
+
+        has_shutter = self._camera_logic.has_shutter
+        self._mw.shutter_status_LineEdit.setEnabled(has_shutter)
+        self._mw.shutter_Label.setEnabled(has_shutter)
+        self._mw.shutter_status_LineEdit.setText(self._camera_logic.get_shutter_state() if has_shutter else '')
+
+        has_temp = self._camera_logic.has_temp
+        self._mw.cooler_status_LineEdit.setEnabled(has_temp)
+        self._mw.cooler_Label.setEnabled(has_temp)
+        self._mw.temperature_LineEdit.setEnabled(has_temp)
+        self._mw.temperature_Label.setEnabled(has_temp)
+        self._mw.cooler_status_LineEdit.setText(self._camera_logic.get_cooler_state() if has_temp else '')
+        self._mw.temperature_LineEdit.setText(str(self._camera_logic.get_temperature()) if has_temp else '')
+
+        has_gain = self._camera_logic.has_gain
+        self._mw.gain_label.setEnabled(has_gain)
+        self._mw.gain_LineEdit.setEnabled(has_gain)
+        if has_gain:
+            self._mw.gain_LineEdit.setText(str(self._camera_logic.get_gain()))
+
+    def _update_camera_setting_widgets(self):
+        """ Set the camera setting indicators (exposure or kinetic time, gain, temperature setpoint) from the logic. """
+        # use the kinetic time for andor camera, exposure time for all others
+        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (
+                self._camera_logic.get_name() == 'iXon Ultra 888'):
+            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_kinetic_time()))
+            self._mw.exposure_Label.setText('Kinetic time (s):')
+        else:
+            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_exposure()))
+            self._mw.exposure_Label.setText('Exposure time (s):')
+
+        self._mw.gain_LineEdit.setText(str(self._camera_logic.get_gain()))
+
+        has_temp = self._camera_logic.has_temp
+        self._mw.temp_setpoint_LineEdit.setEnabled(has_temp)
+        self._mw.temp_setpoint_Label.setEnabled(has_temp)
+        self._mw.temp_setpoint_LineEdit.setText(str(self._camera_logic.temperature_setpoint) if has_temp else '')
 
     def init_camera_dockwidget(self):
         """ Initializes the image item and the indicators on the GUI.
@@ -474,23 +506,7 @@ class BasicImagingGUI(GuiBase):
         self._mw.samplename_LineEdit.textChanged[str].connect(self.update_sample_name)
 
         # initialize the camera setting indicators on the GUI
-        # use the kinetic time for andor camera, exposure time for all others
-        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (
-                self._camera_logic.get_name() == 'iXon Ultra 888'):
-            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_kinetic_time()))
-            self._mw.exposure_Label.setText('Kinetic time (s):')
-        else:
-            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_exposure()))
-            self._mw.exposure_Label.setText('Exposure time (s):')
-
-        self._mw.gain_LineEdit.setText(str(self._camera_logic.get_gain()))
-
-        if not self._camera_logic.has_temp:
-            self._mw.temp_setpoint_LineEdit.setText('')
-            self._mw.temp_setpoint_LineEdit.setEnabled(False)
-            self._mw.temp_setpoint_Label.setEnabled(False)
-        else:
-            self._mw.temp_setpoint_LineEdit.setText(str(self._camera_logic.temperature_setpoint))
+        self._update_camera_setting_widgets()
 
         # camera toolbar
         # configure the toolbar action buttons and connect internal signals
@@ -534,6 +550,7 @@ class BasicImagingGUI(GuiBase):
         self.sigSetSensor.connect(self._camera_logic.set_sensor_region)
         self.sigResetSensor.connect(self._camera_logic.reset_sensor_region)
         self.sigReadTemperature.connect(self._camera_logic.get_temperature)
+        self.sigSwitchCamera.connect(self._camera_logic.select_camera)
 
         # signals from logic
         # update the camera setting indicators when value changed (via settings window or iPython console)
@@ -555,6 +572,118 @@ class BasicImagingGUI(GuiBase):
         self._camera_logic.sigLiveStarted.connect(self.start_video_clicked)
         self._camera_logic.sigDisableCameraActions.connect(self.disable_camera_toolbuttons)
         self._camera_logic.sigEnableCameraActions.connect(self.enable_camera_toolbuttons)
+
+# camera selection (only if several cameras are available) ------------------------------------------------------------
+    def _init_camera_combobox(self):
+        """ Populate the combobox used to select the camera. It is only shown if several cameras are available. """
+        camera_names = self._camera_logic.get_available_cameras()
+        self._active_camera_name = self._camera_logic.get_active_camera()
+
+        with QtCore.QSignalBlocker(self._mw.camera_comboBox):
+            self._mw.camera_comboBox.clear()
+            self._mw.camera_comboBox.addItems(camera_names)
+            self._mw.camera_comboBox.setCurrentText(self._active_camera_name)
+
+        several_cameras = len(camera_names) > 1
+        self._mw.camera_comboBox.setVisible(several_cameras)
+        self._mw.label_select_camera.setVisible(several_cameras)
+
+        self._mw.camera_comboBox.currentTextChanged.connect(self.camera_selected)
+        self._update_camera_combo_state()
+
+    def _camera_switch_allowed(self, live_on=None, lasers_on=None, bf_on=None):
+        """ The camera can only be changed when the camera is idle and the light sources are off. The state of the
+        live, lasers and brightfield is read from the logic modules, unless it is given as argument (their logic
+        updates the state only after the GUI callback that is calling this method).
+        @param: (bool) live_on, lasers_on, bf_on: force the state of the live / lasers / brightfield if not None
+        @return: (bool) True if the camera can be changed
+        """
+        if live_on is None:
+            live_on = self._camera_logic.live_enabled
+        if lasers_on is None:
+            lasers_on = self._laser_logic.laser_enabled
+        if bf_on is None:
+            bf_on = self._brightfield_logic is not None and self._brightfield_logic.enabled
+
+        # the start video action is disabled while the camera is busy (snap, saving, tasks ...)
+        camera_idle = self._mw.start_video_Action.isEnabled() and not self._camera_logic.saving
+        return camera_idle and not live_on and not lasers_on and not bf_on
+
+    def _update_camera_combo_state(self, live_on=None, lasers_on=None, bf_on=None):
+        """ Enable the camera combobox only if the camera can be changed (see _camera_switch_allowed). """
+        if self._camera_logic is None:
+            return
+        self._mw.camera_comboBox.setEnabled(self._camera_switch_allowed(live_on, lasers_on, bf_on))
+
+    @QtCore.Slot(str)
+    def camera_selected(self, name):
+        """ Callback of the camera combobox: ask the logic to switch to the selected camera. """
+        if name == self._active_camera_name or name == '':
+            return
+        if not self._camera_switch_allowed():
+            self.log.warning('The camera can only be changed when the camera is idle and the lasers are off.')
+            self._set_camera_combobox(self._active_camera_name)
+            return
+        self.sigSwitchCamera.emit(name)
+
+    def _set_camera_combobox(self, name):
+        """ Show a camera in the combobox without triggering a camera change. """
+        with QtCore.QSignalBlocker(self._mw.camera_comboBox):
+            self._mw.camera_comboBox.setCurrentText(name)
+
+    @QtCore.Slot(str)
+    def camera_changed(self, name):
+        """ Callback of sigCameraChanged from the logic, which gives the camera that is active after a selection. If it
+        is not the one displayed, the camera was changed and all the camera-dependent parts of the GUI are updated. If it
+        is the same, the change was refused and the combobox is restored. """
+        self._set_camera_combobox(name)
+        if name != self._active_camera_name:
+            self._active_camera_name = name
+            self._refresh_camera_ui()
+        self._update_camera_combo_state()
+
+    def _refresh_camera_ui(self):
+        """ Update the GUI after another camera was selected. All the settings are reset : the indicators and the
+        dialogs are read again from the logic, the ROI selection, the image rotation, the contrast and the displayed
+        image are reset, and the save settings get their default values. """
+        self._max_frames_movie, self._max_frames_spool = self._camera_logic.get_max_frames()
+
+        # capabilities and settings of the new camera
+        self._update_camera_status_widgets()
+        self._update_camera_setting_widgets()
+        self._update_camera_settings_dialog()
+
+        # ROI selection : the sensor was reset to full size by the logic
+        self._mw.camera_ScanPlotWidget.toggle_selection(False)
+        self.region_selector_enabled = False
+        self._mw.set_sensor_Action.setText('Set sensor region')
+        self._mw.set_sensor_Action.setChecked(False)
+        self._last_sensor_roi = None
+        self._mw.use_last_sensor_ROI_Action.setEnabled(False)
+
+        # image rotation (the cameras are not necessarily mounted with the same orientation)
+        for action in (self._mw.rotate_image_cw_MenuAction, self._mw.rotate_image_ccw_MenuAction,
+                       self._mw.rot180_image_MenuAction):
+            with QtCore.QSignalBlocker(action):
+                action.setChecked(False)
+        self.rotation_cw = False
+        self.rotation_ccw = False
+        self.rot180 = False
+
+        # display : the sensor of the new camera can have another size, so the image, the view and the contrast are reset
+        self.imageitem.clear()
+        self.imageitem.getViewBox().rbScaleBox.hide()  # hide the rubberband tool used for roi selection on sensor
+        self._mw.autocontrast_checkBox.setChecked(True)
+        with QtCore.QSignalBlocker(self._mw.Min_contrast_spinBox):
+            self._mw.Min_contrast_spinBox.setValue(0)
+        with QtCore.QSignalBlocker(self._mw.Max_contrast_spinbox):
+            self._mw.Max_contrast_spinbox.setValue(65535)
+        self.imageitem.getViewBox().autoRange()
+        self._autorange_next_image = True  # the view is adapted to the size of the first image of the new camera
+
+        # save settings and status bar
+        self.set_default_values()
+        self.clean_statusbar()
 
 # laser dockwidget ---------------------------------------------------------------------------------------------
     def _initialize_brightfield_ui(self) -> None:
@@ -668,21 +797,22 @@ class BasicImagingGUI(GuiBase):
         # # frame transfer settings and gain limits
         # self._cam_sd.frame_transfer_CheckBox.toggled[bool].connect(self._camera_logic.set_frametransfer)
         
-        if not self._camera_logic.has_temp:
-            self._cam_sd.temp_spinBox.setEnabled(False)
-            self._cam_sd.label_temperature.setEnabled(False)
+        # write the capabilities of the camera and the current configuration to the settings window of the GUI.
+        self._update_camera_settings_dialog()
 
-        if not self._camera_logic.has_gain:
-            self._cam_sd.gain_spinBox.setEnabled(False)
-            self._cam_sd.label_gain.setEnabled(False)
-        else:
+    def _update_camera_settings_dialog(self):
+        """ Enable / disable the fields of the camera settings dialog according to the capabilities of the (active)
+        camera and write the current settings in it. """
+        self._cam_sd.temp_spinBox.setEnabled(self._camera_logic.has_temp)
+        self._cam_sd.label_temperature.setEnabled(self._camera_logic.has_temp)
+
+        self._cam_sd.gain_spinBox.setEnabled(self._camera_logic.has_gain)
+        self._cam_sd.label_gain.setEnabled(self._camera_logic.has_gain)
+        if self._camera_logic.has_gain:
             low, high = self._camera_logic.get_gain_range()
             self._cam_sd.label_gain.setText(f"Gain [{low} - {high}]")
 
-        if not self._camera_logic.support_frame_transfer:
-            self._cam_sd.frame_transfer_CheckBox.setEnabled(False)
-        else:
-            self._cam_sd.frame_transfer_CheckBox.setEnabled(True)
+        self._cam_sd.frame_transfer_CheckBox.setEnabled(self._camera_logic.support_frame_transfer)
 
         # write the configuration to the settings window of the GUI.
         self.cam_keep_former_settings()
@@ -1068,6 +1198,11 @@ class BasicImagingGUI(GuiBase):
             autoLevels=auto_contrast,
         )
 
+        # first image after a camera change : adapt the view to the size of the image
+        if self._autorange_next_image:
+            self.imageitem.getViewBox().autoRange()
+            self._autorange_next_image = False
+
         # transposing the data makes the rotations behave as they should when axisOrder row-major is used (set in
         # initialization of ImageItem). See also https://github.com/pyqtgraph/pyqtgraph/issues/315
 
@@ -1099,11 +1234,13 @@ class BasicImagingGUI(GuiBase):
             self._mw.start_video_Action.setText('Live')
             self._mw.start_video_Action.setToolTip('Start live video')
             self.sigVideoStop.emit()
+            self._update_camera_combo_state(live_on=False)
         else:
             self._mw.take_image_Action.setDisabled(True)  # snap and live are mutually exclusive
             self._mw.start_video_Action.setText('Stop Live')
             self._mw.start_video_Action.setToolTip('Stop live video')
             self.sigVideoStart.emit()
+            self._update_camera_combo_state(live_on=True)
         self.imageitem.getViewBox().rbScaleBox.hide()  # hide the rubberband tool used for roi selection on sensor
 
     @QtCore.Slot()
@@ -1113,6 +1250,7 @@ class BasicImagingGUI(GuiBase):
         self._mw.start_video_Action.setText('Live')
         self._mw.start_video_Action.setToolTip('Start live video')
         self._mw.start_video_Action.setChecked(False)
+        self._update_camera_combo_state(live_on=False)
 
     @QtCore.Slot()
     def save_last_image_clicked(self):
@@ -1387,6 +1525,7 @@ class BasicImagingGUI(GuiBase):
         self._mw.set_sensor_Action.setDisabled(True)
         self._mw.abort_video_Action.setDisabled(False)
         self._mw.abort_video_Action.setChecked(False)
+        self._update_camera_combo_state()
 
     def disable_frame_transfer(self):
         """ Disables the frame transfer checkbox. """
@@ -1406,6 +1545,7 @@ class BasicImagingGUI(GuiBase):
         self._mw.set_sensor_Action.setDisabled(False)
         self._mw.abort_video_Action.setDisabled(True)
         self._mw.abort_video_Action.setChecked(False)
+        self._update_camera_combo_state()
 
 # helper functions -----------------------------------------------------------------------------------------------------
     def _create_metadata_dict(self, n_frames):
@@ -1498,12 +1638,14 @@ class BasicImagingGUI(GuiBase):
             self.sigLaserOff.emit()
             # enable filter setting again
             self._mw.filter_ComboBox.setEnabled(True)
+            self._update_camera_combo_state(lasers_on=False)
         else:
             # laser is initially off
             self._mw.laser_on_Action.setText('Laser Off')
             self.sigLaserOn.emit()
             # do not change filters while laser is on
             self._mw.filter_ComboBox.setEnabled(False)
+            self._update_camera_combo_state(lasers_on=True)
 
     @QtCore.Slot()
     def laser_set_to_zero(self):
@@ -1524,11 +1666,13 @@ class BasicImagingGUI(GuiBase):
             # brightfield is initially on
             self.brightfield_on_Action.setText('Brightfield On')
             self.sigBFOff.emit()
+            self._update_camera_combo_state(bf_on=False)
         else:
             # brightfield is initially off
             self.brightfield_on_Action.setText('Brightfield Off')
             intensity = self.bf_control_DSpinBox.value()
             self.sigBFOn.emit(intensity)
+            self._update_camera_combo_state(bf_on=True)
 
 # callbacks of signals from logic --------------------------------------------------------------------------------------
     def update_laser_spinbox(self):
@@ -1546,6 +1690,7 @@ class BasicImagingGUI(GuiBase):
         self._mw.laser_on_Action.setChecked(False)
         # enable filter setting again
         self._mw.filter_ComboBox.setEnabled(True)
+        self._update_camera_combo_state(lasers_on=False)
 
     @QtCore.Slot()
     def reset_brightfield_toolbutton(self):
@@ -1554,6 +1699,7 @@ class BasicImagingGUI(GuiBase):
         (for example to prepare a task). """
         self.brightfield_on_Action.setText('Brightfield On')
         self.brightfield_on_Action.setChecked(False)
+        self._update_camera_combo_state(bf_on=False)
 
 # disable/enable user interface actions --------------------------------------------------------------------------------
     @QtCore.Slot()

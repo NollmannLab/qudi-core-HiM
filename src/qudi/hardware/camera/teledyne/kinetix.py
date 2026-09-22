@@ -10,7 +10,12 @@ An extension to Qudi.
 
 @author: JB Fiche
 Created on Mon July 22, 2024 - Modified for qudi-core Mon Sept 14, 2026
-Modified: 2026-09-20 using Claude code
+Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
+  2026-09-20    : common contract of camera_interface.py: set_image and start_movie_acquisition return True on success,
+                  start_single_acquisition returns None on failure, get_most_recent_image returns (None, 0) when no frame
+                  is available; set_image clears the previous ROI (reset_rois) before setting the new one.
+  2026-09-22    : an activation failure is only logged (no error raised): new is_available method, so that the camera
+                  can be left out of a camera interfuse; on_deactivate also works if the camera was not initialized.
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -70,6 +75,7 @@ class KinetixCam(CameraInterface):
 
     # camera attributes
     _camera = None
+    _available = False  # True once the camera was successfully initialized in on_activate
     _width = 0  # current width
     _height = 0  # current height
     _full_width = 0  # maximum width of the sensor
@@ -84,8 +90,13 @@ class KinetixCam(CameraInterface):
     def on_activate(self):
         """ Initialisation performed during activation of the module.
         """
-        pvc.init_pvcam()  # Initialize PVCAM
-        n_cam = pvc.get_cam_total()
+        self._available = False
+        try:
+            pvc.init_pvcam()  # Initialize PVCAM
+            n_cam = pvc.get_cam_total()
+        except Exception as e:
+            self.log.error(f'PVCAM initialization failed : {e}')
+            return
         if n_cam == 0:
             self.log.error('No camera detected - check the kinetix is switched ON and/or properly connected')
         elif n_cam > 1:
@@ -112,14 +123,24 @@ class KinetixCam(CameraInterface):
                 sleep(self._exposure * 2)
                 self._camera.finish()
 
+                self._available = True
+
             except Exception as e:
                 self.log.error(e)
+
+    def is_available(self):
+        """ Return False if the camera could not be initialized in on_activate (the error was logged). """
+        return self._available
 
     def on_deactivate(self):
         """ Camera will be deactivated and stopped during execution of this module.
         """
-        self._camera.close()
-        pvc.uninit_pvcam()
+        try:
+            if self._camera is not None:
+                self._camera.close()
+            pvc.uninit_pvcam()
+        except Exception as e:
+            self.log.warning(f'Error while closing the camera : {e}')
 
     # ======================================================================================================================
     # Camera Interface functions

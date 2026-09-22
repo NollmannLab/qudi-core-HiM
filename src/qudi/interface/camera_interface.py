@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 Interface for generic camera hardware used by qudi-core-HiM.
-Modified: 2026-09-20 using Claude code
+Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
+  2026-09-19/20 : common contract for all cameras documented in this docstring and in each method (True = success,
+                  image formats, get_size / get_image_size, get_most_recent_image returns (image | None, count));
+                  get_gain_limits made optional (default (0, 0)); optional abort_movie_acquisition; 'copy' argument of
+                  get_most_recent_image.
+  2026-09-21    : optional multi-camera methods get_available_cameras, get_active_camera, set_active_camera and
+                  get_camera_type (defaults for a camera that is alone on the microscope).
+  2026-09-22    : optional is_available (False if the camera could not be initialized).
 
 Contract shared by all the camera hardware modules (Kinetix, ORCA, dummy, ...). camera_logic relies only on what is
 described here, so that it does not need to know which camera is connected.
@@ -205,6 +212,40 @@ class CameraInterface(Base):
     # ------------------------------------------------------------------------------------------------------------------
     # Image retrieval
     # ------------------------------------------------------------------------------------------------------------------
+
+    def is_available(self):
+        """Return False if the camera could not be initialized (optional - the default is True).
+
+        A camera module that fails during its activation logs the error instead of raising it, so that the modules
+        depending on it (a camera interfuse, the logic, the GUI) can still be activated. It uses this method to report
+        that it is not usable.
+        """
+        return True
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # Multi-camera support (optional)
+    # ------------------------------------------------------------------------------------------------------------------
+    # Not abstract: a camera that is alone on the microscope inherits these defaults. A camera interfuse that gives access
+    # to several cameras (see hardware/interfuse_hardware/camera_interfuse.py) overrides them.
+
+    def get_available_cameras(self):
+        """Return the list of the names of the cameras that can be selected (default: only this camera)."""
+        return [self.get_name()]
+
+    def get_active_camera(self):
+        """Return the name of the camera that is currently used (default: this camera)."""
+        return self.get_name()
+
+    def set_active_camera(self, name):
+        """Select the camera to use, by name. Return True if the camera is now the active one.
+
+        The default implementation only accepts the name of the camera itself.
+        """
+        return name == self.get_name()
+
+    def get_camera_type(self):
+        """Return the class name of the hardware module that really drives the active camera (default: this class)."""
+        return self.__class__.__name__
 
     @abstractmethod
     def get_most_recent_image(self, copy=True):

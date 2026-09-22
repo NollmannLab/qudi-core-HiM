@@ -2,7 +2,13 @@
 """
 Author: F. Barho - adapted for qudi-core-HiM by JB Fiche
 Created: 2026-08-06
-Modified: 2026-09-20 using Claude code
+Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
+  2026-09-20    : module rewritten as a time-based simulation following the contract of camera_interface.py (frames
+                  produced at the rate imposed by the exposure, synthetic scene with orientation marker, live, movie,
+                  ROI (1-based, inclusive), abort, no-live mode, wait_until_finished, gain limits, True = success).
+                  The Andor-specific simulation helpers were kept unchanged.
+  2026-09-22    : is_available() reports the failure of a simulated activation (resolution with less than 100 rows, the
+                  error is logged and not raised), to test a camera interfuse with a camera that is not accessible.
 
 This module was available in Qudi legacy version and was extended. It simulates a microscope camera following the
 contract defined in camera_interface.py, so that the GUI and the logic can be tested without any hardware.
@@ -60,6 +66,8 @@ class CameraDummy(CameraInterface):
     camera_id = ConfigOption('camera_id', 0)
     _default_trigger_mode = ConfigOption('default_trigger_mode', 'INTERNAL')
     _default_exposure_out_mode = ConfigOption('default_exposure_out_mode', 'ALL_ROWS')
+    # the following option was only introduced to simulate a failure in the activation
+    _simulate_activation_failure = ConfigOption('simulate_activation_failure', False)
 
     # camera attributes
     _full_width = 0  # maximum width of the sensor
@@ -72,6 +80,7 @@ class CameraDummy(CameraInterface):
     _roi = None  # (row start, row end, column start, column end) of the ROI, in python (0-based, end excluded) indices
     _scene = None  # image of the simulated sample
     _mode = None  # None (idle), 'live' or 'sequence'
+    _available = True  # False if the simulated camera failed to initialize (see on_activate)
     _t_start = 0.  # time at which the current acquisition started
     _frame_offset = 0  # number of frames acquired before the last change of the exposure time
 
@@ -96,6 +105,18 @@ class CameraDummy(CameraInterface):
         self._mode = None
         self._frame_offset = 0
         self._scene = self._create_scene(self._full_height, self._full_width)
+
+        # simulation of a camera that cannot be initialized : a resolution with less than 100 rows. Like the real
+        # cameras, the error is logged (not raised) and reported by is_available(), so that a camera interfuse can leave
+        # the camera out of its list
+        self._available = True
+        if self._simulate_activation_failure:
+            self.log.error("camera is not accessible")
+            self._available = False
+
+    def is_available(self):
+        """ Return False if the simulated camera could not be initialized in on_activate (resolution < 100 rows). """
+        return self._available
 
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
