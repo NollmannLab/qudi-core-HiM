@@ -369,7 +369,7 @@ class CameraLogic(LogicBase):
 
     # this function is specific to andor camera
     def get_kinetic_time(self):
-        """ Andor camera only: Get the kinetic time of the camera and update the class attribute _kinetic_time.
+        """ andor camera only: Get the kinetic time of the camera and update the class attribute _kinetic_time.
         @return: (float) kinetic time (in seconds)
         """
         if (self.get_name() == 'iXon Ultra 897') or (self.get_name() == 'iXon Ultra 888'):

@@ -6,7 +6,7 @@ Modified with Claude code (Anthropic) - functionalities modified or added by Cla
   2026-09-20    : module rewritten as a time-based simulation following the contract of camera_interface.py (frames
                   produced at the rate imposed by the exposure, synthetic scene with orientation marker, live, movie,
                   ROI (1-based, inclusive), abort, no-live mode, wait_until_finished, gain limits, True = success).
-                  The Andor-specific simulation helpers were kept unchanged.
+                  The andor-specific simulation helpers were kept unchanged.
   2026-09-22    : is_available() reports the failure of a simulated activation (resolution with less than 100 rows, the
                   error is logged and not raised), to test a camera interfuse with a camera that is not accessible.
 
@@ -467,7 +467,7 @@ class CameraDummy(CameraInterface):
         return np.clip(frame, 0, 65535).astype(np.uint16)
 
 # ----------------------------------------------------------------------------------------------------------------------
-# Simulation of Andor camera
+# Simulation of andor camera
 # ----------------------------------------------------------------------------------------------------------------------
 
     def _set_spool(self, active, mode, filenamestem, framebuffer):

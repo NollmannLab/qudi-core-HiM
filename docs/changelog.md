@@ -104,6 +104,11 @@ Last updated: 2026-09-22
   (`setPropertyValue`, `getFrames`, ...), which is not available with DCAM-API v4.
 - Removed the ORCA acquisition-mode methods (no equivalent property on the
   ORCA-Flash4.0).
+- Removed `custom_config/dummy_multicamera_config.cfg`: this was a standalone
+  three-dummy-camera + interfuse config created while developing the
+  multi-camera selection feature, made redundant once `dummy_config.cfg`
+  itself was updated to the same three-camera + interfuse setup (see
+  "Multi-camera support" above).
 
 #### Fixed
 
@@ -112,6 +117,40 @@ Last updated: 2026-09-22
 - Fixed the ORCA imports and the duplicated `get_size` definition.
 - Removed the duplicated call of `init_save_settings_ui()` in `basic_imaging_gui.on_activate`, which created the save dialog twice.
 - Kinetix `set_image` now clears the previous ROI (`reset_rois()`) before setting the new one: pyvcam appends ROIs on sensors supporting several regions, which made the reset to full sensor fail with "New ROI overlaps existing ROI".
+- Andor iXon Ultra (`ixon_ultra_888.py`) : the module did not yet satisfy
+  `CameraInterface`:
+  - `get_image_size` was missing, so the class could not be instantiated, and
+    `get_size` returned the current, possibly ROI-reduced size instead of the
+    full sensor (fixed first, 2026-09-22).
+  - Return-value convention (2026-09-22): `set_exposure`, `set_gain`,
+    `set_image`, `start_live_acquisition`, `start_movie_acquisition` and
+    `abort_movie_acquisition` now return `True` on success (some used to
+    return `True` on error, `set_image` returned an error code);
+    `start_single_acquisition` now blocks and returns the acquired frame (or
+    `None`) instead of an error flag; `get_most_recent_image` now takes the
+    `copy` argument used by `camera_logic` and returns `(image, frame_count)`,
+    `None` if no frame is available; `get_acquired_data` now returns `None`
+    (instead of a zero-filled array) when the data could not be retrieved.
+  - Added `is_available()` / `self._available`, set only once `on_activate`
+    has fully succeeded, and guarded `on_deactivate` so that it does not fail
+    if activation did not complete - same pattern as Kinetix, ORCA and the
+    dummy camera, so that this camera failing to activate no longer brings
+    down the interfuse, the logic and the GUI.
+  - While doing this, found and fixed a pre-existing bug in `on_activate`:
+    the camera-initialization check compared `Error_Codes.DRV_SUCCESS` (an
+    enum member) directly to `ret` (the plain integer the SDK returns), which
+    could never be `True`; replaced with the same `check_error`/
+    `get_key_from_value` pattern used by every other SDK call in this module.
+  - Fixed the `ConfigOption(..., 'False')` string/boolean issue for
+    `_has_temp` / `_has_shutter` / `_has_gain` / `_support_live_acquisition`
+    (2026-09-22): the default was the string `'False'`, which is truthy in
+    Python, so `has_temp()` / `has_shutter()` / `has_gain()` /
+    `support_live_acquisition()` would all report `True` whenever a config
+    file left these keys unset - the opposite of the intended default.
+    Changed the defaults to the boolean `False`; no config file in the repo
+    references this camera yet, so nothing depended on the old behaviour.
+    This closes the review shared with JB on 2026-09-22 - the module now
+    fully satisfies the common camera contract (`camera_interface.py`).
 
 ### Pipetting robot
 

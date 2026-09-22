@@ -977,7 +977,7 @@ class BasicImagingGUI(GuiBase):
         display = self._save_sd.enable_display_CheckBox.isChecked()
         metadata = self._create_metadata_dict(n_frames)
 
-        # For Andor cameras, acquisition can be done in video or spool modes. For the Andor camera 888, display does not
+        # For andor cameras, acquisition can be done in video or spool modes. For the andor camera 888, display does not
         # work properly when the spooling mode is ON. Therefore, if display is ON, the acquisition mode is automatically
         # switch to video.
         if (self._camera_logic.get_name() == 'iXon Ultra 897') or (self._camera_logic.get_name() == 'iXon Ultra 888'):
@@ -1283,7 +1283,7 @@ class BasicImagingGUI(GuiBase):
     @QtCore.Slot()
     def save_video_clicked(self):
         """ Callback of save_video_Action. Handles toolbutton state, and opens the save settings dialog. Note that two
-        acquisition modes are available, depending on the type of cameras. Spooling only exists for Andor.
+        acquisition modes are available, depending on the type of cameras. Spooling only exists for andor.
         """
         # disable camera related toolbuttons
         self.disable_camera_toolbuttons()

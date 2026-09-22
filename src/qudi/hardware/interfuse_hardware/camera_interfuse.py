@@ -19,7 +19,7 @@ of the cameras are the ones given by get_name(); if two cameras have the same na
 When another camera is selected, it is reset to its default state : exposure time and gain measured when the interfuse
 was activated, and full sensor size.
 
-Any attribute or method that is not part of the CameraInterface (for example the Andor-specific methods) is forwarded to
+Any attribute or method that is not part of the CameraInterface (for example the andor-specific methods) is forwarded to
 the active camera.
 
 Example config for copy-paste:
@@ -119,7 +119,7 @@ class CameraInterfuse(CameraInterface):
         return self._cameras[self._active_name]
 
     def __getattr__(self, item):
-        """ Forward what is not defined in the interfuse (Andor-specific methods, private attributes read by the logic
+        """ Forward what is not defined in the interfuse (andor-specific methods, private attributes read by the logic
         such as _default_temperature or _shutter, ...) to the active camera. """
         if item.startswith('__') or item in ('_cameras', '_defaults', '_active_name'):
             raise AttributeError(item)

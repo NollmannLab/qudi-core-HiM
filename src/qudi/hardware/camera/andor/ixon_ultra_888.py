@@ -2,14 +2,16 @@
 """
 Qudi-CBS
 
-This file contains the hardware class representing an Andor iXon Ultra camera.
+This file contains the hardware class representing an andor iXon Ultra camera.
 
 This module was first created by F.Barho for the Ixon-897 and then adapted for the 888-ultra. Note that all error codes
-can be found here: "C:\Program Files\Andor SDK\Python\pyAndorSDK2\pyAndorSDK2\atmcd_errors.py", together with examples.
+can be found here: "C:\Program Files\andor SDK\Python\pyAndorSDK2\pyAndorSDK2\atmcd_errors.py", together with examples.
 
 @author: JB. Fiche (original code from F. Barho)
 Created on Wed Nov 27 2024
-
+Last modified 2026-09-22: adapt hardware to qudi-core - make sure the code follows the format defined
+  from the Interface and used for other cameras. In particular make sure that error handling
+  follows the same rule everywhere : return True when success (Modified with Claude code)
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -30,33 +32,7 @@ from time import sleep
 from qudi.core.configoption import ConfigOption
 from qudi.interface.camera_interface import CameraInterface
 
-# class ReadMode(Enum):
-#     FVB = 0
-#     MULTI_TRACK = 1
-#     RANDOM_TRACK = 2
-#     SINGLE_TRACK = 3
-#     IMAGE = 4
-#
-#
-# class AcquisitionMode(Enum):
-#     SINGLE_SCAN = 1
-#     ACCUMULATE = 2
-#     KINETICS = 3
-#     FAST_KINETICS = 4
-#     RUN_TILL_ABORT = 5
-#
-#
-# class TriggerMode(Enum):
-#     INTERNAL = 0
-#     EXTERNAL = 1
-#     EXTERNAL_START = 6
-#     EXTERNAL_EXPOSURE = 7
-#     SOFTWARE_TRIGGER = 10
-#     EXTERNAL_CHARGE_SHIFTING = 12
-#
-# ERROR_DICT = {}
 verbose = True
-
 
 # ======================================================================================================================
 # Decorator (for debugging)
@@ -76,11 +52,11 @@ def decorator_print_function(function):
 # Hardware class
 # ======================================================================================================================
 class IxonUltra(CameraInterface):
-    """ Hardware class for Andor Ixon Ultra 897. Example config for copy-paste:
+    """ Hardware class for andor Ixon Ultra 897. Example config for copy-paste:
 
     andor_ultra_camera:
         module.Class: 'camera.andor.iXon888_ultra.IxonUltra'
-        sdk_location: 'C:\Program Files\Andor SDK\Python\pyAndorSDK2'
+        sdk_location: 'C:\Program Files\andor SDK\Python\pyAndorSDK2'
         default_exposure: 0.05  # en s
         default_read_mode: 'FULLIMAGE'
         default_temperature: -60
@@ -98,14 +74,15 @@ class IxonUltra(CameraInterface):
     _default_trigger_mode = ConfigOption('default_trigger_mode', 'INTERNAL')
     _max_frames_number_video = ConfigOption('max_N_images_movie', missing='error')
     _max_frames_number_spool = ConfigOption('max_N_images_spool', missing='error')
-    _has_temp = ConfigOption('temperature_control', 'False')
-    _has_shutter = ConfigOption('mechanical_shutter', 'False')
-    _has_gain = ConfigOption('gain_control', 'False')
-    _support_live_acquisition = ConfigOption('support_live_acquisition', 'False')
+    _has_temp = ConfigOption('temperature_control', False)
+    _has_shutter = ConfigOption('mechanical_shutter', False)
+    _has_gain = ConfigOption('gain_control', False)
+    _support_live_acquisition = ConfigOption('support_live_acquisition', False)
     _camera_name = ConfigOption('camera_name', missing='error')
     _frame_transfer = ConfigOption('frame_transfer', missing='error')
 
     # camera attributes
+    _sdk = None
     _exposure = _default_exposure
     _temperature = _default_temperature
     _cooler_on = _default_cooler_on
@@ -132,21 +109,34 @@ class IxonUltra(CameraInterface):
     _acquiring = False
     _scans = 1
     _cur_image = None
+    _available = False  # True only once on_activate has fully succeeded - see is_available()
 
     def on_activate(self):
         """ Initialisation performed during activation of the module. Note that for the moment, only one camera is
-        handled by the setup.
+        handled by the setup. If anything fails here, the error is logged and the module is left inactive
+        (is_available() returns False) instead of raising, so that a camera that cannot be initialized does not bring
+        down the interfuse, the logic and the GUI that depend on it (see camera_interface.is_available).
         """
-        try:
-            self.sdk = atmcd("")  # Load the atmcd library
-            ret = self.sdk.Initialize(self._sdk_location)  # Initialize camera
-            if Error_Codes.DRV_SUCCESS == ret:
-                err, serial = self._get_camera_serialnumber()
-                if not err:
-                    print(f"Function GetCameraSerialNumber returned the following serial No: {serial}")
-            else:
-                print(f"Cannot continue, could not initialise camera - error code : {ret}")
+        self._available = False
 
+        try:
+            self._sdk = atmcd("")  # Load the atmcd library
+            ret = self._sdk.Initialize(self._sdk_location)  # Initialize camera
+        except Exception as e:
+            self.log.error(f'andor iXon Ultra 888 Camera: could not load the SDK or initialise the camera: {e}.')
+            return
+
+        # note: comparing "Error_Codes.DRV_SUCCESS == ret" directly (as this used to do) never matches, since ret is
+        # the plain integer value returned by the SDK, not an Error_Codes member - use check_error/get_key_from_value
+        # like everywhere else in this module, which compares by .value and also logs the error code.
+        if self.check_error(ret, 'Initialize'):
+            return
+
+        err, serial = self._get_camera_serialnumber()
+        if not err:
+            self.log.info(f'andor iXon Ultra 888 Camera: connected to camera with serial number {serial}.')
+
+        try:
             # open the external shutter
             err = self._set_shutter(1, 1, 100, 100, 1)
             if not err:
@@ -170,15 +160,28 @@ class IxonUltra(CameraInterface):
             self._set_output_amplifier(0)
             self._set_horizontal_readout_rate(0)
         except Exception as e:
-            self.log.error(f'Andor iXon Ultra 888 Camera: Connection failed: {e}.')
+            self.log.error(f'andor iXon Ultra 888 Camera: error while configuring the camera: {e}.')
+            return
+
+        self._available = True
 
     def on_deactivate(self):
-        """ Deinitialisation performed during deactivation of the module.
+        """ Deinitialisation performed during deactivation of the module. Guarded so that it does not fail if
+        on_activate did not complete (self._available stayed False).
         """
+        if not self._available:
+            return
         self.stop_acquisition()
         # self._set_shutter(1, 2, 100, 100, 2)  # Leave the shutter ON
         self._set_cooler(False)
         self._shut_down()
+        self._available = False
+
+    def is_available(self):
+        """ Whether the camera was successfully initialized during on_activate (see camera_interface.py).
+        @return: (bool) True if the camera is available
+        """
+        return self._available
 
     # ======================================================================================================================
     # Camera Interface functions
@@ -219,20 +222,28 @@ class IxonUltra(CameraInterface):
 
     def get_size(self):
         """
-        Retrieve size of the image in pixel.
+        Retrieve the size of the FULL sensor in pixel, regardless of any ROI that was set (see camera_interface.py).
         @return: (tuple (int, int))  Size (width, height)
         """
-        return self._width, self._height
+        return self._full_width, self._full_height
+
+    def get_image_size(self):
+        """
+        Retrieve the size of the current image, i.e. after a ROI was set (see camera_interface.py).
+        @return: (tuple (int, int)) Size (height, width)
+        """
+        return self._height, self._width
 
     def set_exposure(self, exposure):
         """ Set the exposure time in seconds.
         @param: (float) exposure: desired new exposure time
-        @return: (bool) return True if an error is detected
+        @return: (bool) True on success
         """
         err = self._set_exposuretime(exposure)
-        if not err:
-            self._exposure = exposure
-        return err
+        if err:
+            return False
+        self._exposure = exposure
+        return True
 
     def get_exposure(self):
         """ Get the exposure time in seconds.
@@ -244,12 +255,13 @@ class IxonUltra(CameraInterface):
     def set_gain(self, gain):
         """ Set the electron multiplying gain.
         @param: (int) gain: desired new gain.
-        @return (bool): Success?
+        @return (bool): True on success
         """
         err = self._set_emccd_gain(gain)
-        if not err:
-            self._gain = gain
-        return err
+        if err:
+            return False
+        self._gain = gain
+        return True
 
     def get_gain(self):
         """ Get the electron multiplying gain
@@ -282,19 +294,16 @@ class IxonUltra(CameraInterface):
         @param: (int) hend: End column (inclusive)
         @param: (int) vstart: Start row (inclusive)
         @param: (int) vend: End row (inclusive).
-        @return: error code: ok = 0
+        @return: (bool) True on success
         """
         err = self._set_image(hbin, vbin, hstart, hend, vstart, vend)
-        if err:
-            return -1
-        else:
-            return 0
+        return not err
 
     def get_progress(self):
         """ Retrieves the total number of acquired images during a movie acquisition.
         @return: (int) progress: total number of acquired images.
         """
-        ret, index = self.sdk.GetTotalNumberImagesAcquired()
+        ret, index = self._sdk.GetTotalNumberImagesAcquired()
         err = self.check_error(ret, "get_progress")
         if err:
             return
@@ -361,8 +370,9 @@ class IxonUltra(CameraInterface):
 
     # Methods for displaying images on the GUI -------------------------------------------------------------------------
     def start_single_acquisition(self):
-        """ Start a single acquisition.
-        @return: (bool) return True if an error is detected
+        """ Start a single acquisition and block until it is finished (see camera_interface.py).
+        @return: (numpy.ndarray | None) the acquired 2D frame, or None if the camera is busy with a live
+        acquisition, or if the acquisition could not be started or the frame could not be retrieved.
         """
         # if self._shutter == 'Closed':
         #     err = self._set_shutter(1, 0, 100, 100, 1)
@@ -372,16 +382,20 @@ class IxonUltra(CameraInterface):
         #         self.log.error('Shutter did not open in start_single_acquisition.')
 
         if self._live:
-            return False
-        else:
-            # self._acquiring = True  # do we need this here?
-            self._set_acquisition_mode('SINGLE_SCAN')
-            err = self._start_acquisition()
-            return err
+            self.log.warning('start_single_acquisition: a live acquisition is already running.')
+            return None
+
+        # self._acquiring = True  # do we need this here?
+        self._set_acquisition_mode('SINGLE_SCAN')
+        err = self._start_acquisition()
+        if err:
+            self.log.error('start_single_acquisition: the acquisition could not be started.')
+            return None
+        return self.get_acquired_data()
 
     def start_live_acquisition(self):
         """ Start a continuous acquisition.
-        @return: (bool) return True if an error is detected
+        @return: (bool) True on success
         """
         # handle the variables indicating the status
         if self.support_live_acquisition():
@@ -398,7 +412,10 @@ class IxonUltra(CameraInterface):
 
         self._set_acquisition_mode('RUN_TILL_ABORT')
         err = self._start_acquisition()
-        return err
+        if err:
+            self._live = False
+            return False
+        return True
 
     def stop_acquisition(self):
         """ Stop/abort live or single acquisition
@@ -419,7 +436,7 @@ class IxonUltra(CameraInterface):
     def start_movie_acquisition(self, n_frames):
         """ Set the conditions to save a movie and start the acquisition (typically kinetic / fixed length mode).
         @param: (int) n_frames: number of frames
-        @return: (bool) Return True if an error is detected
+        @return: (bool) True on success
         """
         # handle the variables indicating the status
         if self.support_live_acquisition():
@@ -440,18 +457,21 @@ class IxonUltra(CameraInterface):
         self._set_number_kinetics(n_frames)
         self._scans = n_frames  # set this attribute to get the right dimension for get_acquired_data method
         err = self._start_acquisition()
-        return err
+        if err:
+            self._live = False
+            return False
+        return True
 
     def abort_movie_acquisition(self):
         """ Abort an acquisition.
-        @return: (bool) Error ?
+        @return: (bool) True on success
         """
         err = self._abort_acquisition()
         self._set_acquisition_mode(self._default_acquisition_mode)
         self._scans = 1
         self._live = False
         self._acquiring = False
-        return err
+        return not err
 
     def finish_movie_acquisition(self):
         """ Reset the conditions used to save a movie to default.
@@ -531,10 +551,12 @@ class IxonUltra(CameraInterface):
     # ----------------------------------------------------------------------------------------------------------------------
     # Methods for image data retrieval
     # ----------------------------------------------------------------------------------------------------------------------
-    def get_most_recent_image(self):
-        """ Return an array of last acquired image. Used mainly for live display on gui during video saving.
-        @return: (numpy array) image data in format [[row],[row]...]
-        Each pixel might be a float, integer or sub pixels
+    def get_most_recent_image(self, copy=True):
+        """ Return the last acquired image and the total number of images acquired so far. Used mainly for live
+        display on the GUI during a live or a movie acquisition (see camera_interface.py).
+        @param: (bool) copy: if True, return a copy of the image array rather than a reference to internal data
+        @return: (tuple (numpy.ndarray | None, int)) (image, frame_count); image is None if no frame could be
+        retrieved
         """
         width = self._width
         height = self._height
@@ -545,21 +567,25 @@ class IxonUltra(CameraInterface):
         # cimage_array = c_int * dim
         # cimage = cimage_array()
 
-        ret, arr = self.sdk.GetMostRecentImage16(dim)
+        ret, arr = self._sdk.GetMostRecentImage16(dim)
         err = self.check_error(ret, "GetMostRecentImage")
         if err:
             self.log.error("Impossible to get the most recent image!")
-            return np.zeros((self._height, self._width))
-        else:
-            image_array = np.reshape(arr, (self._height, self._width))
-            return image_array
+            return None, 0
+
+        image_array = np.reshape(arr, (self._height, self._width))
+        if copy:
+            image_array = image_array.copy()
+        frame_count = self.get_progress()
+        return image_array, (frame_count if frame_count is not None else 0)
 
     def get_acquired_data(self):
         """ Return an array of the acquired data.
         Depending on the acquisition mode, this can be just one frame (single scan, run_till_abort)
         or the entire data as a 3D stack (kinetic series)
-        @return: (numpy ndarray) image data in format [[row],[row]...]. Each pixel might be a float, integer or
-        sub-pixels
+        @return: (numpy.ndarray | None) image data in format [[row],[row]...] (or [n_frames, row, row...] for a
+        kinetic series). Each pixel might be a float, integer or sub-pixels. None if the acquisition mode/read mode
+        combination is not supported, or if the data could not be retrieved.
         """
         width = self._width
         height = self._height
@@ -588,28 +614,27 @@ class IxonUltra(CameraInterface):
             return
 
         if self._acquisition_mode == 'RUN_TILL_ABORT':
-            ret, arr = self.sdk.GetMostRecentImage(dim)
+            ret, arr = self._sdk.GetMostRecentImage(dim)
         else:
-            ret, arr = self.sdk.GetAcquiredData(dim)
+            ret, arr = self._sdk.GetAcquiredData(dim)
 
         err = self.check_error(ret, "get_acquired_data")
 
         if err:
-            self.log.warning("Could not retrieve an image... an empty image will be displayed.")
-            return np.zeros((self._height, self._width))
+            self.log.warning("Could not retrieve the acquired data.")
+            return None
+
+        # for i in range(dim):
+        #     # could be problematic for 'FVB' or 'SINGLE_TRACK' readmode
+        #     image_array[i] = arr[i]
+
+        if self._scans > 1:  # distinguish between 3D and 2D case
+            image_array = np.reshape(arr, (self._scans, self._height, self._width))
         else:
+            image_array = np.reshape(arr, (self._height, self._width))
 
-            # for i in range(dim):
-            #     # could be problematic for 'FVB' or 'SINGLE_TRACK' readmode
-            #     image_array[i] = arr[i]
-
-            if self._scans > 1:  # distinguish between 3D and 2D case
-                image_array = np.reshape(arr, (self._scans, self._height, self._width))
-            else:
-                image_array = np.reshape(arr, (self._height, self._width))
-
-            self._cur_image = image_array
-            return image_array
+        self._cur_image = image_array
+        return image_array
 
     # ==================================================================================================================
     # Non-Interface functions
@@ -638,7 +663,7 @@ class IxonUltra(CameraInterface):
         multiple error message are specific to this action.
         @return int: temperature
         """
-        ret, temperature = self.sdk.GetTemperature()
+        ret, temperature = self._sdk.GetTemperature()
         pass_returns = ['DRV_TEMPERATURE_STABILIZED', 'DRV_TEMPERATURE_NOT_REACHED', 'DRV_TEMPERATURE_DRIFT',
                         'DRV_TEMPERATURE_NOT_STABILIZED']
         self.check_error(ret, "get_temperature", pass_returns=pass_returns)
@@ -648,7 +673,7 @@ class IxonUltra(CameraInterface):
         """ Checks the status of the cooler.
         @return: (int) 0: cooler is off, 1: cooler is on
         """
-        ret, cooler_status = self.sdk.IsCoolerOn()
+        ret, cooler_status = self._sdk.IsCoolerOn()
         err = self.check_error(ret, "is_cooler_on")
         if err:
             self.log.error("The status of the cooler could not be retrieved.")
@@ -664,11 +689,11 @@ class IxonUltra(CameraInterface):
         acquisition actually starts.
         @return: err (bool): indicate if an error occured during the process
         """
-        ret = self.sdk.StartAcquisition()
+        ret = self._sdk.StartAcquisition()
         err = self.check_error(ret, "StartAcquisition in _start_acquisition")
 
         if (not err) and (self._trigger_mode == 'INTERNAL'):
-            ret = self.sdk.WaitForAcquisition()
+            ret = self._sdk.WaitForAcquisition()
             err = self.check_error(ret, "WaitForAcquisition in _start_acquisition")
         return err
 
@@ -679,12 +704,12 @@ class IxonUltra(CameraInterface):
     #     return ERROR_DICT[error_code]
 
     def _abort_acquisition(self):
-        ret = self.sdk.AbortAcquisition()
+        ret = self._sdk.AbortAcquisition()
         err = self.check_error(ret, "_abort_acquisition", pass_returns=['DRV_SUCCESS', 'DRV_IDLE'])
         return err
 
     def _shut_down(self):
-        ret = self.sdk.ShutDown()
+        ret = self._sdk.ShutDown()
         self.check_error(ret, "_shut_down")
 
     # ----------------------------------------------------------------------------------------------------------------------
@@ -703,7 +728,7 @@ class IxonUltra(CameraInterface):
                        1 - Open
                        2 - Close
         """
-        ret = self.sdk.SetShutterEx(typ, mode, closing_time, opening_time, ext_shutter)
+        ret = self._sdk.SetShutterEx(typ, mode, closing_time, opening_time, ext_shutter)
         err = self.check_error(ret, "_set_shutter")
         return err
 
@@ -711,7 +736,7 @@ class IxonUltra(CameraInterface):
         """
         @param time: (float) exposure duration in s
         """
-        ret = self.sdk.SetExposureTime(time)
+        ret = self._sdk.SetExposureTime(time)
         err = self.check_error(ret, "_set_exposuretime")
         return err
 
@@ -724,7 +749,7 @@ class IxonUltra(CameraInterface):
         """
         if hasattr(Read_Mode, mode):
             n_mode = getattr(Read_Mode, mode).value
-            ret = self.sdk.SetReadMode(n_mode)
+            ret = self._sdk.SetReadMode(n_mode)
             err = self.check_error(ret, "_set_read_mode")
 
             if mode == 'IMAGE':
@@ -766,7 +791,7 @@ class IxonUltra(CameraInterface):
         """
         if hasattr(Trigger_Mode, mode):
             n_mode = getattr(Trigger_Mode, mode).value
-            ret = self.sdk.SetTriggerMode(n_mode)
+            ret = self._sdk.SetTriggerMode(n_mode)
             err = self.check_error(ret, "_set_trigger_mode")
 
             if err:
@@ -788,7 +813,7 @@ class IxonUltra(CameraInterface):
         @param int vend: End row (inclusive).
         @return (bool) Return True if an error is detected
         """
-        ret = self.sdk.SetImage(hbin, vbin, hstart, hend, vstart, vend)
+        ret = self._sdk.SetImage(hbin, vbin, hstart, hend, vstart, vend)
         err = self.check_error(ret, "_set_image")
         if not err:
             self._hbin = hbin
@@ -805,20 +830,20 @@ class IxonUltra(CameraInterface):
         """
         @param index (int): indicate the preamp gain value
         """
-        ret = self.sdk.SetPreAmpGain(index)
+        ret = self._sdk.SetPreAmpGain(index)
         err = self.check_error(ret, "_set_preamp_gain")
         if not err:
-            ret, self._preamp_gain = self.sdk.GetPreAmpGain(index)
+            ret, self._preamp_gain = self._sdk.GetPreAmpGain(index)
             print(f'PreAmpGain was set to {self._preamp_gain}')
 
     def _set_vertical_shift_speed(self, index):
         """
         @param index (int): indicate the value of the default vertical shift speed
         """
-        ret = self.sdk.SetFKVShiftSpeed(index)
+        ret = self._sdk.SetFKVShiftSpeed(index)
         err = self.check_error(ret, "_set_vertical_shift_speed")
         if not err:
-            ret, self._vertical_shift_speed = self.sdk.GetFKVShiftSpeed(index)
+            ret, self._vertical_shift_speed = self._sdk.GetFKVShiftSpeed(index)
             self._vertical_shift_speed = float(self._vertical_shift_speed)
             print(f'The Vertical shift speed was set to {self._vertical_shift_speed}µs')
 
@@ -826,10 +851,10 @@ class IxonUltra(CameraInterface):
         """
         @param index (int): indicate the index associate to thevertical clock range selected
         """
-        ret = self.sdk.SetVSAmplitude(index)
+        ret = self._sdk.SetVSAmplitude(index)
         err = self.check_error(ret, "_set_vertical_clock")
         if not err:
-            ret = self.sdk.GetVSAmplitudeString(0)
+            ret = self._sdk.GetVSAmplitudeString(0)
             self._vertical_clock = ret[1].value.decode("utf-8")
             print(f'The vertical clock is set to {self._vertical_clock}')
 
@@ -837,7 +862,7 @@ class IxonUltra(CameraInterface):
         """
         @param index (int): indicate which amplifier output mode is selected. 0:EMCCD gain, 1:Conventional CCD register
         """
-        ret = self.sdk.SetOutputAmplifier(index)
+        ret = self._sdk.SetOutputAmplifier(index)
         err = self.check_error(ret, "_set_output_amplifier")
         if not err:
             self._output_amp = index
@@ -851,17 +876,17 @@ class IxonUltra(CameraInterface):
         """
         @param index (int): indicate the horizontal readout rate to use (0=30MHz; 1=20MHz; 2=10MHz; 3=1MHz)
         """
-        ret = self.sdk.SetHSSpeed(self._output_amp, index)
+        ret = self._sdk.SetHSSpeed(self._output_amp, index)
         err = self.check_error(ret, "_set_horizontal_readout_rate")
         if not err:
-            ret, self._set_horizontal_readout_rate = self.sdk.GetHSSpeed(0, self._output_amp, index)
+            ret, self._set_horizontal_readout_rate = self._sdk.GetHSSpeed(0, self._output_amp, index)
             print(f'The horizontal readout rate was set to {self._set_horizontal_readout_rate}MHz')
 
     def _set_temperature(self, temp):
         """ Sets a new temperature setpoint for the camera cooler
         @param: temp (int): temperature setpoint
         """
-        ret = self.sdk.SetTemperature(temp)
+        ret = self._sdk.SetTemperature(temp)
         self.check_error(ret, "_set_temperature")
 
     def _set_acquisition_mode(self, mode):
@@ -872,7 +897,7 @@ class IxonUltra(CameraInterface):
         """
         if hasattr(Acquisition_Mode, mode):
             n_mode = getattr(Acquisition_Mode, mode).value
-            ret = self.sdk.SetAcquisitionMode(n_mode)
+            ret = self._sdk.SetAcquisitionMode(n_mode)
             err = self.check_error(ret, "_set_acquisition_mode")
             if not err:
                 self._acquisition_mode = mode
@@ -885,9 +910,9 @@ class IxonUltra(CameraInterface):
         @return: error message
         """
         if state:
-            ret = self.sdk.CoolerON()
+            ret = self._sdk.CoolerON()
         else:
-            ret = self.sdk.CoolerOFF()
+            ret = self._sdk.CoolerOFF()
         self.check_error(ret, "_set_cooler")
 
     # modified jb : this mode was not accessible after modifications in 2024 due to artefacts in several experiments.
@@ -904,7 +929,7 @@ class IxonUltra(CameraInterface):
                              '\'FAST_KINETICs\'.')
             return True
         else:
-            ret = self.sdk.SetFrameTransferMode(transfer_mode)
+            ret = self._sdk.SetFrameTransferMode(transfer_mode)
             err = self.check_error(ret, "_set_frame_transfer")
             return err
 
@@ -924,7 +949,7 @@ class IxonUltra(CameraInterface):
         @param: (int) new gain value
         @return: (bool) return True if an error is detected
         """
-        ret = self.sdk.SetEMCCDGain(gain)
+        ret = self._sdk.SetEMCCDGain(gain)
         err = self.check_error(ret, "_set_emccd_gain")
         return err
 
@@ -946,7 +971,7 @@ class IxonUltra(CameraInterface):
                                      typical value = 10
         @return: err (bool) error message
         """
-        ret = self.sdk.SetSpool(active, method, name, framebuffersize)
+        ret = self._sdk.SetSpool(active, method, name, framebuffersize)
         err = self.check_error(ret, "_set_spool")
         return err
 
@@ -954,7 +979,7 @@ class IxonUltra(CameraInterface):
         """ set the number of scans for a kinetic series acquisition
         @param: (int) number of frames to acquire
         """
-        ret = self.sdk.SetNumberKinetics(number)
+        ret = self._sdk.SetNumberKinetics(number)
         self.check_error(ret, '_set_number_kinetics')
 
     def get_non_interfaced_parameters(self):
@@ -983,7 +1008,7 @@ class IxonUltra(CameraInterface):
                 DRV_SPOOLERROR - Overflow of the spool buffer.
         @return: (str) status of the camera
         """
-        ret, status_code = self.sdk.GetStatus()
+        ret, status_code = self._sdk.GetStatus()
         status = self.get_key_from_value(status_code)
         self.check_error(ret, "_get_status")
         return status
@@ -995,7 +1020,7 @@ class IxonUltra(CameraInterface):
         @returns: error message
                   nx_px, ny_px (int) : number of pixels along the width and height of the detector
         """
-        error_code, nx_px, ny_px = self.sdk.GetDetector()
+        error_code, nx_px, ny_px = self._sdk.GetDetector()
         self.check_error(error_code, "_get_detector")
         return nx_px, ny_px
 
@@ -1005,7 +1030,7 @@ class IxonUltra(CameraInterface):
         @return: (int) serial : return the camera serial number
                  (bool) err : return True if an error is detected
         """
-        ret, serial = self.sdk.GetCameraSerialNumber()
+        ret, serial = self._sdk.GetCameraSerialNumber()
         err = self.check_error(ret, "_get_camera_serialnumber")
         return err, serial
 
@@ -1016,7 +1041,7 @@ class IxonUltra(CameraInterface):
         Updates the private attributes _exposure, _accumulate, _kinetic
         @return: (str) error message
         """
-        ret, exposure, accumulate, kinetic = self.sdk.GetAcquisitionTimings()
+        ret, exposure, accumulate, kinetic = self._sdk.GetAcquisitionTimings()
         err = self.check_error(ret, "_get_acquisition_timings")
         if not err:
             self._exposure = exposure
@@ -1033,7 +1058,7 @@ class IxonUltra(CameraInterface):
         @return: (int) low: minimum value
         @return: (int) high: maximum value
         """
-        ret, low, high = self.sdk.GetEMGainRange()
+        ret, low, high = self._sdk.GetEMGainRange()
         err = self.check_error(ret, "_get_em_gain_range")
         if not err:
             return low, high
@@ -1046,11 +1071,10 @@ class IxonUltra(CameraInterface):
         Returns the current gain setting
         @return: (int) value of the gain
         """
-        ret, gain = self.sdk.GetEMCCDGain()
+        ret, gain = self._sdk.GetEMCCDGain()
         err = self.check_error(ret, "_get_emccd_gain")
         if not err:
             return gain
         else:
             self.log.error("Could not retrieve the value of the emCCD gain.")
             return None
-
