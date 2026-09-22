@@ -21,6 +21,23 @@ Modified with Claude code (Anthropic) - functionalities modified or added by Cla
                   camera change; the duplicated call of init_save_settings_ui in on_activate was removed.
   2026-09-22    : the display is fully reset at a camera change (image, rubberband, contrast controls, view fitted to the
                   size of the first image of the new camera, see _autorange_next_image in update_data).
+  2026-09-22    : removed the remaining Andor-only special-casing by camera name ('iXon Ultra 897'/'iXon Ultra 888')
+                  from the GUI, following the camera_interface.py / camera_logic.py changes of the same day:
+                  - exposure/kinetic-time label: _update_camera_setting_widgets and update_exposure used to each
+                    carry their own copy of the name check; factored into one _update_exposure_display, driven by
+                    camera_logic.get_cycle_time() vs get_exposure() instead (labelled "Cycle time (s):" only when
+                    they actually differ).
+                  - spooling: save_video_accepted, save_video_clicked and video_quickstart_clicked now check
+                    camera_logic.can_spool instead of the camera name; while at it, every branch now explicitly sets
+                    both self._video and self._spooling (the previous code sometimes only set one of the two, which
+                    could leave a stale flag from a previous camera/dialog state after the camera-switch feature was
+                    added).
+                  - metadata: 'kinetic_time_(s)' (Andor-only) replaced by 'cycle_time_(s)' (always recorded, from
+                    camera_logic.get_cycle_time) in _create_metadata_dict; this also fixes a crash in
+                    camera_logic.save_to_ome_tif, which read this key back out and multiplied it (delta_t = kinetic *
+                    i) without checking it was present - always None, hence a TypeError, for every non-Andor camera.
+                  get_non_interfaced_parameters is intentionally NOT touched here and stays gated by the camera name:
+                  it is genuinely Andor-only (not part of camera_interface.py) and out of scope for this round.
 -----------------------------------------------------------------------------------
 
 Qudi is free software: you can redistribute it and/or modify
@@ -468,16 +485,25 @@ class BasicImagingGUI(GuiBase):
         if has_gain:
             self._mw.gain_LineEdit.setText(str(self._camera_logic.get_gain()))
 
-    def _update_camera_setting_widgets(self):
-        """ Set the camera setting indicators (exposure or kinetic time, gain, temperature setpoint) from the logic. """
-        # use the kinetic time for andor camera, exposure time for all others
-        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (
-                self._camera_logic.get_name() == 'iXon Ultra 888'):
-            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_kinetic_time()))
-            self._mw.exposure_Label.setText('Kinetic time (s):')
+    def _update_exposure_display(self):
+        """ Set the read-only exposure_LineEdit/Label from the logic. Shown as "Cycle time" whenever the camera
+        reports a real time between frames (camera_logic.get_cycle_time) that differs from the requested exposure
+        (currently only the Andor camera, via its kinetic time - see camera_interface.get_cycle_time); "Exposure
+        time" otherwise. This replaces a name check on the camera ('iXon Ultra 897'/'iXon Ultra 888') that used to be
+        duplicated here and in update_exposure.
+        """
+        exposure = self._camera_logic.get_exposure()
+        cycle_time = self._camera_logic.get_cycle_time()
+        if abs(cycle_time - exposure) > 1e-9:
+            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(cycle_time))
+            self._mw.exposure_Label.setText('Cycle time (s):')
         else:
-            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_exposure()))
+            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(exposure))
             self._mw.exposure_Label.setText('Exposure time (s):')
+
+    def _update_camera_setting_widgets(self):
+        """ Set the camera setting indicators (exposure or cycle time, gain, temperature setpoint) from the logic. """
+        self._update_exposure_display()
 
         self._mw.gain_LineEdit.setText(str(self._camera_logic.get_gain()))
 
@@ -977,17 +1003,14 @@ class BasicImagingGUI(GuiBase):
         display = self._save_sd.enable_display_CheckBox.isChecked()
         metadata = self._create_metadata_dict(n_frames)
 
-        # For andor cameras, acquisition can be done in video or spool modes. For the andor camera 888, display does not
-        # work properly when the spooling mode is ON. Therefore, if display is ON, the acquisition mode is automatically
-        # switch to video.
-        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (self._camera_logic.get_name() == 'iXon Ultra 888'):
-            if not display and fileformat in ['.tif', '.fits']:
-                self._spooling = True
-                self._video = False
-            else:
-                self._spooling = False
-                self._video = True
+        # Spooling is only available on cameras that support it (camera_logic.can_spool - currently only the Andor
+        # camera), and only for the tif/fits formats. For the andor camera 888, display does not work properly when
+        # the spooling mode is ON. Therefore, if display is ON, the acquisition mode is automatically switch to video.
+        if self._camera_logic.can_spool and not display and fileformat in ['.tif', '.fits']:
+            self._spooling = True
+            self._video = False
         else:
+            self._spooling = False
             self._video = True
 
         # Depending on the number of images, several consecutive acquisitions will be required. Below, the acquisition
@@ -1099,7 +1122,7 @@ class BasicImagingGUI(GuiBase):
 
     def update_acquisition_time(self):
         """ Calculates the displayed acquisition duration given the number of frames indicated by the user. """
-        exp_time = float(self._mw.exposure_LineEdit.text())  # if andor cam is used, the kinetic_time is retrieved here
+        exp_time = float(self._mw.exposure_LineEdit.text())  # this is the cycle time if the camera reports one that differs from the exposure (see _update_exposure_display)
         n_frames = self._save_sd.n_frames_SpinBox.value()
         acq_time = exp_time * n_frames
         self._save_sd.acquisition_time_DoubleSpinBox.setValue(acq_time)
@@ -1107,7 +1130,7 @@ class BasicImagingGUI(GuiBase):
     def update_n_frames(self):
         """ Calcuates the number of frames given the selected total acquisition time,
         if the user prefers indicating the duration of the video to be saved. """
-        exp_time = float(self._mw.exposure_LineEdit.text())  # if andor cam is used, the kinetic_time is retrieved here
+        exp_time = float(self._mw.exposure_LineEdit.text())  # this is the cycle time if the camera reports one that differs from the exposure (see _update_exposure_display)
         acq_time = self._save_sd.acquisition_time_DoubleSpinBox.value()
         n_frames = int(round(acq_time / exp_time))
         self._save_sd.n_frames_SpinBox.setValue(n_frames)
@@ -1125,15 +1148,11 @@ class BasicImagingGUI(GuiBase):
 # updating elements on the camera dockwidget ---------------------------------------------------------------------------
     @QtCore.Slot()
     def update_exposure(self):
-        """ Updates the displayed value of exposure time in the corresponding read-only lineedit.
-        Indicates the kinetic time instead of the user defined exposure time in case of andor camera.
+        """ Updates the displayed value of exposure (or cycle) time in the corresponding read-only lineedit - see
+        _update_exposure_display.
         @return: None
         """
-        # indicate the kinetic time instead of the exposure time for andor ixon camera
-        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (self._camera_logic.get_name() == 'iXon Ultra 888'):
-            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_kinetic_time()))
-        else:
-            self._mw.exposure_LineEdit.setText('{:0.5f}'.format(self._camera_logic.get_exposure()))
+        self._update_exposure_display()
 
     @QtCore.Slot(float)
     def update_gain(self, gain):
@@ -1283,14 +1302,17 @@ class BasicImagingGUI(GuiBase):
     @QtCore.Slot()
     def save_video_clicked(self):
         """ Callback of save_video_Action. Handles toolbutton state, and opens the save settings dialog. Note that two
-        acquisition modes are available, depending on the type of cameras. Spooling only exists for andor.
+        acquisition modes are available, depending on the capabilities of the active camera: spooling only exists on
+        cameras that support it (camera_logic.can_spool - currently only the Andor camera).
         """
         # disable camera related toolbuttons
         self.disable_camera_toolbuttons()
         # set the flag to True so that the dialog knows that is was called from save video button
-        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (self._camera_logic.get_name() == 'iXon Ultra 888'):
+        if self._camera_logic.can_spool:
             self._spooling = True
+            self._video = False
         else:
+            self._spooling = False
             self._video = True
         # open the save settings window
         self.open_save_settings()
@@ -1304,17 +1326,15 @@ class BasicImagingGUI(GuiBase):
         Handles toolbutton state and calls the save_video_accepted method. """
         # disable camera related toolbuttons
         self.disable_camera_toolbuttons()
-        # decide depending on camera which signal has to be emitted in save_video_accepted method
-        # same approach can later be used to regroup save_video and save_long_video buttons into one action. Note that
-        # display does not work properly in spooling mode (at least for the 888 model). Therefore, when display is ON,
-        # the camera will acquire is video mode.
+        # decide depending on the camera's capabilities (camera_logic.can_spool) which signal has to be emitted in
+        # save_video_accepted method. Note that display does not work properly in spooling mode (at least for the
+        # 888 model). Therefore, when display is ON, the camera will acquire in video mode.
         display = self._save_sd.enable_display_CheckBox.isChecked()
-        if (self._camera_logic.get_name() == 'iXon Ultra 897') or (self._camera_logic.get_name() == 'iXon Ultra 888'):
-            if display:
-                self._video = True
-            else:
-                self._spooling = True
+        if self._camera_logic.can_spool and not display:
+            self._spooling = True
+            self._video = False
         else:
+            self._spooling = False
             self._video = True
         self.save_video_accepted()
 
@@ -1563,9 +1583,12 @@ class BasicImagingGUI(GuiBase):
         folder_name = self._save_sd.foldername_LineEdit.text()
         metadata = update_metadata(metadata, ['Acquisition', 'sample_name'], folder_name)
         metadata = update_metadata(metadata, ['Acquisition', 'exposure_time_(s)'], self._camera_logic.get_exposure())
+        # cycle_time_(s) is always recorded (camera_logic.get_cycle_time - defaults to the exposure time, see
+        # camera_interface.get_cycle_time); camera_logic.save_to_ome_tif relies on this key being present for every
+        # camera. get_non_interfaced_parameters, on the other hand, stays Andor-specific: it is only implemented by
+        # ixon_ultra_888.py and not part of CameraInterface.
+        metadata = update_metadata(metadata, ['Acquisition', 'cycle_time_(s)'], self._camera_logic.get_cycle_time())
         if (self._camera_logic.get_name() == 'iXon Ultra 897') or (self._camera_logic.get_name() == 'iXon Ultra 888'):
-            metadata = update_metadata(metadata, ['Acquisition', 'kinetic_time_(s)'],
-                                       self._camera_logic.get_kinetic_time())
             parameters = self._camera_logic.get_non_interfaced_parameters()
             for key, value in parameters.items():
                 metadata = update_metadata(metadata, ['Camera', 'specific_parameters', key], value)

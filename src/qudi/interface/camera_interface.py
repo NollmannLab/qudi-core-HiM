@@ -9,6 +9,11 @@ Modified with Claude code (Anthropic) - functionalities modified or added by Cla
   2026-09-21    : optional multi-camera methods get_available_cameras, get_active_camera, set_active_camera and
                   get_camera_type (defaults for a camera that is alone on the microscope).
   2026-09-22    : optional is_available (False if the camera could not be initialized).
+  2026-09-22    : optional get_cycle_time (default: get_exposure()), so that a camera whose acquisition cycle takes
+                  longer than the requested exposure (e.g. Andor's kinetic time) can report it generically, instead
+                  of camera_logic / basic_imaging_gui special-casing the Andor camera by name (see camera_logic and
+                  basic_imaging_gui for the corresponding changes). Spooling was intentionally NOT generalized here:
+                  it stays a hardware-specific, tif/fits-only mode of the Andor camera - see camera_logic.can_spool.
 
 Contract shared by all the camera hardware modules (Kinetix, ORCA, dummy, ...). camera_logic relies only on what is
 described here, so that it does not need to know which camera is connected.
@@ -52,6 +57,16 @@ class CameraInterface(Base):
     def get_exposure(self):
         """Return exposure time in seconds."""
         pass
+
+    def get_cycle_time(self):
+        """Return the real time elapsed between two consecutive frames, in seconds (optional).
+
+        On most cameras this is simply the exposure time, which is what the default implementation returns. On a
+        camera whose acquisition cycle includes extra overhead beyond the requested exposure (e.g. an EMCCD running
+        a kinetic series, where readout / frame-transfer time is added), override this method to report that real
+        value instead.
+        """
+        return self.get_exposure()
 
     @abstractmethod
     def set_gain(self, gain):

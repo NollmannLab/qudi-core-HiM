@@ -12,6 +12,9 @@ Created on Wed Nov 27 2024
 Last modified 2026-09-22: adapt hardware to qudi-core - make sure the code follows the format defined
   from the Interface and used for other cameras. In particular make sure that error handling
   follows the same rule everywhere : return True when success (Modified with Claude code)
+  Also added get_cycle_time (delegates to get_kinetic_time), implementing the new optional
+  CameraInterface.get_cycle_time so that camera_logic / basic_imaging_gui can ask for "the real time between
+  frames" generically instead of special-casing this camera by name.
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -22,6 +25,13 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 """
+# ======================================================================================================================
+# TODO (JB, 2026-09-22):
+#   - Spooling mode: make sure it is properly tested and only ever used when the user is specifically asking for it.
+#   - Check that live acquisition and movie acquisition both work properly full frame, without crashing the camera.
+#   - Test both of the above (spooling, live/movie acquisition) together with a ROI set, not only full frame.
+# ======================================================================================================================
+
 import numpy as np
 # from enum import Enum
 # from ctypes import *
@@ -374,12 +384,6 @@ class IxonUltra(CameraInterface):
         @return: (numpy.ndarray | None) the acquired 2D frame, or None if the camera is busy with a live
         acquisition, or if the acquisition could not be started or the frame could not be retrieved.
         """
-        # if self._shutter == 'Closed':
-        #     err = self._set_shutter(1, 0, 100, 100, 1)
-        #     if not err:
-        #         self._shutter = 'Open'
-        #     else:
-        #         self.log.error('Shutter did not open in start_single_acquisition.')
 
         if self._live:
             self.log.warning('start_single_acquisition: a live acquisition is already running.')
@@ -401,14 +405,6 @@ class IxonUltra(CameraInterface):
         if self.support_live_acquisition():
             self._live = True
             self._acquiring = False
-
-        # # make sure shutter is opened
-        # if self._shutter == 'Closed':
-        #     err = self._set_shutter(1, 1, 100, 100, 1)
-        #     if not err:
-        #         self._shutter = 'Open'
-        #     else:
-        #         self.log.error(f'Shutter did not open!')
 
         self._set_acquisition_mode('RUN_TILL_ABORT')
         err = self._start_acquisition()
@@ -442,14 +438,6 @@ class IxonUltra(CameraInterface):
         if self.support_live_acquisition():
             self._live = True
             self._acquiring = False
-
-        # # make sure shutter is opened
-        # if self._shutter == 'Closed':
-        #     msg = self._set_shutter(1, 1, 100, 100, 1)
-        #     if msg == 'DRV_SUCCESS':
-        #         self._shutter = 'Open'
-        #     else:
-        #         self.log.error('shutter did non open. {}'.format(msg))
 
         self._set_acquisition_mode('KINETICS')
         self.set_exposure(
@@ -648,15 +636,12 @@ class IxonUltra(CameraInterface):
         self._get_acquisition_timings()
         return self._kinetic
 
-    # def set_temperature(self, temp):
-    #     """ Set the temperature setpoint for the camera cooler
-    #     @param: temp (int): desired new temperature
-    #     """
-    #     ret = self._set_temperature(temp)
-    #     if msg == "DRV_SUCCESS":
-    #         return True
-    #     else:
-    #         return False
+    def get_cycle_time(self):
+        """ Implements the optional CameraInterface.get_cycle_time: the real time between two frames of a kinetic
+        series is the kinetic time, not the requested exposure (readout / frame-transfer overhead is added).
+        @return: (float) kinetic time in seconds
+        """
+        return self.get_kinetic_time()
 
     def get_temperature(self):
         """ Get the current temperature. Note this is one of the rare methods where the error is handled locally since
@@ -696,12 +681,6 @@ class IxonUltra(CameraInterface):
             ret = self._sdk.WaitForAcquisition()
             err = self.check_error(ret, "WaitForAcquisition in _start_acquisition")
         return err
-
-    # def wait_for_acquisition(self):
-    #     error_code = self.dll.WaitForAcquisition()
-    #     if ERROR_DICT[error_code] != 'DRV_SUCCESS':
-    #         self.log.info('non-acquisition event occured')
-    #     return ERROR_DICT[error_code]
 
     def _abort_acquisition(self):
         ret = self._sdk.AbortAcquisition()
@@ -762,28 +741,6 @@ class IxonUltra(CameraInterface):
 
         else:
             self.log.warning(f'{mode} readmode is not supported')
-
-        # check_val = 0
-        # if hasattr(ReadMode, mode):
-        #     n_mode = getattr(ReadMode, mode).value
-        #     n_mode = c_int(n_mode)
-        #     error_code = self.dll.SetReadMode(n_mode)
-        #     if mode == 'IMAGE':
-        #         self.log.debug("width:{0}, height:{1}".format(self._width, self._height))
-        #         msg = self._set_image(1, 1, 1, self._width, 1, self._height)
-        #         if msg != 'DRV_SUCCESS':
-        #             self.log.warning('{0}'.format(ERROR_DICT[error_code]))
-        #     # put the condition on error_code here
-        #     if ERROR_DICT[error_code] != 'DRV_SUCCESS':
-        #         self.log.warning('Readmode was not set: {0}'.format(ERROR_DICT[error_code]))
-        #         check_val = -1
-        #     else:
-        #         self._read_mode = mode
-        # else:
-        #     self.log.warning('{} readmode is not supported'.format(mode))
-        #     check_val = -1
-        #
-        # return check_val
 
     def _set_trigger_mode(self, mode):
         """
@@ -932,17 +889,6 @@ class IxonUltra(CameraInterface):
             ret = self._sdk.SetFrameTransferMode(transfer_mode)
             err = self.check_error(ret, "_set_frame_transfer")
             return err
-
-    # def _set_em_gain_mode(self, mode):
-    #     """ possible settings:
-    #         mode = 0: the em gain is controlled by DAQ settings in the range 0-255. Default mode
-    #         mode = 1: the em gain is controlled by DAQ settings in the range 0-4095.
-    #         mode = 2: Linear mode.
-    #         mode = 3: Real EM gain.
-    #     """
-    #     mode = c_int(mode)
-    #     error_code = self.dll.SetEMGainMode(mode)
-    #     return ERROR_DICT[error_code]
 
     def _set_emccd_gain(self, gain):
         """ allows to change the gain value. The allowed range depends on the gain mode currently used.

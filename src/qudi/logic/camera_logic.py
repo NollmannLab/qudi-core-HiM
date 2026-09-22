@@ -13,6 +13,17 @@ Modified with Claude code (Anthropic) - functionalities modified or added by Cla
                   select_camera, signal sigCameraChanged; on_activate split into on_activate and
                   _init_from_hardware (re-read at each camera change); cam_type read with get_camera_type.
   2026-09-22    : on_activate raises a clear error if the (single) camera is not available (is_available).
+  2026-09-22    : removed the Andor-only special-casing that was scattered through the GUI (get_name() ==
+                  'iXon Ultra 897'/'iXon Ultra 888') for two unrelated things:
+                  - kinetic time: get_kinetic_time (Andor-only) replaced by get_cycle_time, which now relies on the
+                    new optional CameraInterface.get_cycle_time (defaults to get_exposure() for every other camera) -
+                    refreshed in _init_from_hardware like get_exposure/get_gain/get_temperature, so it stays correct
+                    across a camera switch. _kinetic_time attribute renamed to _cycle_time accordingly.
+                  - spooling: new can_spool attribute (refreshed in _init_from_hardware, same pattern as has_gain /
+                    has_temp / has_shutter), True only if the active camera exposes set_spool - this stays a
+                    hardware-specific, tif/fits-only mode of the Andor camera, not a general CameraInterface method.
+                    start_spooling now checks can_spool itself and logs+returns instead of letting an unsupported
+                    camera raise AttributeError on set_spool.
 
 This module contains the logic to control a microscope camera.
 
@@ -205,6 +216,7 @@ class CameraLogic(LogicBase):
     has_shutter = False
     has_gain = False
     support_frame_transfer = False
+    can_spool = False  # True only if the active camera exposes set_spool (Andor-specific, tif/fits movies only)
     _fps = 20
     _exposure = 1.
     _gain = 1.
@@ -212,7 +224,7 @@ class CameraLogic(LogicBase):
     temperature_setpoint = _temperature
     _last_image = None
     _n_frames_prepared = None  # number of frames requested in prepare_camera_for_multichannel_imaging
-    _kinetic_time = None
+    _cycle_time = None  # real time between two frames, see get_cycle_time (may differ from _exposure)
     _max_frames_movie = None
     _max_frames_spool = None
 
@@ -248,7 +260,7 @@ class CameraLogic(LogicBase):
         self.cam_type = self._hardware.get_camera_type()
 
         self._last_image = None
-        self._kinetic_time = None
+        self._cycle_time = None
         self.has_temp = self._hardware.has_temp()
         if self.has_temp:
             self.temperature_setpoint = self._hardware._default_temperature
@@ -258,11 +270,15 @@ class CameraLogic(LogicBase):
         self.has_gain = self._hardware.has_gain()
         self.support_frame_transfer = self._hardware.support_frame_transfer()
         self.frame_transfer = False
+        # True only if the active camera happens to expose set_spool (currently only the Andor camera) - re-checked
+        # here so that switching to a camera without spooling support is detected right away (see start_spooling).
+        self.can_spool = hasattr(self._hardware, 'set_spool')
 
-        # update the private variables _exposure, _gain, _temperature
+        # update the private variables _exposure, _gain, _temperature, _cycle_time
         self.get_exposure()
         self.get_gain()
         self.get_temperature()
+        self.get_cycle_time()
 
         # inquire the maximum number of images to acquire for movies acquisition
         max_frames_dict = self._hardware.get_max_frames()
@@ -367,16 +383,15 @@ class CameraLogic(LogicBase):
         self._fps = min(1 / self._exposure, self._max_fps)
         return self._exposure
 
-    # this function is specific to andor camera
-    def get_kinetic_time(self):
-        """ andor camera only: Get the kinetic time of the camera and update the class attribute _kinetic_time.
-        @return: (float) kinetic time (in seconds)
+    def get_cycle_time(self):
+        """ Get the real time between two consecutive frames and update the class attribute _cycle_time (see
+        CameraInterface.get_cycle_time). On most cameras this is simply the exposure time; some cameras (currently
+        only the Andor iXon Ultra, via its kinetic time) report something longer because of readout / frame-transfer
+        overhead.
+        @return: (float) cycle time (in seconds)
         """
-        if (self.get_name() == 'iXon Ultra 897') or (self.get_name() == 'iXon Ultra 888'):
-            self._kinetic_time = self._hardware.get_kinetic_time()
-            return self._kinetic_time
-        else:
-            return
+        self._cycle_time = self._hardware.get_cycle_time()
+        return self._cycle_time
 
     def set_gain(self, gain):
         """ Set the gain of the camera. Inform the GUI that a new gain value was set.
@@ -935,6 +950,14 @@ class CameraLogic(LogicBase):
                 fileformat, or in the header if fits format)
         @param: (bool) addfile: indicate if the images are saved in a new folder or appended to the last created
         """
+        # spooling only exists on cameras that expose set_spool (currently only the Andor camera) - guard against a
+        # caller (GUI or a task) invoking this on a camera that does not support it, instead of letting set_spool
+        # raise AttributeError further down. See can_spool (refreshed in _init_from_hardware, so it stays correct
+        # across a camera switch).
+        if not self.can_spool:
+            self.log.error(f'start_spooling: the active camera ({self.get_name()}) does not support spooling.')
+            return
+
         # if self.live_enabled:  # live mode is on
         #     # store the state of live mode in a helper variable
         #     self.restart_live = True
@@ -1315,7 +1338,7 @@ class CameraLogic(LogicBase):
         # Read the parameters from the metadata
         acquisition = metadata.get('Acquisition', [])
         exposure = None
-        kinetic = None
+        cycle_time = None
         excitation_wavelength = []
 
         for item in acquisition:
@@ -1327,12 +1350,19 @@ class CameraLogic(LogicBase):
                     excitation_wavelength = int(excitation_wavelength[0].split()[0])
                 else:
                     excitation_wavelength = None
-            if 'kinetic_time_(s)' in item:
-                kinetic = item['kinetic_time_(s)']
+            if 'cycle_time_(s)' in item:
+                cycle_time = item['cycle_time_(s)']
+
+        # cycle_time_(s) is expected to always be in the metadata now (see basic_imaging_gui._create_metadata_dict),
+        # but fall back to the exposure time defensively in case an older metadata dict is passed in (this used to be
+        # the Andor-only key 'kinetic_time_(s)', which was simply absent - and therefore None here - for every other
+        # camera, making the delta_t computation below raise a TypeError).
+        if cycle_time is None:
+            cycle_time = exposure
 
         # Create the metadata
         Nframes, Lx, Ly = data.shape
-        planes = [Plane(delta_t=kinetic * i, delta_t_unit="s",
+        planes = [Plane(delta_t=cycle_time * i, delta_t_unit="s",
                         exposure_time=exposure, exposure_time_unit="s",
                         the_z=0, the_c=0, the_t=i)
                   for i in range(Nframes)]

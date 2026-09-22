@@ -66,6 +66,27 @@ Last updated: 2026-09-22
 - `basic_imaging_gui`: the display is fully reset when the camera is changed
   (image, rubberband, contrast controls, and the view is fitted to the size of
   the first image of the new camera).
+- Generalized the two remaining Andor-specific special cases that were
+  detected by matching the camera name (`get_name() ==
+  'iXon Ultra 897'/'iXon Ultra 888'`) in `basic_imaging_gui` and `camera_logic`
+  (2026-09-22), following JB's review of these special cases:
+  - `CameraInterface.get_cycle_time()` (optional, default:
+    `get_exposure()`): the real time elapsed between two consecutive frames,
+    for cameras whose acquisition cycle adds overhead beyond the requested
+    exposure (Andor's kinetic time). Overridden by the Andor iXon Ultra
+    (`get_cycle_time` delegates to the existing `get_kinetic_time`).
+  - `camera_logic.can_spool`: a capability flag (same pattern as `has_gain` /
+    `has_temp`), `True` only if the active camera exposes `set_spool`
+    (currently only the Andor iXon Ultra); refreshed in `_init_from_hardware`
+    so it stays correct across a camera switch. Spooling itself was
+    deliberately left out of `CameraInterface`: it is a hardware-specific,
+    tif/fits-only acquisition mode, not a capability every camera is expected
+    to have.
+- Added a TODO at the top of `ixon_ultra_888.py` (2026-09-22) as a reminder to:
+  test spooling thoroughly and make sure it is only used when the user
+  explicitly asks for it; check that live acquisition and movie acquisition
+  both work properly full-frame without crashing the camera; and test both of
+  these together with a ROI set, not only full frame.
 
 #### Changed
 
@@ -89,6 +110,24 @@ Last updated: 2026-09-22
 - Kinetix and ORCA: `set_image` and `start_movie_acquisition` now return
   `True` on success; `get_most_recent_image` returns `(None, 0)` when no frame
   is available; Kinetix `start_single_acquisition` returns `None` on failure.
+- `camera_logic`: `get_kinetic_time()` (Andor-only) replaced by
+  `get_cycle_time()`, which now relies on the new optional
+  `CameraInterface.get_cycle_time` (defaults to `get_exposure()` for every
+  other camera); `_kinetic_time` attribute renamed to `_cycle_time`
+  accordingly; `start_spooling` now checks `can_spool` itself and
+  logs-and-returns instead of letting an unsupported camera raise
+  `AttributeError` on `set_spool`.
+- `basic_imaging_gui`: the exposure/kinetic-time display (previously
+  duplicated in `_update_camera_setting_widgets` and `update_exposure`) was
+  factored into one helper, `_update_exposure_display`, driven by
+  `camera_logic.get_cycle_time()` (shown as "Cycle time" whenever it differs
+  from the exposure) instead of a name check on the camera. The three spots
+  that decided whether to use spooling (`save_video_accepted`,
+  `save_video_clicked`, `video_quickstart_clicked`) now use
+  `camera_logic.can_spool` instead of the camera name; while at it, every
+  branch now explicitly sets both `_video`/`_spooling` (previously only one of
+  the two flags was set in some branches, which could leave a stale flag after
+  a camera switch).
 - The dummy camera was rewritten as a time-based simulation (frames produced at
   the exposure rate, synthetic scene with orientation marker, ROI, live, movie,
   abort, no-live mode) following the same contract, so it can be used to test
@@ -151,6 +190,13 @@ Last updated: 2026-09-22
     references this camera yet, so nothing depended on the old behaviour.
     This closes the review shared with JB on 2026-09-22 - the module now
     fully satisfies the common camera contract (`camera_interface.py`).
+- `camera_logic.save_to_ome_tif`: fixed a crash (`TypeError`, `None * i`) that
+  occurred for every non-Andor camera, because the OME-TIFF metadata key it
+  read (`'kinetic_time_(s)'`) was only ever populated for the Andor camera.
+  `basic_imaging_gui._create_metadata_dict` now always records a generic
+  `'cycle_time_(s)'` key (from the new `camera_logic.get_cycle_time()`), and
+  `save_to_ome_tif` falls back to the exposure time if that key is still
+  missing from older saved metadata.
 
 ### Pipetting robot
 
