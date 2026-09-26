@@ -291,3 +291,47 @@ Last updated: 2026-09-22
 - Fixed cleanup of Fluigent adapter references during deactivation.
 - Fixed the valve-combobox callback so that both the valve number and selected
   position are passed correctly.
+
+### Task runner
+
+#### Fixed
+
+- `tasks/dummy_fluidics_task.py` (2026-09-24): removed a non-functional
+  `interrupt_task(name)` method that had been added directly to the `TestTask`
+  `ModuleTask`. It referenced `self._running_tasks` / `self._thread_lock`,
+  which belong to `TaskRunnerLogic`, not to a task - it would have raised
+  `AttributeError` if it had ever been called, and in fact nothing called it
+  (the GUI's stop button goes through `TaskRunnerLogic.interrupt_task`, not
+  through the task itself). This was most likely a confused attempt to port
+  the legacy qudi task-abort behaviour, which works very differently:
+  qudi-core tasks cannot be stopped from the outside - the task's own `_run()`
+  must call `self._check_interrupt()` regularly (as `TestTask._run()` already
+  correctly does, via `_interruptible_sleep()`) so that a pending
+  `self.interrupt()` request is noticed and unwinds the task, after which
+  `_cleanup()` always runs (here: returns the valve to its safe position).
+  This part was already correct and is unaffected by this fix.
+- `logic/taskrunner_logic.py`: `TaskRunnerLogic.interrupt_task()` used to be
+  completely silent; it now logs an info message when an interrupt is
+  requested for a running task, and an error message (before raising) when
+  asked to interrupt a task that isn't running, so that clicking "abort" in
+  the Task Runner GUI is now visible in the log console.
+- Verified with a mock test (thread-based, no Qt/qudi-core dependency) that
+  interrupting `TestTask` mid-run stops it before its next step, still runs
+  `_cleanup()` (valve back to the safe position), and that a normal
+  (non-interrupted) run is unaffected by any of the above.
+- `gui/task_runner/task_runner_gui.py` (2026-09-25): the above fixes were not
+  enough on real hardware - clicking "abort" still had no effect, and the
+  "Interrupt requested" log line always carried the same, late timestamp no
+  matter when the button was clicked, meaning the click was only reaching
+  `TaskRunnerLogic.interrupt_task` once the task had already finished on its
+  own. Confirmed against the installed `qudi-core==1.7.0` source
+  (`ModuleScript`/`ModuleTask`) that the flag-based interrupt mechanism itself
+  is implemented exactly as expected and would take effect immediately once
+  actually called - the problem was purely that the call was queued onto
+  `TaskRunnerLogic`'s own thread and not being processed in time. Changed the
+  `sigInterruptTask` connection from `QueuedConnection` to `DirectConnection`:
+  `interrupt_task` only touches state that is already protected by a lock (its
+  own `_running_tasks` dict, and the task's own interrupt flag), so there is no
+  need to marshal the call through that thread's event queue at all - a direct
+  call takes effect immediately regardless of what that queue is doing.
+  Awaiting confirmation from JB on real hardware.

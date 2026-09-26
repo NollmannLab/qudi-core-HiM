@@ -17,6 +17,17 @@ See the GNU Lesser General Public License for more details.
 
 You should have received a copy of the GNU Lesser General Public License along with qudi.
 If not, see <https://www.gnu.org/licenses/>.
+
+Modified for qudi-core-HiM (2026-09-25, Modified with Claude code): the interrupt (abort) button in
+  the Task Runner GUI had no effect on real hardware - a click was only ever processed by
+  TaskRunnerLogic.interrupt_task once the running task had already finished on its own, regardless
+  of when the button was clicked (confirmed on the dummy fluidics task: the "Interrupt requested"
+  log line always carried the same, late timestamp no matter when the click happened). Changed the
+  sigInterruptTask connection from QueuedConnection to DirectConnection - see the comment at that
+  line for why this is safe (interrupt_task only touches already-locked state). taskrunner_logic.py
+  and tasks/dummy_fluidics_task.py were not the source of this particular issue (their cooperative
+  interrupt / _check_interrupt logic already matches qudi-core 1.7.0 exactly) but were fixed
+  separately in the previous round (removed a non-functional interrupt_task method, added logging).
 """
 
 #from PySide6 import QtCore
@@ -46,7 +57,16 @@ class TaskRunnerGui(GuiBase):
         taskrunner = self._task_runner()
         self._mw = TaskMainWindow(tasks=taskrunner.configured_task_types)
         self._mw.sigStartTask.connect(taskrunner.run_task, QtCore.Qt.QueuedConnection)
-        self._mw.sigInterruptTask.connect(taskrunner.interrupt_task, QtCore.Qt.QueuedConnection)
+        # Interrupt is intentionally a DIRECT connection, not queued: TaskRunnerLogic.interrupt_task
+        # only ever touches state that is already protected by a lock (its own _running_tasks dict,
+        # and the task's own interrupt flag), so there is no need to marshal the call through
+        # TaskRunnerLogic's thread event queue - and on real hardware that queue was observed to sit
+        # behind the running task's own thread for its entire duration (an abort click was only ever
+        # processed once the task had already finished on its own), so the click never actually
+        # reached interrupt_task in time to have any effect. A direct call takes effect immediately,
+        # from whichever thread the click happened on, regardless of what TaskRunnerLogic's own
+        # thread is doing.
+        self._mw.sigInterruptTask.connect(taskrunner.interrupt_task, QtCore.Qt.DirectConnection)
         self._mw.sigClosed.connect(self._deactivate_self)
         taskrunner.sigTaskStarted.connect(self._mw.task_started, QtCore.Qt.QueuedConnection)
         taskrunner.sigTaskStateChanged.connect(self._mw.task_state_changed,

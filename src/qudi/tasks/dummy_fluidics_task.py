@@ -18,6 +18,16 @@ See the GNU Lesser General Public License for more details.
 
 You should have received a copy of the GNU Lesser General Public License along with qudi.
 If not, see <https://www.gnu.org/licenses/>.
+
+Modified for qudi-core-HiM (2026-09-24, Modified with Claude code): removed a non-functional
+  interrupt_task(name) method that had been added directly to TestTask - it referenced
+  self._running_tasks / self._thread_lock, which belong to TaskRunnerLogic, not to a ModuleTask, so
+  it would have raised AttributeError if it were ever called (it wasn't - nothing in the GUI or
+  taskrunner calls a task by that name). The actual, correct abort mechanism (self._check_interrupt()
+  / self._interruptible_sleep(), triggered by TaskRunnerLogic.interrupt_task -> self.interrupt()) was
+  already implemented correctly in _run() and is documented on the TestTask class docstring below.
+  Also added log messages so an abort is visible in the log console (interrupt flag detected,
+  cleanup running).
 """
 
 from typing import Iterable, Sequence, Mapping, Union, Any, Optional, Tuple
@@ -26,9 +36,24 @@ from time import monotonic, sleep
 
 from qudi.core.scripting.moduletask import ModuleTask
 from qudi.core.connector import Connector
-from qtpy import QtCore
+
 
 class TestTask(ModuleTask):
+    """Minimal fluidics task (one valve, three positions) used to validate that a ModuleTask can be
+    started and cleanly aborted from the Task Runner GUI.
+
+    Abort / interrupt, how it actually works in qudi-core (different from the legacy qudi task
+    model): there is no per-task "interrupt_task" method to define - a task cannot be interrupted
+    from the outside by force. Clicking the stop button in the Task Runner GUI calls
+    TaskRunnerLogic.interrupt_task(name) (see taskrunner_logic.py), which simply calls this task's
+    inherited self.interrupt() - that only sets a thread-safe flag, it does not touch the running
+    _run() call in any way. It is this task's own responsibility to notice that flag by calling
+    self._check_interrupt() regularly from within _run() (it raises ModuleScriptInterrupted, which
+    the base class catches to stop the task and run _cleanup()). Long blocking hardware calls
+    between two checks (or a wait implemented with a single sleep() instead of
+    _interruptible_sleep(), see below) cannot be interrupted while they are running - so every real
+    task must be written with frequent-enough checkpoints, not just this test one.
+    """
     valve = Connector(name='fluidics_valve', interface='FluidicsValveLogic')
     # robot = Connector(name='pipetting_robot', interface='FluidicsRobotLogic')
     # flow = Connector(name='fluidics_flow', interface='FluidicsFlowLogic')
@@ -40,18 +65,24 @@ class TestTask(ModuleTask):
 
     def _run(self, delay_s: float = 5.0) -> dict:
         self._check_interrupt()
+        self.log.info("Change position valve a to 2")
         self._valve.set_valve_position("a", 2)
         self._interruptible_sleep(delay_s)
 
         self._check_interrupt()
+        self.log.info("Change position valve a to 3")
         self._valve.set_valve_position("a", 3)
         self._interruptible_sleep(delay_s)
 
         self._check_interrupt()
+        self.log.info("Change position valve a to 1")
         self._valve.set_valve_position("a", 1)
 
     def _cleanup(self) -> None:
-        """Return the valve to a safe position."""
+        """Return the valve to a safe position. Called unconditionally by the base class once _run
+        finishes, raises, or is interrupted - including after an abort from the GUI.
+        """
+        self.log.info("TestTask: cleanup running (valve -> safe position).")
         valve = getattr(self, "_valve", None)
         if valve is not None:
             valve.set_valve_position("a", 1)
@@ -62,24 +93,13 @@ class TestTask(ModuleTask):
         deadline = monotonic() + duration_s
 
         while True:
+            if self.interrupted:
+                self.log.info("TestTask: interrupt flag detected, aborting the current step.")
             self._check_interrupt()
             remaining_s = deadline - monotonic()
             if remaining_s <= 0:
                 return
             sleep(min(poll_interval_s, remaining_s))
-
-    @QtCore.Slot(str)
-    def interrupt_task(self, name: str) -> None:
-        """Request interruption of a running task."""
-        with self._thread_lock:
-            task = self._running_tasks.get(name)
-
-            if task is None:
-                self.log.error(f'No ModuleTask with name "{name}" is running.')
-                return
-            self.log.info( f'Interrupt requested for ModuleTask "{name}".')
-            task.interrupt()
-            self.log.info(f"Task interruption flag: {task.interrupted}")
 
 
 class TestTask2(ModuleTask):

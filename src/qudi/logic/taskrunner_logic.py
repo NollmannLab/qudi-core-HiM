@@ -17,6 +17,13 @@ See the GNU Lesser General Public License for more details.
 
 You should have received a copy of the GNU Lesser General Public License along with qudi.
 If not, see <https://www.gnu.org/licenses/>.
+
+Modified for qudi-core-HiM (2026-09-24, Modified with Claude code): added logging to
+  interrupt_task() so that an abort request from the Task Runner GUI is visible in the log console
+  (it used to be silent) - no behavior change otherwise. This module's own abort mechanism was
+  already correctly implemented in qudi-core; see qudi.tasks.dummy_fluidics_task for what was
+  actually fixed there (a stray, non-functional interrupt_task() method that had been added directly
+  to a ModuleTask subclass, which is not how qudi-core tasks are interrupted).
 """
 
 from functools import partial
@@ -97,10 +104,21 @@ class TaskRunnerLogic(LogicBase):
             self._sigStartTask.emit(name, dict(arguments))
 
     def interrupt_task(self, name: str) -> None:
+        """Request that the running ModuleTask called "name" stops as soon as possible.
+
+        This only sets a flag on the task (see ModuleTask.interrupt / ModuleScript.interrupt in
+        qudi-core): the task itself must be checking that flag regularly from within its own _run()
+        (via self._check_interrupt(), typically through an interruptible wait - see
+        tasks/dummy_fluidics_task.py for an example) for this to have any visible effect. A task with
+        no interrupt checkpoints, or a long blocking hardware call between two checkpoints, will keep
+        running until it reaches the next one.
+        """
         with self._thread_lock:
             task = self._running_tasks.get(name, None)
             if task is None:
+                self.log.error(f'Cannot interrupt: no ModuleTask with name "{name}" is running.')
                 raise RuntimeError(f'No ModuleTask with name "{name}" running')
+            self.log.info(f'Interrupt requested for ModuleTask "{name}".')
             task.interrupt()
 
     @QtCore.Slot(str, dict)
