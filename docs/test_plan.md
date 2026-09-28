@@ -12,7 +12,7 @@ note the exact steps and stop before moving to the next section.
 
 Legend: `[ ]` untested, `[x]` passed, `[!]` failed / unexpected behaviour (add a note).
 
-Last updated: 2026-09-22
+Last updated: 2026-09-28
 
 ---
 
@@ -215,6 +215,63 @@ through it.
       deactivation was recently touched.
 - [ ] Reactivating afterwards re-initializes all channels correctly (no channel left registered
       twice, no stale handle).
+
+---
+
+## ROI scan task (spinning-disk, ZEN-synchronized)
+
+Applies to: `tasks/roi_multicolour_scan_sd_task.py` (`RoiScanTask`) and its two
+`hardware/interfuse_hardware/daq_trigger_sync.py` (`DaqTriggerSync`) instances - `zen_ready_sync`
+(one-time, watch-only "ZEN is ready" signal) and `zen_acquisition_sync` (per-ROI start/done
+handshake). This has been mock-tested (46 checks against fake hardware, see the devlog) but **not
+yet run against real hardware** - this section is prepared ahead of that, and is currently blocked
+on two items tracked in the devlog's TODO list: real digital I/O for `MccDAQ` (it only implements
+analog I/O so far) and wiring the two physical channel pairs into `Spinning_disk_config.cfg`. Work
+through it once both of those land.
+
+### 1. Ready handshake (`zen_ready_sync`, one-time, before the ROI loop)
+
+- [ ] With ZEN NOT yet armed (no experiment block selected / "Start Experiment" not clicked), start
+      the task - it should sit waiting, logging that it's waiting for ZEN, and NOT move the stage or
+      touch the first ROI yet.
+- [ ] Select the right experiment block and click "Start Experiment" in ZEN - the task proceeds to
+      the first ROI within one poll interval, with no manual qudi-side action needed.
+- [ ] Confirm qudi never writes anything to this channel (check on the DAQ, or with a scope if
+      available) - it's a one-way signal that ZEN raises; qudi only ever reads it.
+- [ ] Interrupt the task (stop button) while it is still waiting for ready - it stops promptly,
+      cleanup still runs (stage returns to the first ROI, GUI actions re-enabled), and no per-ROI
+      trigger was ever sent.
+
+### 2. Per-ROI handshake (`zen_acquisition_sync`)
+
+- [ ] For each ROI in the list: the stage moves to the correct physical position (cross-check
+      against the ROI list in the GUI) before the trigger is sent.
+- [ ] The start-trigger pulse is seen on the physical channel (scope/multimeter, or ZEN's own
+      indicator) and ZEN starts its acquisition for that ROI in response.
+- [ ] Once ZEN finishes that ROI's acquisition, the done signal is seen by qudi and the task moves
+      on to the next ROI without manual intervention.
+- [ ] If ZEN never raises the done signal (e.g. acquisition stuck), the task times out with a clear
+      error after `acquisition_timeout_s` rather than hanging indefinitely.
+
+### 3. Interrupt and resume
+
+- [ ] Interrupt the task mid-scan (stop button) after a few ROIs are done - it stops before the next
+      ROI starts, and cleanup returns the stage to the first ROI and resets its velocity.
+- [ ] Relaunch with `resume=True` on the same sample/ROI list - already-confirmed-done ROIs are
+      skipped entirely (no stage move, no trigger sent for them) and the run continues into the same
+      output directory.
+- [ ] Interrupt a run right after a trigger has been sent but before ZEN's done signal arrives -
+      relaunching with `resume=True` redoes that ROI in full (never resumes mid-handshake).
+- [ ] `resume=True` with no matching checkpoint on disk (fresh sample, or the previous run already
+      completed) falls back to a normal fresh run, with a warning logged explaining why.
+
+### 4. End-to-end
+
+- [ ] Run a full ROI list start to finish with ZEN actually acquiring images - confirm the number of
+      ZEN's saved files matches the number of ROIs, and qudi's own `movie_name.txt`/`parameters.yml`
+      sidecar files agree with what ZEN produced.
+- [ ] Confirm stage velocity is set to the scan value during the run and returned to the idle value
+      afterwards (cleanup), whether the run finished normally or was interrupted.
 
 ---
 
