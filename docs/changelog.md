@@ -197,6 +197,39 @@ Last updated: 2026-09-28
   `'cycle_time_(s)'` key (from the new `camera_logic.get_cycle_time()`), and
   `save_to_ome_tif` falls back to the exposure time if that key is still
   missing from older saved metadata.
+- Two bugs found by JB while running the multi-camera checklist on real
+  ORCA + Kinetix hardware (`docs/test_plan.md`, 2026-09-28 - everything else
+  in that round passed):
+  - **Kinetix `set_image()` cropped every ROI, including a "reset to full
+    sensor", by 1 pixel in both directions** (3199x3199 instead of
+    3200x3200). `hstart`/`vstart` are 1-based (first pixel = 1, the same
+    convention `camera_logic.py` uses for every camera - see ORCA's
+    `set_image` docstring), but were passed straight through to pyvcam's
+    0-based `set_roi()` (missing `- 1`), and the ROI size was computed as
+    `end - start` instead of `end - start + 1`. Fixed in `kinetix.py`;
+    `set_image` also assigned `self._width`/`self._height` from the wrong
+    (swapped) axis, which `get_acquired_data()`'s movie-buffer shape was
+    unwittingly relying on to come out in the right (height, width) order -
+    that buffer allocation was updated to match now that the swap is gone.
+    Not present on the ORCA, which already did the `- 1`/`+ 1` conversion
+    correctly.
+  - **The multi-camera selector showed a cryptic hardware-queried name**
+    (pyvcam's own model string for the Kinetix, the DCAM model/serial string
+    for the ORCA) instead of the `camera_name` given in the config file.
+    `CameraInterfuse._register_camera` builds the selector's display name
+    from `get_name()` (see `camera_interfuse.py`'s own docstring), and both
+    `kinetix.py` and `orca_flash4.py`'s `get_name()` queried the hardware
+    for an identifier instead of returning the already-existing
+    `camera_name` `ConfigOption` - the pattern `dummy_camera.py` and
+    `ixon_ultra_888.py` already used. Both now return `camera_name`
+    directly; the hardware-queried model/serial string is still logged once
+    at activation, for provenance.
+  - Verified with a new mock test (`t14_kinetix_roi_fix.py`, loading the real
+    `kinetix.py` against a faked pyvcam): the full-sensor reset now measures
+    exactly 3200x3200, a non-square ROI lands on the correct (non-swapped)
+    axis and reaches pyvcam's `set_roi()` with the correctly 0-based
+    coordinates, `get_name()` returns the configured name, and
+    `get_acquired_data()`'s buffer shape matches a non-square frame.
 
 ### Pipetting robot
 
@@ -469,12 +502,21 @@ Last updated: 2026-09-28
   JB's workflow~~ - resolved 2026-09-28: yes, keep it (see Tasks section
   above).
 
-*Cameras - real-hardware verification, pending JB's report:*
-- Confirm on real Kinetix hardware, following the `reset_rois()` fix
-  (2026-09-22, see Cameras > Fixed above): resetting to full sensor no longer
-  fails with "New ROI overlaps existing ROI"; ROI orientation is preserved
-  after a reset; the reset gives back the exact full sensor size (3200x3200),
-  not an off-by-one. JB said he'd check all three on 2026-09-28.
+*Cameras - real-hardware verification, updated 2026-09-28:*
+- ~~Confirm the `reset_rois()` "New ROI overlaps existing ROI" fix
+  (2026-09-22) works on real hardware~~ - confirmed by JB on both the Kinetix
+  and the ORCA (`docs/test_plan.md`); everything else in the multi-camera/
+  ROI/saving checklist passed too, except the two bugs below, found in the
+  same round.
+- Re-confirm on real Kinetix hardware that the full-sensor reset now
+  measures exactly 3200x3200 (was 3199x3199) - fixed above (see Cameras >
+  Fixed), mock-tested, but not yet re-checked on the instrument.
+- Re-confirm the multi-camera selector now shows the configured
+  `camera_name` (e.g. `widefield_camera` / `opm_camera_1`) instead of the
+  cryptic hardware string - also fixed above, not yet re-checked on the
+  instrument.
+- ROI orientation preserved after a reset - not explicitly reported back
+  yet, still open.
 
 *Other, not yet started:*
 - Apply the same checkpoint/resume/exception-based-interrupt design to

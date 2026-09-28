@@ -60,7 +60,13 @@ available; skip the ones you don't.
 ### 3. Region of interest (ROI)
 
 - [x] Set a ROI smaller than the full sensor - acquired images have the expected reduced size.
-- [x] Go back from a ROI to full frame - no error, image size is back to the full sensor.
+- [!] Go back from a ROI to full frame - no error, image size is back to the full sensor.
+      **2026-09-28, Kinetix**: no error, but the image came back as 3199x3199 instead of 3200x3200 -
+      `set_image()` was cropping every ROI (not just the full-sensor reset) by 1 pixel in both
+      directions: it passed the 1-based `hstart`/`vstart` straight through to pyvcam's 0-based
+      `set_roi()` (missing the `- 1` conversion) and sized the ROI as `end - start` (missing the
+      `+ 1`). Fixed in `kinetix.py`; not seen on the ORCA, which already did this conversion
+      correctly. Please re-tick once confirmed on real hardware.
 - [x] **Set a second, different ROI right after a first one (without going back to full frame in
       between)** - this used to fail on the Kinetix with "New ROI overlaps existing ROI"; confirm
       it now works cleanly.
@@ -116,7 +122,13 @@ available; skip the ones you don't.
 
 ### 7. Multi-camera switching (if more than one camera is configured behind the interfuse)
 
-- [x] All configured cameras appear in the camera selector.
+- [!] All configured cameras appear in the camera selector.
+      **2026-09-28**: they did, but the displayed names were the raw hardware-queried identifiers
+      (pyvcam's model string for the Kinetix, the DCAM model/serial string for the ORCA) rather than
+      the `camera_name` given in the config file, which JB found too cryptic. `get_name()` on both
+      cameras now always returns the configured `camera_name`; the hardware string is still logged
+      at activation for provenance. Please re-tick once confirmed the selector shows
+      `widefield_camera` / `opm_camera_1` (or whatever your config's `camera_name` values are).
 - [x] Switching the active camera while idle works and resets exposure, gain, ROI, contrast, and
       the displayed image to that camera's own defaults.
 - [x] Switching is refused (with a clear message, not a silent no-op) while an acquisition is

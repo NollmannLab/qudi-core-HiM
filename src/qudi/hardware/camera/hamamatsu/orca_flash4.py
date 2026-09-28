@@ -17,6 +17,9 @@ Modified with Claude code (Anthropic) - functionalities modified or added by Cla
                   get_most_recent_image returns (None, 0) when no frame is available.
   2026-09-22    : an activation failure is only logged (no error raised): new is_available method, so that the camera
                   can be left out of a camera interfuse.
+  2026-09-28    : get_name() now always returns the configured camera_name, instead of the DCAM model/serial string -
+                  the multi-camera selector (camera_interfuse.py) uses get_name() as the display name, and JB found the
+                  DCAM string too cryptic there. The model/serial is still logged, from on_activate, for provenance.
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -140,7 +143,6 @@ class HCam(CameraInterface):
     # camera attributes
     _camera = None
     _available = False  # True once the camera was successfully initialized in on_activate
-    _device_name = None  # model and serial number, read from the camera
     _width = 0  # current width
     _height = 0  # current height
     _full_width = 0  # maximum width of the sensor
@@ -193,6 +195,15 @@ class HCam(CameraInterface):
             self.log.error(f"Could not open the Hamamatsu camera. DCAM error: {error}")
             return
 
+        # Log the camera's own model/serial identification for provenance (the GUI displays the configured
+        # camera_name instead - see get_name()).
+        model = self._camera.dev_getstring(DCAM_IDSTR.MODEL)
+        camera_id_str = self._camera.dev_getstring(DCAM_IDSTR.CAMERAID)
+        if model is not False and camera_id_str is not False:
+            self.log.info(f"Camera #{self.camera_id}: MODEL={model}, CAMERAID={camera_id_str}")
+        else:
+            self._log_dcam_error('Reading the camera model and id')
+
         # Set the default parameters. Failures are logged by the setters but are not fatal.
         self.get_size()  # update the values _full_width, _full_height of the full sensor when starting the cam
         self._width = self._full_width
@@ -228,18 +239,12 @@ class HCam(CameraInterface):
 
     def get_name(self):
         """
-        Retrieve an identifier of the camera that the GUI can print.
-        @return: string: name for the camera (model and serial number)
+        Retrieve an identifier of the camera that the GUI can print (the configured camera_name, so
+        the multi-camera selector shows the name given in the config file rather than the DCAM
+        model/serial string - see on_activate, which logs that one for provenance).
+        @return: string: name for the camera
         """
-        if self._device_name is None:
-            model = self._camera.dev_getstring(DCAM_IDSTR.MODEL)
-            camera_id = self._camera.dev_getstring(DCAM_IDSTR.CAMERAID)
-            if model is False or camera_id is False:
-                self._log_dcam_error('Reading the camera model and id')
-                return self._camera_name
-            self._device_name = f"{model}_{camera_id}"
-            self.log.info(f"Camera #{self.camera_id}: MODEL={model}, CAMERAID={camera_id}")
-        return self._device_name
+        return self._camera_name
 
     def get_size(self):
         """

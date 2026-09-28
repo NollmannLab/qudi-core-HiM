@@ -16,6 +16,15 @@ Modified with Claude code (Anthropic) - functionalities modified or added by Cla
                   is available; set_image clears the previous ROI (reset_rois) before setting the new one.
   2026-09-22    : an activation failure is only logged (no error raised): new is_available method, so that the camera
                   can be left out of a camera interfuse; on_deactivate also works if the camera was not initialized.
+  2026-09-28    : fixed two bugs found by JB on real hardware:
+                  - set_image() cropped every ROI (including "reset to full sensor") by 1 pixel in both directions
+                    (3199x3199 instead of 3200x3200 on the full sensor): it passed the 1-based hstart/vstart straight
+                    through to pyvcam's 0-based set_roi() (missing "- 1"), and sized the ROI as end - start (missing
+                    "+ 1"). It also assigned self._width/self._height from the wrong (swapped) axis; get_acquired_data's
+                    buffer shape was relying on that swap to end up correctly ordered, so it was updated to match.
+                  - get_name() now always returns the configured camera_name, instead of pyvcam's own cryptic hardware
+                    model string - the multi-camera selector (camera_interfuse.py) uses get_name() as the display name.
+                    The pyvcam model string is still logged, from on_activate, for provenance.
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -106,6 +115,10 @@ class KinetixCam(CameraInterface):
                 self._camera = next(Camera.detect_camera())  # Use generator to find first camera.
                 self._camera.open()  # Open the camera.
 
+                # Log pyvcam's own hardware identification for provenance (the GUI displays the configured
+                # camera_name instead - see get_name()).
+                self.log.info(f'Camera detected by pyvcam: {pvc.get_cam_name(0)}')
+
                 self.get_size()  # update the values _weight, _height of the full sensor when starting the cam
                 self._width = self._full_width
                 self._height = self._full_height
@@ -152,10 +165,11 @@ class KinetixCam(CameraInterface):
 
     def get_name(self):
         """
-        Retrieve an identifier of the camera that the GUI can print.
+        Retrieve an identifier of the camera that the GUI can print (the configured camera_name, so
+        the multi-camera selector shows the name given in the config file rather than pyvcam's own
+        cryptic hardware model string - see on_activate for that one, logged for provenance).
         @return: string: name for the camera
         """
-        self._camera_name = pvc.get_cam_name(0)
         return self._camera_name
 
     def get_size(self):
@@ -231,19 +245,25 @@ class KinetixCam(CameraInterface):
         Sets a ROI on the sensor surface.
         @param: hbin: (int) number of pixels to bin horizontally
         @param: vbin: (int) number of pixels to bin vertically.
-        @param: hstart: (int) Start column
-        @param: hend: (int) End column
-        @param: vstart: (int) Start row
-        @param: vend: (int) End row
+        @param: hstart: (int) Start column (first column of the sensor = 1)
+        @param: hend: (int) End column (inclusive)
+        @param: vstart: (int) Start row (first row of the sensor = 1)
+        @param: vend: (int) End row (inclusive)
         @return: (bool) return True if the ROI was set, False if an error was detected
         """
         try:
-            self._width = int(vend - vstart)
-            self._height = int(hend - hstart)
+            self._width = int(hend) - int(hstart) + 1
+            self._height = int(vend) - int(vstart) + 1
             # pyvcam appends the new ROI to the existing ones when the sensor supports several ROIs, and raises
             # "New ROI overlaps existing ROI" - the previous ROI must be cleared first.
             self._camera.reset_rois()
-            self._camera.set_roi(vstart, hstart, self._height, self._width)
+            # pyvcam's set_roi(s1, p1, width, height) takes 0-based start coordinates (s1 = serial/column,
+            # p1 = parallel/row), while hstart/vstart here are 1-based (first pixel = 1, same convention as
+            # the other cameras - see camera_logic.py, which always calls this with hstart=vstart=1). The
+            # previous version passed hstart/vstart straight through (no "- 1") and sized the ROI as
+            # end - start (no "+ 1"), which together cropped every ROI - including a "reset to full sensor" -
+            # by 1 pixel in both directions (e.g. 3199x3199 instead of 3200x3200 on the Kinetix).
+            self._camera.set_roi(int(hstart) - 1, int(vstart) - 1, self._width, self._height)
             self.log.info(f'Set subarray: {self._height} x {self._width} pixels (rows x cols)')
             return True
         except Exception as e:
@@ -459,13 +479,13 @@ class KinetixCam(CameraInterface):
         If the camera status is not compatible with data retrieval (for example if the number of frame is too high the
         acquisition is aborted), the function returns None.
 
-        @return: (numpy ndarray) im_seq : data in format [n_frames, im_width, im_height]
+        @return: (numpy ndarray) im_seq : data in format [n_frames, im_height, im_width]
         """
         status = self._camera.check_frame_status()
 
         if (status == "FRAME_AVAILABLE") or (status == "READOUT_COMPLETE"):
             self.log.info(f'Loading {self.n_frames} frames ...')
-            im_seq = np.zeros((self.n_frames, self._width, self._height), dtype=np.uint16)
+            im_seq = np.zeros((self.n_frames, self._height, self._width), dtype=np.uint16)
             for frame in range(self.n_frames):
                 im, _, _ = self._camera.poll_frame(timeout_ms=1000, oldestFrame=True, copyData=False)
                 im_seq[frame, :, :] = im['pixel_data']
