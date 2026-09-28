@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-09-22
+Last updated: 2026-09-28
 
 ### Cameras
 
@@ -334,4 +334,154 @@ Last updated: 2026-09-22
   own `_running_tasks` dict, and the task's own interrupt flag), so there is no
   need to marshal the call through that thread's event queue at all - a direct
   call takes effect immediately regardless of what that queue is doing.
-  Awaiting confirmation from JB on real hardware.
+  Confirmed working by JB on real hardware.
+
+### Tasks
+
+#### Added
+
+- **Superseded same-day**: an earlier version of this entry (and of
+  `tasks/roi_multicolour_scan_sd_task.py` itself) ported the legacy ROI task's
+  autofocus handshake and per-plane laser/camera loop as well. JB clarified
+  that on the spinning-disk setup ZEN itself now drives z-stack acquisition,
+  autofocus, *and* image acquisition, and that the Lumencor is switched by a
+  dedicated TTL box that ZEN controls directly - none of that is qudi's job
+  any more. The task below replaces that version; it never shipped to JB or
+  was committed, so there is nothing to migrate away from.
+- `interface/trigger_sync_interface.py` + `hardware/interfuse_hardware/daq_trigger_sync.py`
+  (2026-09-26): new `TriggerSyncInterface` (`send_trigger()` /
+  `is_triggered()`) and its DAQ-backed implementation `DaqTriggerSync`, for a
+  single start/done trigger handshake with external acquisition software
+  (ZEN) over one named DAQ digital-output / digital-input channel pair. Mirrors
+  the existing `daq_pump_controller.py` pattern (one interfuse instance per
+  physical channel pair, connecting to `daq`) rather than having a task talk
+  to the `daq` connector directly - JB's call, matching how the pumps are
+  already wired. A setup that needs several independent handshakes (e.g. a
+  separate autofocus-start pair later on) connects a separate instance per
+  pair, same as `rinsing_pump`/`fluidics_pump` today.
+- `tasks/roi_multicolour_scan_sd_task.py` (2026-09-26): new qudi-core
+  `ModuleTask` translation of the legacy `tasks/ROI_multicolour_imaging_SD.py`,
+  scoped down to exactly two responsibilities per ROI: move the stage there,
+  then run one start/done trigger handshake with ZEN through the `sync`
+  connector (a `DaqTriggerSync` instance) and wait for it to confirm done. No
+  autofocus, laser control, or per-plane loop on qudi's side - see above. The
+  legacy file is untouched. Two deliberate differences from a straight port of
+  the parts that remain, discussed with JB beforehand:
+  - Interruption is exception-based (`self._check_interrupt()`, raising
+    `ModuleScriptInterrupted`), matching qudi-core's single-`_run()`-call
+    model, instead of manually threading `if not self.aborted` through every
+    subsequent block as the legacy `runTaskStep()` did (which is fragile - see
+    e.g. the legacy ROI task's own `runTaskStep()` return statement, which
+    forgets to `and not self.aborted`, unlike the HiM task's equivalent line).
+    `_cleanup()` is called unconditionally by the `ModuleTask` base whenever
+    `_run()` finishes, raises, or is interrupted, and always returns the stage
+    to the first ROI, resets the stage velocity, and re-enables the ROI GUI
+    actions.
+  - Resumability: an interrupted run can be relaunched with `resume=True` and
+    will skip every ROI already confirmed done by ZEN, continuing in the same
+    output directory, instead of requiring the whole ROI list to be redone.
+    Progress is checkpointed to a small YAML file next to the run's own
+    `save_path` (`.<sample_name>_roi_scan_checkpoint.yaml`, at a location
+    stable across runs so it can be found before any new directory is
+    created) after every ROI completes; a checkpoint marked `completed: true`
+    (or one that does not match the current sample name / ROI list) is not
+    resumed from, and `resume=True` with nothing valid to resume from falls
+    back to starting fresh (logged as a warning). An ROI only counts as done
+    once ZEN's own "done" trigger has been seen for it, so an ROI interrupted
+    mid-handshake is simply redone in full on the next launch, never resumed
+    partway.
+  - The metadata sidecar file (`parameters.yml`) is now purely descriptive
+    (sample name + each ROI's stage position) - it no longer records
+    `num_z_planes`/`imaging_sequence`, since ZEN now owns those parameters and
+    qudi never acts on them. Flagged as an assumption for JB to confirm or
+    override.
+  - **Resolved (2026-09-28)**: the open question above - JB confirmed the
+    one-time "ZEN ready" wait should be kept ("it allows us to make sure the
+    task is starting properly before moving to the first ROI") and, when
+    asked whether it should reuse the per-ROI start/done pair or a separate
+    channel, pointed to the legacy task: "two channels (7 and 8) were used to
+    monitor ZEN activity. Please keep the same structure." Implemented as a
+    genuinely separate, one-way channel pair, matching the legacy `OUT7_ZEN`
+    (ready, qudi only polls it, never triggers it) / `OUT8_ZEN` (per-ROI
+    done) structure:
+    - `DaqTriggerSync.trigger_channel` is now an optional `ConfigOption`
+      (`default=None`, was `missing='error'`); an instance configured with
+      only a `done_channel` is watch-only and its `send_trigger()` raises a
+      clear `RuntimeError` if ever called, rather than silently doing
+      nothing.
+    - `RoiScanTask` gained a second connector, `ready` (same
+      `TriggerSyncInterface`, a separate `DaqTriggerSync` instance backed by
+      the ready-only channel), and a new `_wait_for_ready()` step that runs
+      once, before the ROI loop, right after the stage/GUI setup and before
+      the run directory is created. Same no-timeout, interruptible-poll shape
+      as `_wait_for_done()`, since there is no way to bound how long the user
+      takes to select the right ZEN experiment block and click "Start
+      Experiment".
+    - Using a separate channel (rather than reusing the per-ROI start/done
+      pair as a generic ping) was a deliberate physical-safety choice: qudi
+      never writes to the ready channel, so this cannot cause ZEN to perform
+      a spurious acquisition while the task is only checking connectivity.
+  - Verified end-to-end with the mock test suite (46 checks, up from 37):
+    normal completion, mid-scan interrupt, resume skipping already-done ROIs
+    and reusing the same output directory, resume with no matching
+    checkpoint, the ZEN-timeout error path (reported as `RuntimeError`,
+    deliberately not treated as an interrupt), `DaqTriggerSync` itself
+    against a fake DAQ (including the new watch-only/no-`trigger_channel`
+    behaviour), a full integration run of the real task driven by two real
+    `DaqTriggerSync` instances (per-ROI `sync` + watch-only `ready`), the
+    task waiting through several `ready` polls before touching the ROI list,
+    and an interrupt fired while still waiting for `ready` (before any ROI is
+    touched) still running cleanup correctly.
+  - Also noted in passing while reading `laser_control_logic.py` (independent
+    of this task, which no longer touches the laser at all, but still a real,
+    contained defect worth fixing separately): `stop_laser_output()` checks
+    `if self.enabled:`, but `on_activate()` only ever sets a plain
+    `self.enabled = False` that nothing updates afterwards - the real state
+    lives in `self._enabled` (via `set_laser_enabled` / `set_laser_disabled`).
+    So `stop_laser_output()` currently never does anything, and would raise
+    (calling a `self.voltage_off()` that doesn't exist on the class) if
+    `self.enabled` were ever `True`.
+
+**TODO (tracked, updated 2026-09-28 - JB starting on these this week):**
+
+*ROI scan task / DAQ - blocks running on real spinning-disk hardware:*
+- Add real digital I/O to `hardware/daq/Measurement_Computing_daq.py`
+  (`MccDAQ`): it currently only implements analog I/O
+  (`write_named_ao`/`read_named_ai`); `create_taskhandle()` only handles
+  `"ao"`/`"ai"` and would raise for `"do"`/`"di"`. Needs the `uldaq` DIO device
+  API researched properly before writing (not guessed) - `NI_daq.py`'s
+  `write_named_do`/`read_named_di`/`pulse_named_do` is the target shape to
+  match. `dummy_daq.py` already has the full named DO/DI API, so the task and
+  interfuse are testable on dummy hardware without this.
+- Once the digital I/O above exists, wire the actual physical ZEN channels
+  into `Spinning_disk_config.cfg`'s `daq:` block (`do_channels`/`di_channels`)
+  and add the corresponding `logic:`/`task_runner:` entries - needs the
+  physical port/line identifiers from JB, not guessed here. **Now two
+  separate channel pairs to wire**, matching legacy `OUT7_ZEN`/`OUT8_ZEN`:
+  - `zen_ready_sync` (`DaqTriggerSync`, `done_channel` only) - the one-time,
+    watch-only "ZEN is ready" signal;
+  - `zen_acquisition_sync` (`DaqTriggerSync`, `trigger_channel` +
+    `done_channel`) - the per-ROI start/done handshake.
+  Both connect into `roi_scan`'s `sync`/`ready` connectors respectively (see
+  the updated config example in `tasks/roi_multicolour_scan_sd_task.py`'s
+  docstring).
+- ~~Decide whether the one-time "ZEN ready" handshake is actually needed for
+  JB's workflow~~ - resolved 2026-09-28: yes, keep it (see Tasks section
+  above).
+
+*Cameras - real-hardware verification, pending JB's report:*
+- Confirm on real Kinetix hardware, following the `reset_rois()` fix
+  (2026-09-22, see Cameras > Fixed above): resetting to full sensor no longer
+  fails with "New ROI overlaps existing ROI"; ROI orientation is preserved
+  after a reset; the reset gives back the exact full sensor size (3200x3200),
+  not an off-by-one. JB said he'd check all three on 2026-09-28.
+
+*Other, not yet started:*
+- Apply the same checkpoint/resume/exception-based-interrupt design to
+  `HiM_imaging_SD.py` once the ROI task above is validated on real or dummy
+  hardware, extending it to hybridization/photobleaching step-level and
+  per-ROI resume (skip completed injection steps except the last
+  imaging-buffer step, which is always redone; skip already-imaged ROIs),
+  per the design discussed with JB.
+- Fix the `self.enabled` / `self._enabled` bug in
+  `laser_control_logic.stop_laser_output()` noted above.
