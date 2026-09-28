@@ -447,7 +447,6 @@ class KinetixCam(CameraInterface):
         """
         try:
             frame, _, frame_count = self._camera.poll_frame(timeout_ms=1000, oldestFrame=False, copyData=copy)
-            self.log.info(f"Frame : {frame['pixel_data'].shape}")
             return frame['pixel_data'], frame_count
         except Exception as e:
             self.log.error(f"The following error was encountered in get_most_recent_image : {e}")

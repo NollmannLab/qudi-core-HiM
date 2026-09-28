@@ -24,55 +24,55 @@ available; skip the ones you don't.
 
 ### 1. Activation
 
-- [ ] Camera activates cleanly from a cold start (module `on_activate` with the camera powered on
+- [x] Camera activates cleanly from a cold start (module `on_activate` with the camera powered on
       and connected).
-- [ ] `is_available()` is `True` after a normal activation (check via the GUI: camera appears
+- [x] `is_available()` is `True` after a normal activation (check via the GUI: camera appears
       selectable / responsive).
 - [ ] Deactivate and reactivate the module without restarting qudi - no crash, no leftover "busy"
       state.
-- [ ] **Activation failure is handled gracefully**: physically disconnect the camera (or power it
+- [x] **Activation failure is handled gracefully**: physically disconnect the camera (or power it
       off) and activate anyway.
-  - [ ] The error is logged, qudi does **not** crash.
-  - [ ] If this camera is behind the multi-camera interfuse, the interfuse and the GUI still
+  - [x] The error is logged, qudi does **not** crash.
+  - [x] If this camera is behind the multi-camera interfuse, the interfuse and the GUI still
         activate normally with the *other* cameras, and the unavailable one is simply absent from
         the camera selector.
-  - [ ] If this is the *only* camera, activation of the logic/interfuse fails with a clear error
+  - [x] If this is the *only* camera, activation of the logic/interfuse fails with a clear error
         message (not a silent hang).
-  - [ ] Reconnect the camera and reactivate - it comes back normally.
+  - [x] Reconnect the camera and reactivate - it comes back normally.
 
 ### 2. Basic acquisition
 
-- [ ] Single-image acquisition (snap) works and displays a sensible image.
-- [ ] Live acquisition starts, streams images continuously, and stops cleanly.
-- [ ] **Live acquisition, full frame, left running for several minutes** - no crash, no frozen
+- [x] Single-image acquisition (snap) works and displays a sensible image.
+- [x] Live acquisition starts, streams images continuously, and stops cleanly.
+- [x] **Live acquisition, full frame, left running for several minutes** - no crash, no frozen
       image, no dropped connection to the camera. *(This is on the TODO list for the Andor camera
       specifically - see `ixon_ultra_888.py` header.)*
-- [ ] Movie/video acquisition of a fixed number of frames completes and all frames are present in
+- [x] Movie/video acquisition of a fixed number of frames completes and all frames are present in
       the saved file.
-- [ ] **Movie acquisition, full frame** - same crash/freeze check as live acquisition, full length
+- [x] **Movie acquisition, full frame** - same crash/freeze check as live acquisition, full length
       you'd actually use in an experiment, not just a handful of frames.
-- [ ] Setting exposure time changes the real acquisition rate/behaviour (sanity check with a
+- [x] Setting exposure time changes the real acquisition rate/behaviour (sanity check with a
       stopwatch or timestamps, not just that the GUI field accepts the value).
 - [ ] Setting gain (on cameras that support it) changes image brightness/noise as expected.
-- [ ] Stopping an acquisition mid-way (abort) leaves the camera in a state where you can
+- [x] Stopping an acquisition mid-way (abort) leaves the camera in a state where you can
       immediately start a new acquisition.
 
 ### 3. Region of interest (ROI)
 
-- [ ] Set a ROI smaller than the full sensor - acquired images have the expected reduced size.
-- [ ] Go back from a ROI to full frame - no error, image size is back to the full sensor.
-- [ ] **Set a second, different ROI right after a first one (without going back to full frame in
+- [x] Set a ROI smaller than the full sensor - acquired images have the expected reduced size.
+- [x] Go back from a ROI to full frame - no error, image size is back to the full sensor.
+- [x] **Set a second, different ROI right after a first one (without going back to full frame in
       between)** - this used to fail on the Kinetix with "New ROI overlaps existing ROI"; confirm
       it now works cleanly.
-- [ ] Live acquisition with a ROI set - runs without crashing (see TODO above: test ROI together
+- [x] Live acquisition with a ROI set - runs without crashing (see TODO above: test ROI together
       with live/movie, not only full frame).
-- [ ] Movie acquisition with a ROI set - runs without crashing and saved frames have the ROI size.
+- [x] Movie acquisition with a ROI set - runs without crashing and saved frames have the ROI size.
 - [ ] Spooling with a ROI set, if you use spooling on this camera (see Andor-specific section
       below).
 
 ### 4. Exposure / cycle time display (GUI)
 
-- [ ] For a camera where the acquisition cycle equals the exposure (Kinetix, ORCA, dummy): the GUI
+- [x] For a camera where the acquisition cycle equals the exposure (Kinetix, ORCA, dummy): the GUI
       exposure field is labelled "Exposure time" and shows the value you set.
 - [ ] For the Andor camera: the GUI field switches to "Cycle time" and shows a value slightly
       *longer* than the requested exposure once the kinetic/readout overhead is non-negligible
@@ -83,10 +83,10 @@ available; skip the ones you don't.
 
 ### 5. Saving
 
-- [ ] Save a single image / a short movie as OME-TIFF - completes without error, opens correctly in
+- [x] Save a single image / a short movie as OME-TIFF - completes without error, opens correctly in
       Fiji/ImageJ or your usual viewer, timestamps between frames look right.
-- [ ] Save as .fits (if used) - completes without error.
-- [ ] For non-Andor cameras specifically: confirm OME-TIFF saving no longer raises an error (this
+- [x] Save as .fits (if used) - completes without error.
+- [x] For non-Andor cameras specifically: confirm OME-TIFF saving no longer raises an error (this
       used to crash before the cycle-time metadata fix).
 
 ### 6. Andor iXon Ultra 888 - camera-specific checks
@@ -116,14 +116,14 @@ available; skip the ones you don't.
 
 ### 7. Multi-camera switching (if more than one camera is configured behind the interfuse)
 
-- [ ] All configured cameras appear in the camera selector.
-- [ ] Switching the active camera while idle works and resets exposure, gain, ROI, contrast, and
+- [x] All configured cameras appear in the camera selector.
+- [x] Switching the active camera while idle works and resets exposure, gain, ROI, contrast, and
       the displayed image to that camera's own defaults.
-- [ ] Switching is refused (with a clear message, not a silent no-op) while an acquisition is
+- [x] Switching is refused (with a clear message, not a silent no-op) while an acquisition is
       running, while saving, or during a synchronized multichannel acquisition.
-- [ ] After switching, camera-specific controls (temperature, shutter, gain, spooling) correctly
+- [x] After switching, camera-specific controls (temperature, shutter, gain, spooling) correctly
       show/hide for the newly active camera's capabilities.
-- [ ] If one configured camera fails to activate (see section 1), it is absent from the selector
+- [x] If one configured camera fails to activate (see section 1), it is absent from the selector
       but the others remain fully usable.
 
 ---
