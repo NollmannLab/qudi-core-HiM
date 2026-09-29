@@ -1,0 +1,27 @@
+experiment: roi_multicolor_scan
+
+description: Configure a multicolor Airyscan acquisition over a predefined ROI list.
+
+output_filename: roi_multicolor_scan_task_sd.yml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  dapi:
+    required: false
+    default: false
+
+  rna:
+    required: false
+    default: false
+
+  save_path:
+    required: true
+    default_from: default_path_imagedata
+
+  roi_list_path:
+    required: true
+    default: ""
