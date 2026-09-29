@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-09-28
+Last updated: 2026-09-29
 
 ### Cameras
 
@@ -280,9 +280,41 @@ Last updated: 2026-09-28
   hardware modules.
 - Generalized the DAQ pump controller so that the hardware module is not tied
   specifically to rinsing or fluidics applications.
+- Completed the MCC driver's `DaqInterface` implementation for named AO, AI
+  (on devices that provide AI), DO, and DI channels. MCC digital lines are
+  configured individually by bit, and each output is driven low immediately
+  after it is configured as an output. The USB-3104 API does not support
+  preloading the output latch before direction changes.
+- Aligned `DaqInterface.write_to_ao_channel`'s optional range argument with the
+  NI and dummy DAQ implementations, and clarified the digital read/write
+  contracts. The named AO methods used by the pump and laser interfuses remain
+  unchanged.
+- Added method docstrings throughout `Measurement_Computing_daq.py`, including
+  channel configuration formats, validation errors, low-level and named I/O
+  behavior, immediate DI sampling, and the timing of digital output pulses.
+- Split the ZEN DAQ trigger interfuse into `DaqTriggerOutput` and
+  `DaqTriggerInput`. Their options (`output_trigger_task` and
+  `input_trigger_task`) identify named tasks from the DAQ's configured DO/DI
+  mappings. Output pulses use the configured pulse width and return with the
+  line low; input sampling remains nonblocking so task-level polling retains
+  timeout and interruption handling. The former `DaqTriggerSync` interface and
+  implementation remain available for compatibility.
+- Added `TriggerOutputInterface` and `TriggerInputInterface`, updated the SD ROI
+  hardware interfaces and added `TriggerLogic`. The logic uses optional
+  connector lists, indexes connected trigger modules by their Qudi module names,
+  and forwards `send_trigger()` / `is_triggered()` calls. With exactly one
+  trigger of a direction, its name may be omitted; an absent or ambiguous
+  requested connection raises a descriptive error.
+- Updated the SD ROI task to connect to `TriggerLogic` rather than directly to
+  trigger hardware, and updated `Spinning_disk_config.cfg` to wire the logic to
+  output, completion-input, and ready-input modules while preserving its DAQ
+  channel assignments.
 
 #### Fixed
 
+- Removed the unsupported `set_port_initial_output_val` call from MCC DIO
+  initialization; USB-3100 devices expose per-bit direction and bit I/O, but
+  not that initial-output configuration operation.
 - Fixed DAQ channel-range parsing when ranges were provided using different
   configuration formats.
 - Fixed handling of MCC analog-output channels that share the same DAQ
@@ -475,29 +507,19 @@ Last updated: 2026-09-28
     (calling a `self.voltage_off()` that doesn't exist on the class) if
     `self.enabled` were ever `True`.
 
-**TODO (tracked, updated 2026-09-28 - JB starting on these this week):**
+**TODO (tracked, updated 2026-09-29):**
 
 *ROI scan task / DAQ - blocks running on real spinning-disk hardware:*
-- Add real digital I/O to `hardware/daq/Measurement_Computing_daq.py`
-  (`MccDAQ`): it currently only implements analog I/O
-  (`write_named_ao`/`read_named_ai`); `create_taskhandle()` only handles
-  `"ao"`/`"ai"` and would raise for `"do"`/`"di"`. Needs the `uldaq` DIO device
-  API researched properly before writing (not guessed) - `NI_daq.py`'s
-  `write_named_do`/`read_named_di`/`pulse_named_do` is the target shape to
-  match. `dummy_daq.py` already has the full named DO/DI API, so the task and
-  interfuse are testable on dummy hardware without this.
-- Once the digital I/O above exists, wire the actual physical ZEN channels
-  into `Spinning_disk_config.cfg`'s `daq:` block (`do_channels`/`di_channels`)
-  and add the corresponding `logic:`/`task_runner:` entries - needs the
-  physical port/line identifiers from JB, not guessed here. **Now two
-  separate channel pairs to wire**, matching legacy `OUT7_ZEN`/`OUT8_ZEN`:
-  - `zen_ready_sync` (`DaqTriggerSync`, `done_channel` only) - the one-time,
-    watch-only "ZEN is ready" signal;
-  - `zen_acquisition_sync` (`DaqTriggerSync`, `trigger_channel` +
-    `done_channel`) - the per-ROI start/done handshake.
-  Both connect into `roi_scan`'s `sync`/`ready` connectors respectively (see
-  the updated config example in `tasks/roi_multicolour_scan_sd_task.py`'s
-  docstring).
+- ~~Implement real digital I/O in `MccDAQ`~~ - completed 2026-09-29 using
+  the documented `uldaq` DIO API. Syntax and interface contract checks
+  pass, but `uldaq` and the USB-3104 are not available in the development
+  environment, so hardware verification remains open.
+- The current `Spinning_disk_config.cfg` has named ZEN trigger tasks configured
+  with the channel assignments supplied by JB, and the SD ROI task now uses
+  separate output and input interfaces. Add/verify the `logic:` and
+  `task_runner:` connections for this task and validate the actual wiring and
+  pulse timing on the spinning-disk hardware. The `DaqTriggerSync` combined
+  interfuse remains available to existing configurations.
 - ~~Decide whether the one-time "ZEN ready" handshake is actually needed for
   JB's workflow~~ - resolved 2026-09-28: yes, keep it (see Tasks section
   above).
