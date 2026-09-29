@@ -38,75 +38,63 @@ from typing import Optional
 from qudi.core.connector import Connector
 from qudi.core.configoption import ConfigOption
 from qudi.interface.daq_interface import DaqInterface
-from qudi.interface.trigger_sync_interface import TriggerSyncInterface
+from qudi.interface.trigger_sync_interface import TriggerInputInterface, TriggerOutputInterface
 
 
-class DaqTriggerSync(TriggerSyncInterface):
-    """Send a start trigger to, and detect a done trigger from, external acquisition software
-    through a generic DAQ.
+class DaqTriggerOutput(TriggerOutputInterface):
+    """Emit a finite trigger pulse through one configured named DAQ DO task.
 
-    One instance handles a single named trigger-out / trigger-in channel pair. Config example:
-
-    .. code-block:: yaml
-
-        zen_acquisition_sync:
-          module.Class: 'interfuse_hardware.daq_trigger_sync.DaqTriggerSync'
-          connect:
-            daq: 'daq'
-          options:
-            trigger_channel: 'zen_start'   # name of a do_channel configured on the connected daq
-            done_channel: 'zen_done'       # name of a di_channel configured on the connected daq
-            pulse_time: 0.1                 # seconds, passed to daq.pulse_named_do
-
-    ``trigger_channel`` and ``done_channel`` must match named ``do_channels`` / ``di_channels``
-    entries configured on the connected daq hardware module.
-
-    ``trigger_channel`` may be omitted for an instance that only ever needs to watch for a one-way
-    signal the external program raises on its own (e.g. a "ready" line) - ``send_trigger()`` then
-    raises ``RuntimeError`` if it is ever called on that instance:
-
-    .. code-block:: yaml
-
-        zen_ready_sync:
-          module.Class: 'interfuse_hardware.daq_trigger_sync.DaqTriggerSync'
-          connect:
-            daq: 'daq'
-          options:
-            done_channel: 'zen_ready'      # name of a di_channel configured on the connected daq
+    The ``output_trigger_task`` option is the semantic task name configured under the DAQ's
+    ``do_channels`` mapping, not a physical channel number. ``pulse_time`` controls the high
+    duration; the DAQ pulse operation returns the output low before this method returns.
     """
 
     daq = Connector(name='daq', interface='DaqInterface')
 
-    _trigger_channel = ConfigOption('trigger_channel', default=None)
-    _done_channel = ConfigOption('done_channel', missing='error')
+    _output_trigger_task = ConfigOption('output_trigger_task', missing='error')
     _pulse_time = ConfigOption('pulse_time', default=0.1, converter=float)
+    _daq: Optional[DaqInterface] = None
+
+    def on_activate(self) -> None:
+        """Connect to the configured DAQ module."""
+        self._daq = self.daq()
+
+    def on_deactivate(self) -> None:
+        """Release the DAQ module reference."""
+        self._daq = None
+
+    def send_trigger(self) -> None:
+        """Emit one configured-width pulse, ending low before returning."""
+        self._daq.pulse_named_do(
+            self._output_trigger_task, low=0, high=1, pulse_time=self._pulse_time
+        )
+
+
+class DaqTriggerInput(TriggerInputInterface):
+    """Sample one configured named DAQ DI task without blocking.
+
+    The ``input_trigger_task`` option is the semantic task name configured under the DAQ's
+    ``di_channels`` mapping, not a physical channel number. Waiting for a rising edge, timeout,
+    or task interruption belongs to the caller's polling loop.
+    """
+
+    daq = Connector(name='daq', interface='DaqInterface')
+
+    _input_trigger_task = ConfigOption('input_trigger_task', missing='error')
 
     _daq: Optional[DaqInterface] = None
 
     def on_activate(self) -> None:
-        """Connect to the DAQ backend."""
+        """Connect to the configured DAQ module."""
         self._daq = self.daq()
 
     def on_deactivate(self) -> None:
-        """Release the DAQ backend."""
+        """Release the DAQ module reference."""
         self._daq = None
 
-    def send_trigger(self) -> None:
-        """Emit a single start-trigger pulse on the configured output channel.
-
-        Raises:
-            RuntimeError: if this instance was configured without a trigger_channel (a watch-only
-                instance for a one-way signal - see class docstring).
-        """
-        if self._trigger_channel is None:
-            raise RuntimeError(
-                'This DaqTriggerSync instance has no trigger_channel configured - it can only be '
-                'used to poll is_triggered(), not to send a trigger.')
-        self._daq.pulse_named_do(self._trigger_channel, low=0, high=1, pulse_time=self._pulse_time)
-
     def is_triggered(self) -> bool:
-        """Return True if the configured input channel currently reports the "done" signal."""
-        value = self._daq.read_named_di(self._done_channel, num_samp=1)
+        """Return the current sampled input state, without waiting for a trigger."""
+        value = self._daq.read_named_di(self._input_trigger_task, num_samp=1)
         if hasattr(value, '__len__'):
             value = value[0]
         return bool(int(value))

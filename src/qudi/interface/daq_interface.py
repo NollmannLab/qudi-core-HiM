@@ -31,8 +31,13 @@ class DaqInterface(Base):
         pass
 
     @abstractmethod
-    def write_to_ao_channel(self, taskhandle, voltage, timeout=None, autostart=True):
-        """Write a scalar voltage to an analog-output channel."""
+    def write_to_ao_channel(self, taskhandle, voltage, voltage_range=None, timeout=None,
+                            autostart=True):
+        """Write a scalar voltage to an analog-output channel.
+
+        ``voltage_range`` is an optional backend-specific range descriptor. When
+        omitted, the driver should use the range stored with ``taskhandle``.
+        """
         pass
 
     @abstractmethod
@@ -42,12 +47,15 @@ class DaqInterface(Base):
 
     @abstractmethod
     def write_to_do_channel(self, taskhandle, num_samp, digital_write):
-        """Write one or more digital values to a digital-output channel."""
+        """Write one or more 0/1 values to a digital-output channel."""
         pass
 
     @abstractmethod
     def read_di_channel(self, taskhandle, num_samp):
-        """Read one or more digital values from a digital-input channel."""
+        """Read one or more digital values from a digital-input channel.
+
+        Drivers without buffered input may return repeated immediate samples.
+        """
         pass
 
     @abstractmethod
@@ -62,7 +70,7 @@ class DaqInterface(Base):
 
     @abstractmethod
     def write_named_do(self, task_name, value):
-        """Write a digital value to the configured digital-output task."""
+        """Write one 0/1 value to the configured digital-output task."""
         pass
 
     @abstractmethod

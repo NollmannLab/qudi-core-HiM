@@ -29,26 +29,19 @@ from abc import abstractmethod
 from qudi.core.module import Base
 
 
-class TriggerSyncInterface(Base):
-    """Interface for hardware providing a one-shot "send a start trigger / check for the done
-    trigger" handshake with an external program (e.g. ZEN) driving an acquisition.
-
-    A single instance represents one such handshake (one physical trigger-out / trigger-in channel
-    pair). A setup that needs several independent handshakes (e.g. a "start acquisition" pair and a
-    separate "start autofocus" pair) should connect a separate instance for each one, the same way
-    qudi-core-HiM already configures one DaqPumpController instance per physical pump.
-    """
+class TriggerOutputInterface(Base):
+    """Interface for hardware that emits a configured trigger pulse."""
 
     @abstractmethod
     def send_trigger(self) -> None:
-        """Emit a single start-trigger pulse on the configured output channel."""
+        """Emit a single trigger pulse and return after the pulse has ended."""
         pass
+
+
+class TriggerInputInterface(Base):
+    """Interface for hardware that samples a configured trigger input."""
 
     @abstractmethod
     def is_triggered(self) -> bool:
-        """Return True if the configured input channel currently reports the "done" signal.
-
-        This is a single, non-blocking read - callers that need to wait for it are expected to poll
-        this method themselves (checking for interruption between polls), not this interface.
-        """
+        """Return the current trigger input state without waiting for an edge."""
         pass
