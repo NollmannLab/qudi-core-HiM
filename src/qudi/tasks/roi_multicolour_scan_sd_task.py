@@ -11,10 +11,11 @@ Compared to the legacy task, the scope is deliberately much smaller, per discuss
 itself are all handled by ZEN; the Lumencor laser source is switched by a dedicated TTL box that ZEN
 also controls directly. None of that is qudi's job any more. This task's only two responsibilities
 are: (1) move the stage to each ROI in turn, and (2) tell ZEN when to start imaging that ROI and wait
-for ZEN to confirm it is done - one start/done trigger handshake per ROI, via the DaqTriggerSync
-interfuse (hardware/interfuse_hardware/daq_trigger_sync.py) rather than talking to the daq hardware
-module directly. There is no per-plane loop, no laser control, and no autofocus handshake in this
-task at all.
+for ZEN to confirm it is done - one start/done trigger handshake per ROI, via TriggerLogic, which
+forwards requests to separate TriggerOutputInterface and TriggerInputInterface hardware modules
+(hardware/interfuse_hardware/daq_trigger_sync.py). The task does not connect directly to trigger
+hardware or the DAQ module. There is no per-plane loop, no laser control, and no autofocus handshake
+in this task at all.
 
 Two other things carried over/changed from the legacy design, matching the interrupt/resume work
 already done on the taskrunner (see taskrunner_logic.py, tasks/dummy_fluidics_task.py):
@@ -76,8 +77,7 @@ class RoiScanTask(ModuleTask):
             module.Class: 'qudi.tasks.roi_multicolour_scan_sd_task.RoiScanTask'
             connect:
               roi: roi_logic
-              sync: zen_acquisition_sync
-              ready: zen_ready_sync
+              trigger_logic: trigger_logic
             options:
               path_to_user_config: '/home/him_spinning/qudi_task_config_files/roi_scan_task_sd.yml'
               acquisition_timeout_s: 120.0   # max time to wait for ZEN's "done" trigger on one ROI
@@ -85,11 +85,12 @@ class RoiScanTask(ModuleTask):
               scan_stage_velocity: {'x': 1, 'y': 1}
               idle_stage_velocity: {'x': 6, 'y': 6}
 
-    ``sync`` must be a DaqTriggerSync (or other TriggerSyncInterface) instance already configured
-    with the per-ROI ZEN start/done channel pair, and ``ready`` a separate instance configured with
-    only the one-way "ZEN is ready" channel (no trigger_channel) - see
-    hardware/interfuse_hardware/daq_trigger_sync.py. These are two distinct channel pairs, matching
-    the legacy task's OUT7_ZEN (ready) / OUT8_ZEN (per-ROI done) structure.
+    ``trigger_logic`` must be a TriggerLogic instance connected to the required trigger hardware.
+    The task addresses its output and input modules by their configured Qudi module names:
+    ``trigger_ZEN_start_block``, ``trigger_ZEN_block_finished``, and ``trigger_ZEN_ready``. These
+    hardware modules in turn use named DAQ tasks rather than raw channel numbers - see
+    hardware/interfuse_hardware/daq_trigger_sync.py. The ready and per-ROI completion inputs
+    preserve the legacy task's OUT7_ZEN / OUT8_ZEN structure.
 
     User config file (path_to_user_config) expected keys:
         sample_name: 'Mysample'
@@ -106,20 +107,17 @@ class RoiScanTask(ModuleTask):
     """
 
     roi = Connector(name='roi', interface='RoiLogic')
-    sync = Connector(name='sync', interface='TriggerSyncInterface')
-    ready = Connector(name='ready', interface='TriggerSyncInterface')
+    trigger_logic = Connector(name='trigger_logic', interface='TriggerLogic')
+
+    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/roi_multicolor_scan_task_sd.yml'
+    acquisition_timeout_s = 120.0  # max time to wait for ZEN's "done" trigger on one ROI
+    poll_interval_s = 0.1
+    scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/S
+    idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}
 
     def _setup(self) -> None:
         self._roi = self.roi()
-        self._sync = self.sync()
-        self._ready = self.ready()
-
-        opts = self.config
-        self.user_config_path = opts['path_to_user_config']
-        self.acquisition_timeout_s = opts.get('acquisition_timeout_s', 120.0)
-        self.poll_interval_s = opts.get('poll_interval_s', 0.1)
-        self.scan_stage_velocity = opts.get('scan_stage_velocity', {'x': 1, 'y': 1})
-        self.idle_stage_velocity = opts.get('idle_stage_velocity', {'x': 6, 'y': 6})
+        self._trigger_logic = self.trigger_logic()
 
         self.sample_name = None
         self.is_dapi = False
@@ -240,7 +238,7 @@ class RoiScanTask(ModuleTask):
         self._check_interrupt()
 
         self.log.info(f'Triggering ZEN acquisition for {roi_name}')
-        self._sync.send_trigger()
+        self._trigger_logic.send_trigger('trigger_ZEN_start_block')
         self._wait_for_done()
         self.log.info(f'{roi_name}: acquisition confirmed done by ZEN.')
 
@@ -249,8 +247,8 @@ class RoiScanTask(ModuleTask):
     def _wait_for_ready(self) -> None:
         """One-time wait, before the ROI loop starts, for ZEN's own "ready" signal - a separate,
         one-way channel that ZEN raises once armed (matching the legacy task's OUT7_ZEN). qudi never
-        sends anything on this channel (see self._ready / the 'ready' connector), only polls it, so
-        this cannot cause ZEN to perform a spurious acquisition.
+        sends anything on this channel (see the ``trigger_ZEN_ready`` input registered with
+        TriggerLogic), only polls it, so this cannot cause ZEN to perform a spurious acquisition.
 
         No timeout, deliberately, same as the legacy task: the user has to manually select the right
         ZEN experiment block and click "Start Experiment" first, which can take an arbitrary amount
@@ -258,13 +256,13 @@ class RoiScanTask(ModuleTask):
         """
         while True:
             self._check_interrupt()
-            if self._ready.is_triggered():
+            if self._trigger_logic.is_triggered('trigger_ZEN_ready'):
                 return
             sleep(self.poll_interval_s)
 
     def _wait_for_done(self) -> None:
-        """Poll the sync interfuse's "done" signal until it appears, checking for interruption on
-        every poll via self._check_interrupt().
+        """Poll the trigger input interfuse's "done" signal until it appears, checking for
+        interruption on every poll via self._check_interrupt().
 
         If self.acquisition_timeout_s is exceeded, raises RuntimeError - this is a real ZEN
         synchronization problem, not a user-requested interrupt, so it is deliberately NOT reported
@@ -274,7 +272,7 @@ class RoiScanTask(ModuleTask):
         deadline = monotonic() + self.acquisition_timeout_s
         while True:
             self._check_interrupt()
-            if self._sync.is_triggered():
+            if self._trigger_logic.is_triggered('trigger_ZEN_block_finished'):
                 return
             if monotonic() > deadline:
                 raise RuntimeError(
@@ -326,6 +324,8 @@ class RoiScanTask(ModuleTask):
         """Load the user-defined experiment parameters (sample name, ROI list, ...) from the YAML
         file at self.user_config_path. See class docstring for the expected keys.
         """
+
+        self.log.warning(self.user_config_path)
         with open(self.user_config_path, 'r') as stream:
             user_param_dict = yaml.safe_load(stream)
 
