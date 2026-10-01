@@ -255,8 +255,13 @@ class RoiScanTask(ModuleTask):
         self.log.info(f'{roi_name}: autofocus confirmed done by ZEN.')
 
         sleep(2)
-        self._laser_logic.set_laser_enabled()
-        self._laser_logic.set_laser_disabled()
+        # confirm the laser source itself is ready (e.g. wake the Celesta from standby) without
+        # actually enabling any line - see LaserControlLogic.ensure_ready(). The previous
+        # set_laser_enabled()/set_laser_disabled() pair reached ensure_ready() too, but also briefly
+        # turned every allowed line on (enable_all_lines(), with the intensities already loaded in
+        # _load_user_parameters()) and back off again - a real, if brief, physical emission pulse
+        # on the DAQ-controlled source that had nothing to do with checking readiness.
+        self._laser_logic.ensure_ready()
 
         self.log.info(f'Triggering ZEN acquisition for {roi_name}')
         self._trigger_logic.send_trigger('trigger_ZEN_start_block')

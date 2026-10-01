@@ -252,7 +252,12 @@ class ExpConfigLogic(LogicBase):
         self.lasers = []
         if self._laser_logic is not None:
             laser_dict = self._laser_logic.laser_dict
-            self.lasers = [wavelength for wavelength in laser_dict]
+            # only the wavelengths allowed by the configured dichroic (laser_dict[...]['allowed'],
+            # itself built from optical_path['dichroic_allowed_wavelengths_nm'] - see
+            # laser_control_logic.on_activate) should be offered here, same as basic_imaging_gui's
+            # own laser selector already does.
+            self.lasers = [wavelength for wavelength, properties in laser_dict.items()
+                           if properties['allowed']]
 
         self.filters = []
         if self._filter_logic  is not None:

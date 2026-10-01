@@ -148,6 +148,21 @@ class LaserControlLogic(LogicBase):
         self._enabled = False
         self._laser.disable_all_lines()
 
+    @QtCore.Slot()
+    def ensure_ready(self) -> None:
+        """Make sure the laser source itself is ready for controlled output, without enabling or
+        disabling any line and without touching self._enabled.
+
+        This is the standalone version of the first step set_laser_enabled() already performs -
+        useful for a task (or anything else) that only needs to confirm the source is ready (e.g.
+        before a ZEN-triggered acquisition where emission itself is switched some other way) without
+        going through the enable/disable pair, which also flips every configured line's state. What
+        this actually does is hardware-dependent (LaserControlInterface.ensure_ready): a no-op for
+        the DAQ-controlled source, or waking the Lumencor Celesta from standby and waiting until it
+        reports ready - see the respective hardware modules.
+        """
+        self._laser.ensure_ready()
+
     def reset_laser_intensities(self):
         """Set the intensity of all laser to zero - this method is called when the filter
         is changed on the filterwheel
