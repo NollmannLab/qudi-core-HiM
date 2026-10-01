@@ -207,8 +207,8 @@ class ExpConfigLogic(LogicBase):
 
     # define connectors to logic modules
     camera_logic = Connector(name='camera_logic', interface='CameraLogic', optional=True)
-    laser_logic = Connector(name='laser_logic', interface='LaserControlLogic', optional=True)
-    filter_logic = Connector(name='filter_logic', interface='FilterWheelLogic', optional=True)
+    laser_logic = Connector(interface='LaserControlLogic', optional=True)
+    filter_logic = Connector(interface='FilterWheelLogic', optional=True)
 
     # signals
     sigConfigDictUpdated = QtCore.Signal()

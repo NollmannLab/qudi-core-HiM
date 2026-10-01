@@ -28,11 +28,6 @@ fields:
     required: true
     default_from: default_path_imagedata
 
-  num_z_planes:
-    required: true
-    default: 1
-    minimum: 1
-
   roi_list_path:
     required: true
     default: ""

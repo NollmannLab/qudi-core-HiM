@@ -106,8 +106,9 @@ class RoiScanTask(ModuleTask):
     scratch, same as resume=False.
     """
 
-    roi = Connector(name='roi', interface='RoiLogic')
-    trigger_logic = Connector(name='trigger_logic', interface='TriggerLogic')
+    roi_logic = Connector(interface='RoiLogic')
+    trigger_logic = Connector(interface='TriggerLogic')
+    laser_logic = Connector(interface='LaserControlLogic')
 
     user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/roi_multicolor_scan_task_sd.yml'
     acquisition_timeout_s = 120.0  # max time to wait for ZEN's "done" trigger on one ROI
@@ -116,8 +117,9 @@ class RoiScanTask(ModuleTask):
     idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}
 
     def _setup(self) -> None:
-        self._roi = self.roi()
+        self._roi_logic = self.roi_logic()
         self._trigger_logic = self.trigger_logic()
+        self._laser_logic = self.laser_logic()
 
         self.sample_name = None
         self.is_dapi = False
@@ -128,6 +130,7 @@ class RoiScanTask(ModuleTask):
         self.prefix = None
         self.directory = None
         self._imaged_rois = set()
+        self.imaging_sequence = None
 
     # ======================================================================================
     # Main entry point
@@ -161,10 +164,13 @@ class RoiScanTask(ModuleTask):
 
         self._check_interrupt()
 
+        # make sure the laser are disabled when starting
+        self._laser_logic.set_laser_disabled()
+
         # disable interfering GUI actions - mirrors legacy startTask()
-        self._roi.disable_tracking_mode()
-        self._roi.disable_roi_actions()
-        self._roi.set_stage_velocity(self.scan_stage_velocity)
+        self._roi_logic.disable_tracking_mode()
+        self._roi_logic.disable_roi_actions()
+        self._roi_logic.set_stage_velocity(self.scan_stage_velocity)
 
         self._check_interrupt()
 
@@ -202,19 +208,25 @@ class RoiScanTask(ModuleTask):
 
         if self.roi_names:
             try:
-                self._roi.set_active_roi(name=self.roi_names[0])
-                self._roi.go_to_roi_xy()
+                self._roi_logic.set_active_roi(name=self.roi_names[0])
+                self._roi_logic.go_to_roi_xy()
             except Exception as e:
                 self.log.warning(f'Could not return stage to first ROI during cleanup: {e}')
 
+        if self.imaging_sequence:
+            try:
+                self._laser_logic.set_laser_disabled()
+            except Exception as e:
+                self.log.warning(f'Could not disable lasers: {e}')
+
         try:
-            self._roi.set_stage_velocity(self.idle_stage_velocity)
+            self._roi_logic.set_stage_velocity(self.idle_stage_velocity)
         except Exception as e:
             self.log.warning(f'Could not reset stage velocity during cleanup: {e}')
 
         try:
-            self._roi.enable_tracking_mode()
-            self._roi.enable_roi_actions()
+            self._roi_logic.enable_tracking_mode()
+            self._roi_logic.enable_roi_actions()
         except Exception as e:
             self.log.warning(f'Could not re-enable ROI GUI actions during cleanup: {e}')
 
@@ -232,16 +244,26 @@ class RoiScanTask(ModuleTask):
         self.log.info(f'Moving to {roi_name}')
         scan_name = self._file_name(roi_name)
 
-        self._roi.set_active_roi(name=roi_name)
-        self._roi.go_to_roi_xy()
-        self._roi.stage_wait_for_idle()
+        self._roi_logic.set_active_roi(name=roi_name)
+        self._roi_logic.go_to_roi_xy()
+        self._roi_logic.stage_wait_for_idle()
         self._check_interrupt()
+
+        self.log.info(f'Triggering ZEN autofocus for {roi_name}')
+        self._trigger_logic.send_trigger('trigger_ZEN_start_block')
+        self._wait_for_done()
+        self.log.info(f'{roi_name}: autofocus confirmed done by ZEN.')
+
+        sleep(2)
+        self._laser_logic.set_laser_enabled()
+        self._laser_logic.set_laser_disabled()
 
         self.log.info(f'Triggering ZEN acquisition for {roi_name}')
         self._trigger_logic.send_trigger('trigger_ZEN_start_block')
         self._wait_for_done()
         self.log.info(f'{roi_name}: acquisition confirmed done by ZEN.')
 
+        sleep(2)
         self._append_movie_name(scan_name)
 
     def _wait_for_ready(self) -> None:
@@ -334,9 +356,15 @@ class RoiScanTask(ModuleTask):
         self.is_rna = user_param_dict.get('rna', False)
         self.save_path = user_param_dict['save_path']
         self.roi_list_path = user_param_dict['roi_list_path']
+        self.imaging_sequence = user_param_dict['imaging_sequence']
 
-        self._roi.load_roi_list(self.roi_list_path)
-        self.roi_names = list(self._roi.roi_names)
+        self._roi_logic.load_roi_list(self.roi_list_path)
+        self.roi_names = list(self._roi_logic.roi_names)
+
+        self.num_laserlines = len(self.imaging_sequence)
+        self._laser_logic.set_external_trigger(True)
+        for wavelength, intensity in self.imaging_sequence:
+            self._laser_logic.set_laser_line_intensity(int(wavelength), float(intensity))
 
     # ======================================================================================
     # File path handling
@@ -393,7 +421,7 @@ class RoiScanTask(ModuleTask):
         """
         metadata = {'Sample name': self.sample_name}
         for roi in self.roi_names:
-            pos = self._roi.get_roi_position(roi)
+            pos = self._roi_logic.get_roi_position(roi)
             metadata[roi] = f'X = {pos[0]} - Y = {pos[1]}'
 
         path = os.path.join(self.directory, 'parameters.yml')
