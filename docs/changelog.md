@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-09-29
+Last updated: 2026-10-01
 
 ### Cameras
 
@@ -506,6 +506,54 @@ Last updated: 2026-09-29
     So `stop_laser_output()` currently never does anything, and would raise
     (calling a `self.voltage_off()` that doesn't exist on the class) if
     `self.enabled` were ever `True`.
+- `laser_control_logic.LaserControlLogic.ensure_ready()` (2026-10-01): JB's
+  own extension of `roi_multicolour_scan_sd_task.py` (connecting it to
+  `TriggerLogic` and a laser, see the DAQ section above) needed to confirm
+  the laser source itself is ready before an acquisition, without actually
+  enabling any line - but the only way to reach the hardware's
+  `ensure_ready()` was `set_laser_enabled()` immediately followed by
+  `set_laser_disabled()`, which JB found "quite convoluted" and asked about.
+  Worth noting why it was more than just convoluted: `set_laser_enabled()`
+  also calls `enable_all_lines()`, and since the task already loads the
+  imaging sequence's intensities before this point
+  (`_load_user_parameters()`), that briefly wrote real non-zero voltage to
+  the DAQ-controlled source for every allowed line - a genuine, if brief,
+  physical emission pulse that had nothing to do with checking readiness,
+  immediately undone by the following `set_laser_disabled()`. Added
+  `ensure_ready()` to `LaserControlLogic` as a direct passthrough to
+  `self._laser.ensure_ready()`, touching nothing else (`_enabled`,
+  `enable_all_lines()`, `disable_all_lines()` are untouched) - confirmed
+  safe by checking both `LaserControlInterface` implementations:
+  `DaqLaserController.ensure_ready()` is a no-op, while
+  `LumencorCelesta.ensure_ready()` wakes the source from standby and waits
+  for it to report ready, with no line-state side effects either way.
+  `roi_multicolour_scan_sd_task.py` now calls `self._laser_logic.ensure_ready()`
+  directly instead of the enable/disable pair. Verified with a new mock test
+  (`t16_laser_ensure_ready.py`, loading the real `laser_control_logic.py`):
+  `ensure_ready()` reaches the hardware and never touches
+  `enable_all_lines()`/`disable_all_lines()`/`_enabled`, and
+  `set_laser_enabled()`/`set_laser_disabled()` are unaffected.
+
+### Experiment configurator
+
+#### Fixed
+
+- `logic/experiment_configurator_logic.py` (2026-10-01): `ExpConfigLogic.on_activate()`
+  built `self.lasers` (the list backing the imaging-sequence editor's
+  `laser_ComboBox`, see `gui/experiments_setup/exp_configurator_gui.py`) from
+  every key of `laser_control_logic`'s `laser_dict`, regardless of each
+  entry's `allowed` flag - so the combo box offered every wavelength the
+  laser source supports, not only the ones the configured dichroic actually
+  allows (`optical_path['dichroic_allowed_wavelengths_nm']`). Found by JB
+  while setting up the imaging sequence on the OPM. `basic_imaging_gui.py`'s
+  own laser selector already filtered on `laser_dict[...]['allowed']` - this
+  fix makes `self.lasers` do the same, so both of `laser_ComboBox`'s
+  population sites (the general configuration form and the per-experiment
+  imaging-sequence editor, both of which just read `self._exp_logic.lasers`)
+  are fixed by the one change. Verified with a new mock test
+  (`t15_laser_combobox_fix.py`, loading the real
+  `experiment_configurator_logic.py`): `lasers` only includes the allowed
+  wavelengths, and stays an empty list when no laser logic is connected.
 
 **TODO (tracked, updated 2026-09-29):**
 
