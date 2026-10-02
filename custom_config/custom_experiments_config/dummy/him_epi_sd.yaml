@@ -4,7 +4,7 @@ description: >
   Configure a Hi-M experiment using the Spining disk microscope in
   epifluorescence mode.
 
-output_filename: hi_m_task_AIRYSCAN_epi.yml
+output_filename: hi_m_task_AIRYSCAN_epi.yaml
 
 fields:
 

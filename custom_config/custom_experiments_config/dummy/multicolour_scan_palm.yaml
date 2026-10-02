@@ -3,7 +3,7 @@ experiment: multicolor_scan_PALM
 description: >
   Configure a multicolor z-stack acquisition on the PALM microscope.
 
-output_filename: multicolor_scan_task_palm.yml
+output_filename: multicolor_scan_task_palm.yaml
 
 fields:
 

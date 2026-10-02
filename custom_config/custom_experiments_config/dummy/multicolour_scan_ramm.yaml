@@ -3,7 +3,7 @@ experiment: Multicolor scan RAMM
 description: >
   Configure a multicolor z-stack acquisition on the RAMM microscope.
 
-output_filename: multicolor_scan_task_RAMM.yml
+output_filename: multicolor_scan_task_RAMM.yaml
 
 fields:
 

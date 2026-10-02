@@ -5,7 +5,7 @@ description: >
   Each imaging-sequence entry defines its illumination source,
   intensity, z-stack parameters, and filter position.
 
-output_filename: timelapse_task_PALM.yml
+output_filename: timelapse_task_PALM.yaml
 
 fields:
 

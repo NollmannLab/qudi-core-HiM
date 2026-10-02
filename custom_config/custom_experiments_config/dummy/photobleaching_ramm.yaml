@@ -3,7 +3,7 @@ experiment: photobleaching_RAMM
 description: >
   Configure a photobleaching experiment on the RAMM microscope.
 
-output_filename: photobleaching_task_RAMM.yml
+output_filename: photobleaching_task_RAMM.yaml
 
 fields:
 

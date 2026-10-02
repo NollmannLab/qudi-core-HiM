@@ -5,7 +5,7 @@ description: >
   Select the illumination source and intensity, exposure time,
   output path, and total number of images to acquire.
 
-output_filename: PAINT_task_RAMM.yml
+output_filename: PAINT_task_RAMM.yaml
 
 fields:
 

@@ -77,7 +77,7 @@ class PhotoBleachingTask(ModuleTask):
     trigger_logic = Connector(interface='TriggerLogic')
     laser_logic = Connector(interface='LaserControlLogic')
 
-    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/photobleaching_task_sd.yml'
+    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/photobleaching_task_sd.yaml'
     poll_interval_s = 0.1
     scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/S
     idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}

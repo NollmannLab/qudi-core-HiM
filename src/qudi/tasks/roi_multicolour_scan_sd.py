@@ -110,7 +110,7 @@ class RoiScanTask(ModuleTask):
     trigger_logic = Connector(interface='TriggerLogic')
     laser_logic = Connector(interface='LaserControlLogic')
 
-    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/roi_multicolor_scan_task_sd.yml'
+    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/roi_multicolor_scan_task_sd.yaml'
     acquisition_timeout_s = 120.0  # max time to wait for ZEN's "done" trigger on one ROI
     poll_interval_s = 0.1
     scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/S
@@ -316,8 +316,12 @@ class RoiScanTask(ModuleTask):
     def _checkpoint_path(self) -> str:
         """Stable path (independent of the per-run dated/incrementing output directory) so a
         resume=True launch can find it before any new directory is created.
+
+        Deliberately a regular, visible file (no leading dot) rather than a hidden dotfile - per
+        JB (2026-10-02), it's meant to be easy to find and inspect in self.save_path, not tucked
+        away like a cache file.
         """
-        return os.path.join(self.save_path, f'.{self.sample_name}_roi_scan_checkpoint.yaml')
+        return os.path.join(self.save_path, f'{self.sample_name}_roi_scan_checkpoint.yaml')
 
     def _load_checkpoint(self):
         path = self._checkpoint_path()

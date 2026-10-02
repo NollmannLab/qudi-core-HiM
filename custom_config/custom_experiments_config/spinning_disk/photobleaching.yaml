@@ -3,7 +3,7 @@ experiment: photobleaching
 description: >
   Configure a photobleaching experiment on the Spining_disk microscope.
 
-output_filename: photobleaching_task_sd.yml
+output_filename: photobleaching_task_sd.yaml
 
 fields:
 

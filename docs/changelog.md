@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-01
+Last updated: 2026-10-02
 
 ### Cameras
 
@@ -533,6 +533,28 @@ Last updated: 2026-10-01
   `ensure_ready()` reaches the hardware and never touches
   `enable_all_lines()`/`disable_all_lines()`/`_enabled`, and
   `set_laser_enabled()`/`set_laser_disabled()` are unaffected.
+- `roi_multicolour_scan_sd.py._checkpoint_path()` (2026-10-02): the resume
+  checkpoint was being written as a hidden dotfile
+  (`.<sample_name>_roi_scan_checkpoint.yaml` in `self.save_path`) - JB
+  flagged that saving it like a cache file isn't ideal and asked for it as
+  a regular file if nothing argues against that. Nothing does: `_load_checkpoint()`/
+  `_save_checkpoint()` only ever go through `os.path.exists()`/`open()`/
+  `yaml.safe_load()`/`yaml.safe_dump()`, none of which treat a leading dot
+  specially - the only effect of the dot was hiding the file from `ls`,
+  file managers, and any `glob()`-based tooling that doesn't special-case
+  dotfiles. Dropped the leading dot, so the file is now
+  `<sample_name>_roi_scan_checkpoint.yaml`, sitting as a plain, visible
+  file directly in `self.save_path` (alongside the dated per-run output
+  folders). One minor side effect worth knowing about: it'll now show up
+  in that directory listing like any other file - previously it didn't.
+  Also worth knowing, unrelated to today's change but adjacent: this file
+  is never deleted, even once `completed=True` is reached, so one
+  `<sample_name>_roi_scan_checkpoint.yaml` will persist indefinitely per
+  sample name in `self.save_path` - happy to clean that up too if wanted,
+  but leaving it as-is for now since it wasn't what was asked. Verified by
+  direct diff (one line changed, only the leading dot removed) plus
+  `py_compile` - a literal filename change like this has no behavior to
+  exercise beyond that.
 
 ### Experiment configurator
 
@@ -554,6 +576,49 @@ Last updated: 2026-10-01
   (`t15_laser_combobox_fix.py`, loading the real
   `experiment_configurator_logic.py`): `lasers` only includes the allowed
   wavelengths, and stays an empty list when no laser logic is connected.
+- Standardized the generated/loaded experiment task-config files on `.yaml`
+  (2026-10-02): JB flagged that these files were being saved as `.yml`
+  while he's now consistently using `.yaml`. Root cause: every
+  `output_filename:` field in the experiment-definition files under
+  `custom_config/custom_experiments_config/{spinning_disk,dummy}/` (the
+  filename `ExpConfigLogic.save_to_exp_config_file()` writes to when the
+  Experiment Configurator's "Save" button is used) ended in `.yml`, while
+  the GUI's own "Save copy"/"Load experiment configuration" dialogs
+  (`exp_configurator_gui.py`) filter on `'yaml files (*.yaml)'` - so a
+  normally-saved file wouldn't show up by default in the Open dialog.
+  Changed the extension (content and filename stem otherwise untouched) in
+  all 22 definition files affected: 6 under `spinning_disk/` (2 of them -
+  `him_epi.yaml`, `roi_multicolour_scan.yaml` - are the ones actually
+  enabled in `Spinning_disk_config.cfg` today) and 16 under `dummy/` (12 of
+  them enabled in `dummy_config.cfg`); `sequential_injections.yaml` and
+  `him_ramm.yaml`/`him.yaml` were already `.yaml` and left alone. Also
+  updated the matching `user_config_path` class-attribute default in each
+  active task to agree with the file its own experiment definition now
+  points to: `roi_multicolour_scan_sd.py` (`RoiScanTask`,
+  `roi_multicolor_scan_task_sd.yml` -> `.yaml`) and `photobleaching_sd.py`
+  (`PhotoBleachingTask`, new this round - `photobleaching_task_sd.yml` ->
+  `.yaml`), both now wired into `Spinning_disk_config.cfg`'s
+  `module_tasks:`. Picked up mid-fix that JB had, in parallel, renamed
+  `roi_multicolour_scan_sd_task.py` to `roi_multicolour_scan_sd.py` and
+  already applied the `resume` -> `resume_from_roi` rename discussed
+  earlier today himself (plus two new `_cleanup()` lines resetting the
+  laser's external-trigger flag and cached intensities) - re-staged
+  everything fresh before editing so this fix lands on top of his changes
+  rather than clobbering them. Left `ramm/` and `palm/`
+  experiment-definition files alone for now: `experiments_configurator_logic`
+  isn't wired into `RAMM_config.cfg` or `OPM_config.cfg` yet, so those
+  files aren't loaded by anything at the moment - same fix is trivial to
+  apply there once that part of the migration happens. Also NOT touched:
+  the legacy-style `HiM_imaging_SD.py`, `HiM_imaging_RAMM.py`,
+  `ROI_multicolour_imaging_SD.py`, `ROI_multicolour_imaging_RAMM.py` still
+  reference `.yml` in places, but none of them are wired into any active
+  `module_tasks` config right now, and most of their `.yml` references are
+  write-once output/metadata files rather than loaded configuration.
+  Verified: each of the 22 YAML edits is a single-line, single-character
+  diff (confirmed file-by-file); both task-file edits verified by a direct
+  diff (one line each, extension only) plus `py_compile`
+  - a literal default-value change like this has no behavior to exercise
+  beyond that.
 
 **TODO (tracked, updated 2026-09-29):**
 

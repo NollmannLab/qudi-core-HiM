@@ -5,7 +5,7 @@ description: >
   including multicolor imaging, z-stack acquisition, repeated
   iterations, ROI selection, and axial calibration.
 
-output_filename: fast_timelapse_task_RAMM.yml
+output_filename: fast_timelapse_task_RAMM.yaml
 
 fields:
 

@@ -4,7 +4,7 @@ description: >
   Configure a multicolor z-stack acquisition over a predefined ROI list
   on the RAMM microscope.
 
-output_filename: ROI_multicolor_scan_task_RAMM.yml
+output_filename: ROI_multicolor_scan_task_RAMM.yaml
 
 fields:
 

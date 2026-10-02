@@ -5,7 +5,7 @@ description: >
   Each imaging-sequence entry defines its illumination source,
   intensity, number of z planes, and z step.
 
-output_filename: timelapse_task_RAMM.yml
+output_filename: timelapse_task_RAMM.yaml
 
 fields:
 

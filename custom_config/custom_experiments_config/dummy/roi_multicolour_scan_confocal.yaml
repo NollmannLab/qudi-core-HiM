@@ -3,7 +3,7 @@ experiment: ROI multicolor scan Airyscan confocal
 description: >
   Configure a confocal Airyscan acquisition over a predefined ROI list.
 
-output_filename: ROI_multicolor_scan_task_AIRYSCAN_confocal.yml
+output_filename: ROI_multicolor_scan_task_AIRYSCAN_confocal.yaml
 
 fields:
 

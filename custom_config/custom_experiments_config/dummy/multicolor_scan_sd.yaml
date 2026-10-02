@@ -3,7 +3,7 @@ experiment: multicolor_scan
 description: >
   Configure a multicolor z-stack acquisition on the Spinning_disk microscope.
 
-output_filename: multicolor_scan_task_sd.yml
+output_filename: multicolor_scan_task_sd.yaml
 
 fields:
 

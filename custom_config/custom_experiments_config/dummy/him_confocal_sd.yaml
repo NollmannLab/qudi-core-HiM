@@ -4,7 +4,7 @@ description: >
   Configure a Hi-M experiment using the Spining-disk microscope
   in confocal mode.
 
-output_filename: hi_m_task_AIRYSCAN_confocal.yml
+output_filename: hi_m_task_AIRYSCAN_confocal.yaml
 
 fields:
 

@@ -5,7 +5,7 @@ description: >
   including multicolor imaging, z-stack acquisition,
   ROI selection, and axial calibration.
 
-output_filename: hubble_task_RAMM.yml
+output_filename: hubble_task_RAMM.yaml
 
 fields:
 

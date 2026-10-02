@@ -3,7 +3,7 @@ experiment: roi_multicolor_scan
 description: >
   Configure a multicolor Airyscan acquisition over a predefined ROI list.
 
-output_filename: roi_multicolor_scan_task_sd.yml
+output_filename: roi_multicolor_scan_task_sd.yaml
 
 fields:
 

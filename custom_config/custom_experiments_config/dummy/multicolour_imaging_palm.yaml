@@ -3,7 +3,7 @@ experiment: multicolor_imaging
 description: >
   Configure a multicolor imaging experiment on the PALM microscope.
 
-output_filename: multicolor_imaging_task_palm.yml
+output_filename: multicolor_imaging_task_palm.yaml
 
 fields:
 
