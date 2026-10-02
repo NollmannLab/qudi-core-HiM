@@ -136,20 +136,20 @@ class RoiScanTask(ModuleTask):
     # Main entry point
     # ======================================================================================
 
-    def _run(self, resume: bool = False) -> dict:
+    def _run(self, resume_from_roi: bool = False) -> dict:
         """Run the scan. Pass resume=True to continue a previous, interrupted attempt on the same
         sample and ROI list (see class docstring).
         """
         self._load_user_parameters()
 
-        checkpoint = self._load_checkpoint() if resume else None
+        checkpoint = self._load_checkpoint() if resume_from_roi else None
         checkpoint_is_usable = (
             checkpoint is not None
             and not checkpoint.get('completed', True)
             and checkpoint.get('sample_name') == self.sample_name
             and checkpoint.get('roi_list_path') == self.roi_list_path
         )
-        if resume and not checkpoint_is_usable:
+        if resume_from_roi and not checkpoint_is_usable:
             self.log.warning('resume=True was requested but no matching, unfinished checkpoint was '
                              'found for this sample/ROI list - starting from scratch.')
 
@@ -216,6 +216,8 @@ class RoiScanTask(ModuleTask):
         if self.imaging_sequence:
             try:
                 self._laser_logic.set_laser_disabled()
+                self._laser_logic.set_external_trigger(False)
+                self._laser_logic.reset_laser_intensities()
             except Exception as e:
                 self.log.warning(f'Could not disable lasers: {e}')
 

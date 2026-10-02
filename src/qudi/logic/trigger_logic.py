@@ -75,6 +75,11 @@ class TriggerLogic(LogicBase):
         trigger_name = self._resolve_trigger_name(trigger_name, self._trigger_outputs, 'output')
         self._trigger_outputs[trigger_name].send_trigger()
 
+    def update_pulse_time(self, trigger_name: str | None, pulse_time: float | int) -> None:
+        """Set value for the trigger pulse length"""
+        trigger_name = self._resolve_trigger_name(trigger_name, self._trigger_outputs, 'output')
+        self._trigger_outputs[trigger_name].update_pulse_time(pulse_time)
+
     def is_triggered(self, trigger_name: str | None = None) -> bool:
         """Return the current state of a named input trigger without waiting for an edge.
 

@@ -30,7 +30,7 @@ Modified for qudi-core-HiM (2026-09-28, Modified with Claude code): made trigger
   signal ZEN raises on its own - send_trigger() then raises a clear error if ever called. This
   supports a second, distinct channel pair for the one-time "ZEN is ready" signal (matching the
   legacy task's OUT7_ZEN, a channel qudi only ever polled and never triggered), separate from the
-  per-ROI start/done pair (matching OUT8_ZEN) - see tasks/roi_multicolour_scan_sd_task.py.
+  per-ROI start/done pair (matching OUT8_ZEN) - see tasks/roi_multicolour_scan_sd.py.
 """
 
 from typing import Optional
@@ -68,6 +68,12 @@ class DaqTriggerOutput(TriggerOutputInterface):
         self._daq.pulse_named_do(
             self._output_trigger_task, low=0, high=1, pulse_time=self._pulse_time
         )
+
+    def update_pulse_time(self, pulse_time: float) -> None:
+        """Set value for the trigger pulse length"""
+        self.log.warning(f'pulse time is {pulse_time}')
+        self._pulse_time = pulse_time
+
 
 
 class DaqTriggerInput(TriggerInputInterface):
