@@ -25,6 +25,10 @@ Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): compact layo
   for setups with very many tasks), new group boxes are inserted before that stretch, the group box
   title is bold at normal size while its contents keep the normal (non-bold) font, and contents
   margins/spacing are tight. Signals, slots and _clear_task_widgets are unchanged.
+
+Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): each TaskWidget now also
+  receives the configured task name (task_name=...), used in the titles and log messages of the
+  optional start-confirmation / end-reminder dialogs a task can declare (see taskwidget.py).
 """
 
 import os
@@ -114,7 +118,7 @@ class TaskMainWindow(QtWidgets.QMainWindow):
             font = groupbox.font()
             font.setBold(True)
             groupbox.setFont(font)
-            widget = TaskWidget(task_type=task_type)
+            widget = TaskWidget(task_type=task_type, task_name=task_name)
             # Only the group box title is bold; parameter labels/editors keep the normal font
             content_font = QtGui.QFont(font)
             content_font.setBold(False)
