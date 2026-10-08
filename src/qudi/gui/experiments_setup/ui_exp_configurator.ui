@@ -154,30 +154,10 @@
          </property>
         </spacer>
        </item>
-       <item row="36" column="1">
-        <widget class="QLabel" name="Correlation_threshold_Label">
-         <property name="text">
-          <string>Correlation threshold</string>
-         </property>
-        </widget>
-       </item>
        <item row="41" column="1">
         <widget class="QLabel" name="time_step_Label">
          <property name="text">
           <string>Time step (s)</string>
-         </property>
-        </widget>
-       </item>
-       <item row="36" column="2">
-        <widget class="QDoubleSpinBox" name="Zen_correlation_DSpinBox">
-         <property name="maximum">
-          <double>1.000000000000000</double>
-         </property>
-         <property name="singleStep">
-          <double>0.010000000000000</double>
-         </property>
-         <property name="value">
-          <double>0.600000000000000</double>
          </property>
         </widget>
        </item>
@@ -235,13 +215,6 @@
         <widget class="QLabel" name="save_remote_path_Label">
          <property name="text">
           <string>Network path </string>
-         </property>
-        </widget>
-       </item>
-       <item row="34" column="4">
-        <widget class="QPushButton" name="reference_images_pushButton">
-         <property name="text">
-          <string>Load reference images path</string>
          </property>
         </widget>
        </item>
@@ -405,13 +378,6 @@
        <item row="19" column="2" colspan="2">
         <widget class="QLineEdit" name="save_path_LineEdit"/>
        </item>
-       <item row="34" column="1">
-        <widget class="QLabel" name="reference_image_folder_Label">
-         <property name="text">
-          <string>Reference images folder</string>
-         </property>
-        </widget>
-       </item>
        <item row="4" column="1">
         <widget class="QLabel" name="exposure_Label">
          <property name="text">
@@ -486,9 +452,6 @@
          </property>
         </widget>
        </item>
-       <item row="34" column="2" colspan="2">
-        <widget class="QLineEdit" name="reference_images_lineEdit"/>
-       </item>
        <item row="30" column="4">
         <widget class="QPushButton" name="load_injections_PushButton">
          <property name="text">
@@ -547,19 +510,6 @@
          </property>
          <property name="readOnly">
           <bool>false</bool>
-         </property>
-        </widget>
-       </item>
-       <item row="33" column="1">
-        <widget class="QLabel" name="Autofocus_security_Label">
-         <property name="font">
-          <font>
-           <weight>75</weight>
-           <bold>true</bold>
-          </font>
-         </property>
-         <property name="text">
-          <string>Autofocus security</string>
          </property>
         </widget>
        </item>
@@ -676,23 +626,6 @@
          </property>
         </widget>
        </item>
-       <item row="20" column="4">
-        <widget class="QPushButton" name="Zen_saving_folder_pushButton">
-         <property name="text">
-          <string>Load Zen data saving path</string>
-         </property>
-        </widget>
-       </item>
-       <item row="20" column="2" colspan="2">
-        <widget class="QLineEdit" name="Zen_saving_folder_lineEdit"/>
-       </item>
-       <item row="20" column="1">
-        <widget class="QLabel" name="Zen_saving_folder_Label">
-         <property name="text">
-          <string>ZEN saving folder</string>
-         </property>
-        </widget>
-       </item>
       </layout>
      </widget>
     </item>
@@ -707,6 +640,88 @@
      </widget>
     </item>
    </layout>
+  </widget>
+  <widget class="QDockWidget" name="zen_autofocus_saving_DockWidget">
+   <property name="features">
+    <set>QDockWidget::DockWidgetFloatable|QDockWidget::DockWidgetMovable</set>
+   </property>
+   <property name="windowTitle">
+    <string>ZEN autofocus &amp; saving</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>2</number>
+   </attribute>
+   <widget class="QWidget" name="zen_autofocus_saving_DockWidgetContents">
+    <layout class="QGridLayout" name="zen_autofocus_saving_gridLayout">
+     <item row="0" column="0">
+      <widget class="QLabel" name="Zen_saving_folder_Label">
+       <property name="text">
+        <string>ZEN saving folder</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1" colspan="2">
+      <widget class="QLineEdit" name="Zen_saving_folder_lineEdit"/>
+     </item>
+     <item row="0" column="3">
+      <widget class="QPushButton" name="Zen_saving_folder_pushButton">
+       <property name="text">
+        <string>Load Zen data saving path</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="0" colspan="4">
+      <widget class="QLabel" name="Autofocus_security_Label">
+       <property name="font">
+        <font>
+         <weight>75</weight>
+         <bold>true</bold>
+        </font>
+       </property>
+       <property name="text">
+        <string>Autofocus security</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="reference_image_folder_Label">
+       <property name="text">
+        <string>Reference images folder</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1" colspan="2">
+      <widget class="QLineEdit" name="reference_images_lineEdit"/>
+     </item>
+     <item row="2" column="3">
+      <widget class="QPushButton" name="reference_images_pushButton">
+       <property name="text">
+        <string>Load reference images path</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="Correlation_threshold_Label">
+       <property name="text">
+        <string>Correlation threshold</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QDoubleSpinBox" name="Zen_correlation_DSpinBox">
+       <property name="maximum">
+        <double>1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.600000000000000</double>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
    <property name="geometry">

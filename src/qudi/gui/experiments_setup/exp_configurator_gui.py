@@ -510,6 +510,32 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.formWidget.hide()
         self._mw.save_config_Action.setDisabled(True)
         self._mw.save_config_copy_Action.setDisabled(True)
+        self._sync_dock_widgets_visibility()
+
+    def _sync_dock_widgets_visibility(self) -> None:
+        """Show or hide each dock widget depending on whether any of its contents is
+        currently visible.
+
+        Dock widgets (for example the ZEN autofocus/saving controls) group
+        experiment-specific fields outside of ``formWidget``. Unlike the fields inside
+        ``formWidget``, an empty dock would otherwise stay on screen as a blank panel, so
+        its own visibility is derived from its children instead of being toggled
+        field-by-field. This is generic: any dock added later is picked up automatically,
+        with no change required here.
+
+        The dock's own content wrapper (``QDockWidget.widget()``, set automatically by
+        ``uic.loadUi`` from the ``.ui`` file) is excluded from the check: nothing ever
+        hides it individually, so including it would always read as "visible" regardless
+        of the actual field widgets inside.
+        """
+        for dock in self._mw.findChildren(QtWidgets.QDockWidget):
+            contents = dock.widget()
+            has_visible_content = any(
+                not child.isHidden()
+                for child in dock.findChildren(QtWidgets.QWidget)
+                if child is not contents
+            )
+            dock.setVisible(has_visible_content)
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods to adapt the configuration form depending on the current experiment
@@ -607,6 +633,8 @@ class ExpConfiguratorGUI(GuiBase):
                 continue
 
             self._set_named_widgets_visible(widget_names,True)
+
+        self._sync_dock_widgets_visibility()
 
         self._apply_imaging_sequence_definition(fields)
         description = str(definition.get("description", "")).strip()

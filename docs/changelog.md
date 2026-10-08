@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-02
+Last updated: 2026-10-05
 
 ### Cameras
 
@@ -557,6 +557,71 @@ Last updated: 2026-10-02
   exercise beyond that.
 
 ### Experiment configurator
+
+#### Added
+
+- Moved the ZEN-specific controls into their own dock widget (2026-10-05).
+  Context: JB is bringing two new microscopes onto qudi-core (an OPM
+  light-sheet setup and a fly-training arena, the latter on hold for now)
+  and asked how to keep `ui_exp_configurator.ui`'s single shared form from
+  getting harder to maintain as more microscope-specific fields accumulate.
+  Looked at the real configs (`OPM_config.cfg`, `RAMM_config.cfg`,
+  `camera_interfuse.py`) before proposing anything: the Experiment
+  Configurator isn't wired into OPM or RAMM yet, OPM's two cameras go
+  through `CameraInterfuse` as a one-at-a-time *selector* (not simultaneous
+  dual-camera settings, so no new per-camera fields are needed there), and
+  no galvo-scan hardware exists yet - so there was nothing concrete to add
+  for OPM this round. What *is* real today is that `Zen_saving_folder_*`,
+  `Autofocus_security_Label`, `reference_image_folder_Label`,
+  `reference_images_*` and `Correlation_threshold_Label`/
+  `Zen_correlation_DSpinBox` are already exclusively used by the ZEN/
+  Zeiss-driven spinning-disk Hi-M epifluorescence experiment, just sitting
+  as ordinary rows in the single `gridLayout` alongside every generic
+  field. Agreed with JB to do this relocation first, as the safe template
+  for grouping future microscope-specific fields by function (e.g. a later
+  "camera selection" or "galvo scan" dock for OPM) instead of forking the
+  `.ui` file per microscope.
+  - `ui_exp_configurator.ui`: added a `QDockWidget`
+    (`zen_autofocus_saving_DockWidget`, titled "ZEN autofocus & saving",
+    docked right, movable/floatable but not closable) and moved those 9
+    widgets into its own small `QGridLayout`, unchanged (same object
+    names, same properties) - just relocated out of `formWidget`'s grid.
+  - `exp_configurator_gui.py`: no change was needed to relocate the
+    widgets themselves - `FIELD_WIDGETS`, `_set_named_widgets_visible` and
+    every `on_activate()` signal connection already address widgets purely
+    by object name, never by grid position. The one thing a dock needs
+    that a plain grid row doesn't: something to collapse the dock itself
+    to nothing when none of its fields apply (otherwise it would sit on
+    screen as an empty panel). Added a generic `_sync_dock_widgets_visibility()`
+    that, for every `QDockWidget` under `mainWindow`, shows it iff any of
+    its own field widgets (excluding its internal content wrapper - see
+    below) ended up visible; called at the end of `_hide_experiment_form()`
+    and at the end of `apply_experiment_definition()`. Generic on purpose:
+    a future dock needs no new wiring here, just `FIELD_SECTIONS`/
+    `FIELD_WIDGETS` entries as usual.
+  - Verified: the edited `.ui` parses as valid XML with the same 70 field
+    widgets plus the one new dock and its one content wrapper, no
+    duplicates, nothing lost (checked programmatically by diffing widget
+    names). `py_compile` on the edited GUI module. Built a standalone
+    simulation importing the real `exp_configurator_gui.py` (stubbing the
+    `qtpy`/`qudi.core` imports, not installed in this environment) against
+    a fake widget tree with faithful `isHidden()`/`isVisible()` semantics,
+    then ran all 38 real experiment-definition YAML files in the repo
+    through `apply_experiment_definition()`: zero exceptions, zero
+    "widget not found" warnings, and the ZEN dock came out visible only
+    for the two experiments that actually declare ZEN fields
+    (`spinning_disk/him_epi.yaml`, `dummy/him_epi_sd.yaml`), hidden for
+    the other 36. That test caught a real bug before it shipped: the
+    dock's own content-wrapper widget (the implicit `QWidget` `uic.loadUi`
+    sets as `QDockWidget.widget()`) is never explicitly hidden by
+    anything, so the first version of the visibility check always saw it
+    as "visible" regardless of the actual field widgets inside - fixed by
+    excluding `dock.widget()` from the check.
+  - Not done yet, by design: no new fields were added for OPM (camera
+    selection, galvo scan) or the fly arena - this round was only the ZEN
+    relocation JB asked to go ahead with. `experiments_configurator_logic`/
+    `experiments_configurator_gui` still aren't wired into `OPM_config.cfg`
+    or `RAMM_config.cfg` at all.
 
 #### Fixed
 
