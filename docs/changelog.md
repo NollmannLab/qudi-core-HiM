@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-05
+Last updated: 2026-10-08
 
 ### Cameras
 
@@ -358,6 +358,49 @@ Last updated: 2026-10-05
   position are passed correctly.
 
 ### Task runner
+
+#### Changed
+
+- `gui/task_runner/taskwidget.py`, `gui/task_runner/main_window.py`
+  (2026-10-08): compact Task Runner layout. Each task took far more vertical
+  space than its 0-1 parameters needed, so with several tasks per microscope
+  the user had to scroll to find the one to run. Causes: no stretch at the end
+  of `tasks_layout` (group boxes expanded to share all spare height), a
+  run/stop button sized as a square of twice the state-label width with its
+  icon scaled to fill it, controls stacked vertically, a parameter grid with
+  row stretch / minimum row heights, and a bold +2 pt group-box title that was
+  inherited by every label and editor. Now each task is one thin `QGroupBox`
+  (bold title at normal size, tight margins) holding a single row
+  `[parameters] | [state label] [busy indicator] [run/stop button]`, with the
+  controls right-aligned on the first line. Parameters are placed row-major,
+  at most 3 label/editor pairs per line, wrapping onto extra lines; a task
+  without parameters only shows the controls. The run/stop button is a normal
+  `QToolButton` of standard line height with a 16-24 px icon; the
+  `CircleLoadingIndicator` has the same size and still retains its space when
+  hidden; the state label has a minimum width fitting the longest state text
+  so the controls never shift. A trailing stretch packs the tasks at the top
+  (new group boxes are inserted before it; the `QScrollArea` is kept). The
+  unused `TestToolButton` class was removed (class only, no file deleted).
+  **Meaning change**: `TaskWidget(max_columns=...)` is now the maximum number
+  of label/editor *pairs per line* (default 3), and `max_rows=...` the maximum
+  number of lines (pairs per line = ceil(n_params / max_rows)); previously the
+  grid was filled column-major with `max_rows` defaulting to 8. Nothing in the
+  repo passes either argument. Unchanged: all signals/slots and connections,
+  the start/interrupt logic, `get_parameters`, `task_runner_gui.py` (incl. the
+  `DirectConnection` interrupt fix), and the known `_clear_task_widgets` bug
+  (iterates over task-name strings and calls `.parent()` on them; still open).
+- Verified with an offscreen Qt smoke test (`QT_QPA_PLATFORM=offscreen`,
+  PySide6 6.12 + `qudi-core==1.8.0` installed in the dev environment) building
+  `TaskMainWindow` with `TestTask`, `TestTask2`, `roi_multicolour_scan_sd` and
+  `photobleaching_sd` (`HiM_imaging_SD` could not be imported there: no
+  `tkinter`): group-box `sizeHint().height()` went from 258 px for every task
+  to 54 px for tasks with 0-1 parameters and 79 px for `TestTask2` (4
+  parameters, wrapped onto 2 lines). The run/start/stop/finish slots still
+  switch the state label, busy indicator and icon, and the start/interrupt
+  signals still emit with the right task name and parameters. The
+  `max_columns`/`max_rows` variants and their mutual-exclusion error were also
+  checked. Still to be checked by JB on the real setup (qudi-core 1.7.0); the
+  saved window geometry may restore the old, large window size the first time.
 
 #### Fixed
 
