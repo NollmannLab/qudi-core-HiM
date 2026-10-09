@@ -359,6 +359,39 @@ Last updated: 2026-10-08
 
 ### Task runner
 
+#### Added
+
+- `gui/task_runner/taskwidget.py`, `gui/task_runner/main_window.py`
+  (2026-10-08): optional start confirmation and end reminder declared by a
+  task. Some tasks need a manual hardware step before and after running
+  (photobleaching on the SD setup: unplug, then re-plug, the Celesta shutter
+  TTL cable). A `ModuleTask` can now define the plain class attributes
+  `start_warning` / `end_warning` (task config options are not passed to
+  ModuleTasks in qudi-core 1.7.0, hence class attributes, like
+  `user_config_path`). The Task Runner GUI, not the task (which runs in a
+  worker thread), shows them: `start_warning` in a modal warning dialog
+  every time Run is clicked ("Done — start task" / Cancel; Cancel is the
+  default and escape button, and Cancel/Esc/closing emits nothing and keeps
+  the button enabled); `end_warning` in a non-modal reminder (OK,
+  `WA_DeleteOnClose`) when a run this widget saw start ends - success,
+  failure or interrupt. The initialising `task_finished()` call made by
+  `TaskRunnerGui.on_activate` shows no reminder (gated by a flag set in
+  `task_started()`). Confirmation, cancellation and reminder are logged at
+  info level. `TaskWidget` gets an optional `task_name` argument (dialog
+  titles / log messages), passed by `TaskMainWindow`. Tasks without the
+  attributes behave exactly as before; signals, `get_parameters`, the
+  interrupt path and `task_runner_gui.py` are unchanged.
+- Verified offscreen against `qudi-core==1.7.0` (PySide6) with dummy tasks
+  with and without the attributes (dialogs auto-answered, 40/40 checks): no
+  dialog and immediate start without attributes; Cancel and Esc emit nothing
+  and leave the button enabled; confirm emits `sigStartTask` once with the
+  editor values; the dialog is shown on every Run but never on interrupt; no
+  reminder on the on_activate-style initialisation (also through
+  `TaskMainWindow`); exactly one reminder after a started run for success,
+  failure and interrupt. Also checked once with the real modal `exec()`
+  (timer-clicked buttons), the compact-layout smoke test, and `py_compile`.
+  Still to be checked by JB on the SD microscope.
+
 #### Changed
 
 - `gui/task_runner/taskwidget.py`, `gui/task_runner/main_window.py`
@@ -598,6 +631,11 @@ Last updated: 2026-10-08
   direct diff (one line changed, only the leading dot removed) plus
   `py_compile` - a literal filename change like this has no behavior to
   exercise beyond that.
+- `tasks/photobleaching_sd.py` (2026-10-08): `PhotoBleachingTask` declares
+  `start_warning` (disconnect the TTL cable from the Lumencor/Celesta shutter
+  input before starting, otherwise the lasers will not emit) and
+  `end_warning` (reconnect it before any imaging task), shown by the Task
+  Runner GUI (see Task runner > Added). No other change to the task.
 
 ### Experiment configurator
 

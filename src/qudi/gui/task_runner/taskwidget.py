@@ -30,6 +30,19 @@ Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): compact layo
   so the controls do not shift. The unused TestToolButton class (it rescaled its icon to the button
   size) was removed. The meaning of "max_columns" / "max_rows" changed accordingly - see the
   TaskWidget docstring. Signals, slots and the start/interrupt logic are unchanged.
+
+Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): optional start confirmation
+  and end reminder declared by the task. Some tasks need a manual hardware step before they start
+  and after they end (e.g. photobleaching_sd.py: unplug, then re-plug, the Celesta shutter TTL
+  cable). A ModuleTask can now define the class attributes "start_warning" / "end_warning" (plain
+  strings). When Run is clicked, start_warning is shown in a modal dialog that must be confirmed
+  ("Done - start task"; Cancel/Esc/close aborts the start). When a task that this widget saw start
+  finishes (success, failure or interrupt), end_warning is shown in a non-modal reminder. The
+  initialising task_finished() call made by TaskRunnerGui.on_activate does not show it. Both
+  events are logged at info level. Dialogs are opened here, in the GUI thread - never from the
+  task, which runs in a worker thread. Tasks without these attributes behave exactly as before.
+  New optional constructor argument "task_name" (configured display name, used in dialog titles
+  and log messages; defaults to the task class name).
 """
 
 __all__ = ['TaskWidget']
@@ -44,7 +57,10 @@ from qudi.util.paths import get_artwork_dir
 from qudi.util.parameters import ParameterWidgetMapper
 from qudi.util.widgets.loading_indicator import CircleLoadingIndicator
 from qudi.util.widgets.separator_lines import VerticalLine
+from qudi.core.logger import get_logger
 from qudi.core.scripting.moduletask import ModuleTask
+
+_log = get_logger(__name__)
 
 
 class TaskWidget(QtWidgets.QWidget):
@@ -61,6 +77,19 @@ class TaskWidget(QtWidgets.QWidget):
                      chosen as ceil(number_of_parameters / max_rows)
     Only one of max_columns / max_rows may be given. (Before 2026-10-08 the grid was filled
     column-major and max_rows defaulted to 8.)
+    @param task_name: display name of the task (as configured), used in dialog titles and log
+                      messages; defaults to the task class name
+
+    Optional task class attributes (opt-in, read with getattr; absent or empty = no dialog):
+        start_warning (str): shown in a modal confirmation dialog every time Run is clicked. The
+                             task only starts if the user clicks "Done — start task"; Cancel,
+                             Esc or closing the dialog aborts the start (nothing is emitted).
+                             Never shown when the button is used to interrupt a running task.
+        end_warning (str): shown in a non-modal reminder when a task that this widget saw start
+                           finishes, whether it succeeded, failed or was interrupted.
+    Both are plain class attributes of the ModuleTask (e.g. PhotoBleachingTask), because task
+    config options are not passed to ModuleTasks. Dialogs are always opened here, in the GUI
+    thread, never from the task itself (tasks run in a worker thread).
     """
 
     sigStartTask = QtCore.Signal(dict)  # parameters
@@ -76,8 +105,17 @@ class TaskWidget(QtWidgets.QWidget):
                     'resuming')
 
     def __init__(self, *args, task_type: Type[ModuleTask], max_columns: Optional[int] = None,
-                 max_rows: Optional[int] = None, **kwargs):
+                 max_rows: Optional[int] = None, task_name: Optional[str] = None, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # Optional texts declared by the task (see class docstring)
+        self._task_name = task_name if task_name else task_type.__name__
+        self._start_warning = getattr(task_type, 'start_warning', None) or None
+        self._end_warning = getattr(task_type, 'end_warning', None) or None
+        # True once this widget has seen the task start; gates the end reminder so that the
+        # initialising task_finished() call from TaskRunnerGui.on_activate shows nothing.
+        self._started_since_reminder = False
+        self._end_reminder_box = None  # keeps the non-modal reminder referenced while open
 
         if max_rows is not None and max_columns is not None:
             raise ValueError('Can either set "max_columns" OR "max_rows" but not both.')
@@ -204,12 +242,55 @@ class TaskWidget(QtWidgets.QWidget):
         if self._interrupt_enabled:
             self.sigInterruptTask.emit()
         else:
+            if self._start_warning and not self._confirm_start_warning():
+                _log.info(f'{self._task_name}: start cancelled by the user (start warning not '
+                          f'confirmed).')
+                return
             self.run_interrupt_button.setEnabled(False)
             self.sigStartTask.emit(self.get_parameters())
+
+    def _confirm_start_warning(self) -> bool:
+        """Show the task's start_warning in a modal dialog. Returns True only if the user clicked
+        the confirm button; Cancel, Esc or closing the dialog return False.
+        """
+        box = QtWidgets.QMessageBox(self.window())
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle(f'Before starting: {self._task_name}')
+        box.setText(self._start_warning)
+        confirm_button = box.addButton('Done — start task', QtWidgets.QMessageBox.AcceptRole)
+        cancel_button = box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.setDefaultButton(cancel_button)
+        box.setEscapeButton(cancel_button)
+        box.setWindowModality(QtCore.Qt.ApplicationModal)
+        box.exec()
+        confirmed = box.clickedButton() is confirm_button
+        box.deleteLater()
+        if confirmed:
+            _log.info(f'{self._task_name}: user confirmed start warning: {self._start_warning}')
+        return confirmed
+
+    def _show_end_reminder(self) -> None:
+        """Show the task's end_warning in a non-modal reminder, so the GUI keeps updating."""
+        _log.info(f'{self._task_name}: end reminder shown: {self._end_warning}')
+        box = QtWidgets.QMessageBox(self.window())
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle(f'Task finished: {self._task_name}')
+        box.setText(self._end_warning)
+        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        box.setWindowModality(QtCore.Qt.NonModal)
+        box.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        box.finished.connect(self._end_reminder_closed)
+        self._end_reminder_box = box
+        box.show()
+
+    @QtCore.Slot(int)
+    def _end_reminder_closed(self, _result: int = 0) -> None:
+        self._end_reminder_box = None
 
     @QtCore.Slot()
     def task_started(self) -> None:
         self._interrupt_enabled = True
+        self._started_since_reminder = True
         self.run_interrupt_button.setIcon(self._stop_icon)
         self.run_interrupt_button.setEnabled(True)
         self.running_indicator.show()
@@ -227,6 +308,12 @@ class TaskWidget(QtWidgets.QWidget):
         self.run_interrupt_button.setEnabled(True)
         self.running_indicator.hide()
         self.set_task_result(result, success)
+        # End reminder only for a run this widget saw start (not for the initialising call made
+        # by TaskRunnerGui.on_activate), whatever the outcome (success, failure, interrupt).
+        if self._started_since_reminder:
+            self._started_since_reminder = False
+            if self._end_warning:
+                self._show_end_reminder()
 
     @QtCore.Slot(object, bool)
     def set_task_result(self, result: Any, success: bool) -> None:

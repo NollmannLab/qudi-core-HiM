@@ -12,6 +12,13 @@ tasks/photobleaching_task_AIRYSCAN.py. It is a NEW file - the legacy file is lef
 
 This is code is similar to the roi_multicolour_scan.yaml, except that no trigger is used to synchronize with ZEN.
 
+Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): added the class attributes
+  start_warning / end_warning. The task only works if the TTL cable has been manually disconnected
+  from the Lumencor (Celesta) shutter input beforehand, and the cable must be reconnected afterwards.
+  The Task Runner GUI shows start_warning as a confirmation dialog when Run is clicked and
+  end_warning as a reminder when the task ends (dialogs are opened by the GUI, never by the task,
+  which runs in a worker thread). No other change to this task.
+
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -78,6 +85,13 @@ class PhotoBleachingTask(ModuleTask):
     laser_logic = Connector(interface='LaserControlLogic')
 
     user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/photobleaching_task_sd.yaml'
+    # Shown by the Task Runner GUI (see gui/task_runner/taskwidget.py): confirmation before start,
+    # reminder when the task ends.
+    start_warning = ('Before starting the photobleaching: manually disconnect the TTL cable from the '
+                     'Lumencor (Celesta) shutter input. Otherwise the task will run but the lasers '
+                     'will not emit.')
+    end_warning = ('Photobleaching finished: reconnect the TTL cable to the Lumencor (Celesta) '
+                   'shutter input before running any imaging task.')
     poll_interval_s = 0.1
     scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/S
     idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}
