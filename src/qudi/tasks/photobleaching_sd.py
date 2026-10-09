@@ -4,13 +4,22 @@ Author: F. Barho - adapted for qudi-core-HiM by JB Fiche
 Created: 2026-08-06
 Modified for qudi-core: 2026-10-02
 
-qudi-core-HiM task: scan a list of ROIs on the spinning-disk setup in order to photobleached the sample and reduce bkg
-fluorescence signal
+qudi-core-HiM task: scan a list of ROIs in order to photobleach the sample and reduce the background
+fluorescence signal.
 
-This is a qudi-core ModuleTask translation of the legacy qudi (InterruptableTask) task
-tasks/photobleaching_task_AIRYSCAN.py. It is a NEW file - the legacy file is left untouched.
+This is a qudi-core ModuleTask translation of the legacy qudi (InterruptableTask) tasks
+tasks/photobleaching_task_AIRYSCAN.py, logic/tasks/photobleaching_task_RAMM.py and
+logic/tasks/photobleaching_task_Celesta.py. The legacy files are left untouched.
 
-This is code is similar to the roi_multicolour_scan.yaml, except that no trigger is used to synchronize with ZEN.
+Structure (one file for all setups):
+  - PhotoBleachingBase: all the shared code. For each ROI: move the stage, wait until it is idle,
+    switch the lasers on, wait for the illumination time (interruptible), switch the lasers off.
+  - PhotoBleachingSDTask / PhotoBleachingRAMMTask: one subclass per setup. They only set class
+    attributes (YAML location, and on the SD the start/end warnings).
+  - photobleaching_dummy.py: one dummy subclass per setup, running the same code on the dummy
+    hardware; only the YAML location differs.
+Per-setup differences are class attributes because qudi-core 1.7.0 does not pass the task config
+options to ModuleTasks.
 
 Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): added the class attributes
   start_warning / end_warning. The task only works if the TTL cable has been manually disconnected
@@ -18,6 +27,18 @@ Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): added the cl
   The Task Runner GUI shows start_warning as a confirmation dialog when Run is clicked and
   end_warning as a reminder when the task ends (dialogs are opened by the GUI, never by the task,
   which runs in a worker thread). No other change to this task.
+
+Modified for qudi-core-HiM (2026-10-09, Modified with Claude code): unified photobleaching task.
+  Renamed from photobleaching_sd.py (git mv). The shared code moved to PhotoBleachingBase, with
+  PhotoBleachingSDTask (the former PhotoBleachingTask: same YAML path and warnings) and the new
+  PhotoBleachingRAMMTask (YAML path still 'TO FILL': the task refuses to run, before touching any
+  hardware, until it is filled in). Illumination time is now in SECONDS everywhere (the "* 60"
+  conversion is gone). The illumination wait checks for an interrupt at least every 0.1 s, so a
+  stop from the Task Runner takes effect during illumination too; _cleanup then switches the
+  lasers off. Removed the trigger_logic connector and the Celesta shutter trigger pulse (it was
+  only a test - on the SD the shutter TTL cable is disconnected by hand, see the warnings), the
+  unused ZEN handshake methods _wait_for_ready / _wait_for_done, the resume text and unused
+  imports. The config path is now logged at info level. Returns {'photobleached_rois': [...]}.
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
@@ -30,95 +51,73 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-import os
 import yaml
-from datetime import datetime
 from time import monotonic, sleep
 
 from qudi.core.scripting.moduletask import ModuleTask
 from qudi.core.connector import Connector
 
 
-class PhotoBleachingTask(ModuleTask):
-    """Scan a list of ROIs on the spinning-disk setup: move the stage to each ROI in turn and run a
-    single start/done trigger handshake with ZEN for each one (see module docstring for why this task
-    does nothing else - no autofocus, laser, or per-plane control on qudi's side).
+class PhotoBleachingBase(ModuleTask):
+    """Shared photobleaching code: scan a list of ROIs and illuminate each one for a fixed time.
 
-    Config example for copy-paste:
+    Not meant to be configured directly - use a setup subclass (PhotoBleachingSDTask,
+    PhotoBleachingRAMMTask) or one of the dummies in photobleaching_dummy.py. A subclass sets
+    ``user_config_path`` (and, if the setup needs a manual step, ``start_warning`` /
+    ``end_warning``, shown by the Task Runner GUI). Nothing is passed through the Task Runner: the
+    task has no call parameters, everything comes from the YAML written by the experiment
+    configurator.
 
-        module_tasks:
-          roi_scan:
-            module.Class: 'qudi.tasks.roi_multicolour_scan_sd_task.RoiScanTask'
-            connect:
-              roi: roi_logic
-              trigger_logic: trigger_logic
-            options:
-              path_to_user_config: '/home/him_spinning/qudi_task_config_files/roi_scan_task_sd.yml'
-              acquisition_timeout_s: 120.0   # max time to wait for ZEN's "done" trigger on one ROI
-              poll_interval_s: 0.1
-              scan_stage_velocity: {'x': 1, 'y': 1}
-              idle_stage_velocity: {'x': 6, 'y': 6}
+    For each ROI: move the stage, wait until it is idle, switch all the laser lines of the imaging
+    sequence on, wait ``illumination_time`` seconds (interruptible), switch them off.
 
-    ``trigger_logic`` must be a TriggerLogic instance connected to the required trigger hardware.
-    The task addresses its output and input modules by their configured Qudi module names:
-    ``trigger_ZEN_start_block``, ``trigger_ZEN_block_finished``, and ``trigger_ZEN_ready``. These
-    hardware modules in turn use named DAQ tasks rather than raw channel numbers - see
-    hardware/interfuse_hardware/daq_trigger_sync.py. The ready and per-ROI completion inputs
-    preserve the legacy task's OUT7_ZEN / OUT8_ZEN structure.
-
-    User config file (path_to_user_config) expected keys:
-        sample_name: 'Mysample'
-        dapi: False           # optional, default False - affects only folder/file naming
-        rna: False             # optional, default False - affects only folder/file naming
-        save_path: '/home/him_spinning/data'
+    User config file (user_config_path) expected keys:
         roi_list_path: 'pathstem/qudi_roi_lists/roilist_20260101.json'
+        imaging_sequence: [[561, 50.0], [640, 80.0]]   # [wavelength (nm), intensity (%)]
+        illumination_time: 30.0                        # SECONDS, per ROI
 
-    Resuming an interrupted run: start the task with the extra argument resume=True (same task name).
-    If a checkpoint from a matching, unfinished previous attempt is found (same sample name and ROI
-    list), ROIs already confirmed done by ZEN are skipped and the run continues in the same output
-    directory. Otherwise (no checkpoint, or resume=True with nothing to resume) the run starts from
-    scratch, same as resume=False.
+    Interrupt: the illumination wait checks for an interrupt at least every 0.1 s. After an
+    interrupt (or any error) the base class runs _cleanup(), which switches the lasers off and puts
+    the stage and ROI GUI back in their idle state.
     """
 
     roi_logic = Connector(interface='RoiLogic')
-    trigger_logic = Connector(interface='TriggerLogic')
     laser_logic = Connector(interface='LaserControlLogic')
 
-    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/photobleaching_task_sd.yaml'
-    # Shown by the Task Runner GUI (see gui/task_runner/taskwidget.py): confirmation before start,
-    # reminder when the task ends.
-    start_warning = ('Before starting the photobleaching: manually disconnect the TTL cable from the '
-                     'Lumencor (Celesta) shutter input. Otherwise the task will run but the lasers '
-                     'will not emit.')
-    end_warning = ('Photobleaching finished: reconnect the TTL cable to the Lumencor (Celesta) '
-                   'shutter input before running any imaging task.')
+    user_config_path = None   # set by each setup subclass
     poll_interval_s = 0.1
     scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/S
     idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}
 
-    def _setup(self) -> None:
-        self._roi_logic = self.roi_logic()
-        self._trigger_logic = self.trigger_logic()
-        self._laser_logic = self.laser_logic()
+    _UNSET_PATHS = (None, '', 'TO FILL')
+    _MAX_WAIT_STEP_S = 0.1  # maximum time between two interrupt checks while illuminating
 
+    def _setup(self) -> None:
+        # False until _run() starts touching the hardware; _cleanup() then has nothing to restore.
+        # Set first, so that _cleanup() also works if fetching a connector below fails.
+        self._hardware_touched = False
         self.roi_list_path = None
         self.roi_names = []
-        self._photobleached_rois = set()
         self.imaging_sequence = None
         self.illumination_time = None
+        self._photobleached_rois = []
+
+        self._roi_logic = self.roi_logic()
+        self._laser_logic = self.laser_logic()
 
     # ======================================================================================
     # Main entry point
     # ======================================================================================
 
     def _run(self) -> dict:
-        """Run the scan. Pass resume=True to continue a previous, interrupted attempt on the same
-        sample and ROI list (see class docstring).
-        """
+        """Photobleach every ROI of the list, one after the other."""
+        self._check_user_config_path()
+
+        self._hardware_touched = True
         self._load_user_parameters()
         self._check_interrupt()
 
-        # make sure the laser are disabled when starting
+        # make sure the lasers are disabled when starting
         self._laser_logic.set_laser_disabled()
 
         # disable interfering GUI actions - mirrors legacy startTask()
@@ -128,21 +127,26 @@ class PhotoBleachingTask(ModuleTask):
 
         self._check_interrupt()
 
-        # lauch the photobleaching, one roi at a time
-        remaining = [name for name in self.roi_names if name not in self._photobleached_rois]
-        self.log.info(f'{len(remaining)} of {len(self.roi_names)} ROI(s) remaining.')
-
-        for roi_name in remaining:
+        # launch the photobleaching, one ROI at a time
+        self.log.info(f'{len(self.roi_names)} ROI(s) to photobleach, '
+                      f'{self.illumination_time:g} s each.')
+        for roi_name in self.roi_names:
             self._check_interrupt()
-            self._scan_one_roi(roi_name)
-            self._photobleached_rois.add(roi_name)
+            self._move_to_roi(roi_name)
+            self._illuminate_roi()
+            self._photobleached_rois.append(roi_name)
 
-        return {'imaged_rois': sorted(self._photobleached_rois)}
+        return {'photobleached_rois': list(self._photobleached_rois)}
 
     def _cleanup(self) -> None:
         """Return hardware to a safe idle state. Called unconditionally by the ModuleTask base class
-        whether _run() finished normally, raised, or was interrupted.
+        whether _run() finished normally, raised, or was interrupted. Each step is protected on its
+        own and this method never raises.
         """
+        if not getattr(self, '_hardware_touched', False):
+            self.log.info('cleanup: no hardware was touched, nothing to restore')
+            return
+
         self.log.info('cleanup running - restoring hardware to a safe idle state')
 
         if self.roi_names:
@@ -173,82 +177,57 @@ class PhotoBleachingTask(ModuleTask):
         self.log.info('cleanup finished')
 
     # ======================================================================================
-    # Per-ROI acquisition
+    # Per-ROI steps
     # ======================================================================================
 
-    def _scan_one_roi(self, roi_name: str) -> None:
-        """Move to one ROI, then run a single start/done trigger handshake with ZEN for it. Raises on
-        interrupt (via self._check_interrupt()) or on a timeout waiting for ZEN's "done" trigger (a
-        real synchronization problem, not an interrupt).
-        """
+    def _move_to_roi(self, roi_name: str) -> None:
+        """Move the stage to one ROI and wait until it has arrived."""
         self.log.info(f'Moving to {roi_name}')
-
         self._roi_logic.set_active_roi(name=roi_name)
         self._roi_logic.go_to_roi_xy()
         self._roi_logic.stage_wait_for_idle()
         self._check_interrupt()
 
-        # switch ON the laser. All the laser lines at once.
+    def _illuminate_roi(self) -> None:
+        """Switch all the laser lines on, wait illumination_time seconds, switch them off. If the
+        task is interrupted during the wait, the lasers are switched off by _cleanup().
+        """
         self._laser_logic.set_laser_enabled()
-        self._trigger_logic.send_trigger('trigger_celesta_shutter')
-        sleep(self.illumination_time)
+        self._interruptible_wait(self.illumination_time)
         self._laser_logic.set_laser_disabled()
 
-
-    def _wait_for_ready(self) -> None:
-        """One-time wait, before the ROI loop starts, for ZEN's own "ready" signal - a separate,
-        one-way channel that ZEN raises once armed (matching the legacy task's OUT7_ZEN). qudi never
-        sends anything on this channel (see the ``trigger_ZEN_ready`` input registered with
-        TriggerLogic), only polls it, so this cannot cause ZEN to perform a spurious acquisition.
-
-        No timeout, deliberately, same as the legacy task: the user has to manually select the right
-        ZEN experiment block and click "Start Experiment" first, which can take an arbitrary amount
-        of time. Still checks for interruption on every poll.
-        """
+    def _interruptible_wait(self, duration_s: float) -> None:
+        """Wait duration_s seconds, checking for an interrupt at least every 0.1 s."""
+        step_s = min(float(self.poll_interval_s), self._MAX_WAIT_STEP_S)
+        deadline = monotonic() + float(duration_s)
         while True:
             self._check_interrupt()
-            if self._trigger_logic.is_triggered('trigger_ZEN_ready'):
+            remaining_s = deadline - monotonic()
+            if remaining_s <= 0:
                 return
-            sleep(self.poll_interval_s)
-
-    def _wait_for_done(self) -> None:
-        """Poll the trigger input interfuse's "done" signal until it appears, checking for
-        interruption on every poll via self._check_interrupt().
-
-        If self.acquisition_timeout_s is exceeded, raises RuntimeError - this is a real ZEN
-        synchronization problem, not a user-requested interrupt, so it is deliberately NOT reported
-        as a ModuleScriptInterrupted (which self._check_interrupt() would raise for an actual
-        interrupt).
-        """
-        deadline = monotonic() + self.acquisition_timeout_s
-        while True:
-            self._check_interrupt()
-            if self._trigger_logic.is_triggered('trigger_ZEN_block_finished'):
-                return
-            if monotonic() > deadline:
-                raise RuntimeError(
-                    f'Timed out after {self.acquisition_timeout_s} s waiting for ZEN to confirm it '
-                    'is done. No "done" trigger was detected - check the ZEN synchronization.')
-            sleep(self.poll_interval_s)
+            sleep(min(step_s, remaining_s))
 
     # ======================================================================================
     # User parameters
     # ======================================================================================
 
-    def _load_user_parameters(self) -> None:
-        """Load the user-defined experiment parameters (sample name, ROI list, ...) from the YAML
-        file at self.user_config_path. See class docstring for the expected keys.
-        """
+    def _check_user_config_path(self) -> None:
+        """Refuse to run, before touching any hardware, if the setup subclass has no YAML path."""
+        if self.user_config_path in self._UNSET_PATHS:
+            raise RuntimeError(f'user_config_path not set for {type(self).__name__} — fill it in '
+                               f'photobleaching.py')
 
-        self.log.warning(self.user_config_path)
+    def _load_user_parameters(self) -> None:
+        """Load the user-defined experiment parameters (ROI list, imaging sequence, illumination
+        time) from the YAML file at self.user_config_path. See class docstring for the expected keys.
+        """
+        self.log.info(f'Loading photobleaching parameters from {self.user_config_path}')
         with open(self.user_config_path, 'r') as stream:
             user_param_dict = yaml.safe_load(stream)
 
         self.roi_list_path = user_param_dict['roi_list_path']
         self.imaging_sequence = user_param_dict['imaging_sequence']
-        self.illumination_time = user_param_dict['illumination_time'] * 60
-
-        self._trigger_logic.update_pulse_time('trigger_celesta_shutter', self.illumination_time)
+        self.illumination_time = float(user_param_dict['illumination_time'])  # seconds
 
         self._roi_logic.load_roi_list(self.roi_list_path)
         self.roi_names = list(self._roi_logic.roi_names)
@@ -259,3 +238,48 @@ class PhotoBleachingTask(ModuleTask):
             self._laser_logic.set_laser_line_intensity(int(wavelength), float(intensity))
 
 
+class PhotoBleachingSDTask(PhotoBleachingBase):
+    """Photobleaching on the spinning-disk setup.
+
+    The lasers only emit if the TTL cable has been manually disconnected from the Lumencor (Celesta)
+    shutter input before starting, and it must be reconnected afterwards: the Task Runner GUI asks
+    for confirmation before starting (start_warning) and shows a reminder when the task ends
+    (end_warning).
+
+    Config example for copy-paste (logic: task_runner: options: module_tasks:):
+
+        photobleaching:
+          module.Class: 'qudi.tasks.photobleaching.PhotoBleachingSDTask'
+          connect:
+            roi_logic: roi_logic
+            laser_logic: laser_control_logic
+    """
+
+    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/photobleaching_task_sd.yaml'
+    # Shown by the Task Runner GUI (see gui/task_runner/taskwidget.py): confirmation before start,
+    # reminder when the task ends.
+    start_warning = ('Before starting the photobleaching: manually disconnect the TTL cable from the '
+                     'Lumencor (Celesta) shutter input. Otherwise the task will run but the lasers '
+                     'will not emit.')
+    end_warning = ('Photobleaching finished: reconnect the TTL cable to the Lumencor (Celesta) '
+                   'shutter input before running any imaging task.')
+
+
+class PhotoBleachingRAMMTask(PhotoBleachingBase):
+    """Photobleaching on the RAMM setup. No manual step, so no start/end warning.
+
+    The location of the YAML written by the experiment configurator on the RAMM computer is not
+    known yet: user_config_path is 'TO FILL', and the task refuses to run (clear error, before any
+    hardware call) until it is filled in here.
+
+    Config example for copy-paste (logic: task_runner: options: module_tasks:) - not in
+    RAMM_config.cfg yet, which has no laser_control_logic so far:
+
+        # photobleaching:
+        #   module.Class: 'qudi.tasks.photobleaching.PhotoBleachingRAMMTask'
+        #   connect:
+        #     roi_logic: roi_logic
+        #     laser_logic: laser_control_logic
+    """
+
+    user_config_path = 'TO FILL'
