@@ -1,0 +1,30 @@
+experiment: photobleaching_SD
+
+description: >
+  Configure a photobleaching experiment on the Spining_disk microscope. Dummy copy of the
+  spinning-disk definition (spinning_disk/photobleaching.yaml), for testing on the dummy setup.
+
+output_filename: photobleaching_task_sd.yaml
+
+fields:
+
+  imaging_sequence:
+    visible: true
+    required: true
+    default: []
+    model: standard
+    excluded_sources:
+      - 405
+
+  roi_list_path:
+    visible: true
+    required: true
+    default: ""
+    editor: file
+    file_filter: JSON files (*.json)
+
+  illumination_time:
+    visible: true
+    required: true
+    default: 0.0
+    unit: s

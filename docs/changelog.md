@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-08
+Last updated: 2026-10-09
 
 ### Cameras
 
@@ -636,6 +636,68 @@ Last updated: 2026-10-08
   input before starting, otherwise the lasers will not emit) and
   `end_warning` (reconnect it before any imaging task), shown by the Task
   Runner GUI (see Task runner > Added). No other change to the task.
+- `tasks/photobleaching.py` (2026-10-09):
+  new `PhotoBleachingRAMMTask` (no warnings; `user_config_path = 'TO FILL'`
+  until the RAMM YAML location is known - the task then refuses to run with
+  "user_config_path not set for PhotoBleachingRAMMTask — fill it in
+  photobleaching.py", before any hardware call; commented config example in
+  its docstring, not added to `RAMM_config.cfg`, which has no
+  `laser_control_logic` yet). New dummy subclasses, at the end of
+  `photobleaching.py` (one file for all setups),
+  `PhotoBleachingSDDummyTask` / `PhotoBleachingRAMMDummyTask`: the real
+  SD/RAMM code on the dummy hardware, only `user_config_path` differs
+  (`/home/jb/qudi/qudi_task_config_files/photobleaching_task_sd.yaml` /
+  `..._RAMM.yaml`). They first lived in a separate dummy file, folded into
+  `photobleaching.py` the same day. Registered in `dummy_config.cfg` as
+  `photobleaching_sd_dummy` / `photobleaching_ramm_dummy` (connecting
+  `roi_logic` and `laser_control_logic`). New experiment definition
+  `custom_experiments_config/dummy/photobleaching_sd.yaml` (copy of the SD
+  one, named `photobleaching_SD` so it does not clash with the dummy
+  `photobleaching_RAMM`), added to the dummy configurator's `experiments`.
+
+#### Changed
+
+- `tasks/photobleaching_sd.py` → `tasks/photobleaching.py` (2026-10-09,
+  `git mv`, rename authorized by JB): one photobleaching task file for all
+  setups. Shared code in `PhotoBleachingBase`; `PhotoBleachingSDTask` is the
+  former `PhotoBleachingTask` (same YAML path, same start/end warnings, which
+  stay on the SD class only). Per-setup differences are class attributes
+  because qudi-core 1.7.0 does not pass task config options to ModuleTasks.
+  `Spinning_disk_config.cfg`: the `photobleaching` entry now points to
+  `qudi.tasks.photobleaching.PhotoBleachingSDTask` and no longer connects
+  `trigger_logic` (the trigger modules and `trigger_logic` stay, the ROI
+  scan task uses them). Behaviour changes:
+  - **Illumination time in seconds** (the `* 60` conversion is gone).
+    **YAMLs saved before this change hold minutes: re-save them from the
+    configurator** (see Experiment configurator > Changed).
+  - **Interruptible illumination**: the wait checks for an interrupt at
+    least every 0.1 s (it was one blocking `sleep()`), so a stop from the
+    Task Runner takes effect during illumination too; `_cleanup` then
+    switches the lasers off.
+  - **No shutter trigger**: removed the `trigger_logic` connector and the
+    `trigger_celesta_shutter` pulse (only a test; on the SD the shutter TTL
+    cable is disconnected by hand, covered by the warnings).
+  - Dead code removed: `_wait_for_ready` / `_wait_for_done` (ZEN handshake,
+    never called), the resume / ZEN text in the docstrings, unused
+    `os` / `datetime` imports. The config path is logged at info level
+    (was warning). Result key `imaged_rois` → `photobleached_rois`.
+  - `_cleanup` keeps the same safe-state steps (first ROI, lasers off +
+    intensities reset, idle velocity, ROI GUI actions back on, each in its
+    own try/except). New: it does nothing if `_run` stopped before touching
+    any hardware (e.g. the 'TO FILL' error), and it no longer raises if
+    `_setup` failed (found by the test below).
+- Verified offscreen against `qudi-core==1.7.0` (62/63 checks) and 1.8.0
+  (63/63), with fake ROI/laser logic connected through `connect_modules` and
+  the real `_run` / `_cleanup`: 2 ROIs × 0.3 s take 0.60 s (move → wait idle
+  → lasers on → 0.3 s → lasers off, per ROI); an interrupt during a 10 s
+  illumination switches the lasers off within ~50 ms; the RAMM 'TO FILL'
+  error is raised with no hardware call at all; all classes have empty
+  `call_parameters()` and exactly the `roi_logic` / `laser_logic`
+  connectors; warnings only on SD and SD dummy; dummies override only
+  `user_config_path`; all changed `.cfg` / `.yaml` files parse, and both
+  configs pass qudi-core's config validation on 1.8.0. The one 1.7.0
+  failure is `Spinning_disk_config.cfg`, which already failed before this
+  change: its multi-module `trigger_logic` connections need qudi-core 1.8.0.
 
 ### Experiment configurator
 
@@ -703,6 +765,17 @@ Last updated: 2026-10-08
     relocation JB asked to go ahead with. `experiments_configurator_logic`/
     `experiments_configurator_gui` still aren't wired into `OPM_config.cfg`
     or `RAMM_config.cfg` at all.
+
+#### Changed
+
+- `gui/experiments_setup/ui_exp_configurator.ui` (2026-10-09): the
+  illumination time is now entered in seconds, matching the photobleaching
+  task and the experiment definitions (`unit: s`). Label "Illumination time
+  (min)" → "Illumination time (s)", `illumination_time_DSpinBox` maximum
+  100 → 3600 (1 h; still 1 decimal). Minimal XML edit (two values), no
+  Designer re-save. **Photobleaching YAMLs saved before this change hold the
+  time in minutes and must be re-saved from the configurator** (5 would now
+  mean 5 s).
 
 #### Fixed
 

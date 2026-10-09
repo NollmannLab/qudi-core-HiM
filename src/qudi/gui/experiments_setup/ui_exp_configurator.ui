@@ -131,7 +131,7 @@
           <number>1</number>
          </property>
          <property name="maximum">
-          <double>100.000000000000000</double>
+          <double>3600.000000000000000</double>
          </property>
          <property name="value">
           <double>1.000000000000000</double>
@@ -546,7 +546,7 @@
        <item row="38" column="1">
         <widget class="QLabel" name="illumination_time_Label">
          <property name="text">
-          <string>Illumination time (min)</string>
+          <string>Illumination time (s)</string>
          </property>
         </widget>
        </item>
