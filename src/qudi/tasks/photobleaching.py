@@ -11,13 +11,14 @@ This is a qudi-core ModuleTask translation of the legacy qudi (InterruptableTask
 tasks/photobleaching_task_AIRYSCAN.py, logic/tasks/photobleaching_task_RAMM.py and
 logic/tasks/photobleaching_task_Celesta.py. The legacy files are left untouched.
 
-Structure (one file for all setups):
+Structure - all five classes live in this one file, for all setups:
   - PhotoBleachingBase: all the shared code. For each ROI: move the stage, wait until it is idle,
     switch the lasers on, wait for the illumination time (interruptible), switch the lasers off.
   - PhotoBleachingSDTask / PhotoBleachingRAMMTask: one subclass per setup. They only set class
     attributes (YAML location, and on the SD the start/end warnings).
-  - photobleaching_dummy.py: one dummy subclass per setup, running the same code on the dummy
-    hardware; only the YAML location differs.
+  - PhotoBleachingSDDummyTask / PhotoBleachingRAMMDummyTask: one dummy subclass per setup, at the
+    end of this file, running the same code on the dummy hardware (dummy_config.cfg); only the
+    YAML location differs.
 Per-setup differences are class attributes because qudi-core 1.7.0 does not pass the task config
 options to ModuleTasks.
 
@@ -39,6 +40,9 @@ Modified for qudi-core-HiM (2026-10-09, Modified with Claude code): unified phot
   only a test - on the SD the shutter TTL cable is disconnected by hand, see the warnings), the
   unused ZEN handshake methods _wait_for_ready / _wait_for_done, the resume text and unused
   imports. The config path is now logged at info level. Returns {'photobleached_rois': [...]}.
+
+Modified for qudi-core-HiM (2026-10-09, Modified with Claude code): dummy classes moved here from
+  photobleaching_dummy.py (one file for all setups).
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
@@ -62,7 +66,7 @@ class PhotoBleachingBase(ModuleTask):
     """Shared photobleaching code: scan a list of ROIs and illuminate each one for a fixed time.
 
     Not meant to be configured directly - use a setup subclass (PhotoBleachingSDTask,
-    PhotoBleachingRAMMTask) or one of the dummies in photobleaching_dummy.py. A subclass sets
+    PhotoBleachingRAMMTask) or one of the dummies at the end of this file. A subclass sets
     ``user_config_path`` (and, if the setup needs a manual step, ``start_warning`` /
     ``end_warning``, shown by the Task Runner GUI). Nothing is passed through the Task Runner: the
     task has no call parameters, everything comes from the YAML written by the experiment
@@ -283,3 +287,40 @@ class PhotoBleachingRAMMTask(PhotoBleachingBase):
     """
 
     user_config_path = 'TO FILL'
+
+
+# ==========================================================================================
+# Dummy versions — same code, dummy-setup YAML path, for testing on dummy_config.cfg
+# ==========================================================================================
+
+class PhotoBleachingSDDummyTask(PhotoBleachingSDTask):
+    """Spinning-disk photobleaching on the dummy hardware (same code and warnings as the SD task).
+
+    Config example for copy-paste (dummy_config.cfg, logic: task_runner: options: module_tasks:):
+
+        photobleaching_sd_dummy:
+          module.Class: 'qudi.tasks.photobleaching.PhotoBleachingSDDummyTask'
+          connect:
+            roi_logic: roi_logic
+            laser_logic: laser_control_logic
+    """
+
+    # Written by the experiment configurator for the 'photobleaching_SD' dummy definition
+    user_config_path = '/home/jb/qudi/qudi_task_config_files/photobleaching_task_sd.yaml'
+
+
+class PhotoBleachingRAMMDummyTask(PhotoBleachingRAMMTask):
+    """RAMM photobleaching on the dummy hardware (same code as the RAMM task, no warnings).
+
+    Config example for copy-paste (dummy_config.cfg, logic: task_runner: options: module_tasks:):
+
+        photobleaching_ramm_dummy:
+          module.Class: 'qudi.tasks.photobleaching.PhotoBleachingRAMMDummyTask'
+          connect:
+            roi_logic: roi_logic
+            laser_logic: laser_control_logic
+    """
+
+    # Written by the experiment configurator for the 'photobleaching_RAMM' dummy definition
+    # (output_filename of custom_experiments_config/dummy/photobleaching_ramm.yaml)
+    user_config_path = '/home/jb/qudi/qudi_task_config_files/photobleaching_task_RAMM.yaml'

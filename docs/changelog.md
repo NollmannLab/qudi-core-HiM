@@ -636,17 +636,19 @@ Last updated: 2026-10-09
   input before starting, otherwise the lasers will not emit) and
   `end_warning` (reconnect it before any imaging task), shown by the Task
   Runner GUI (see Task runner > Added). No other change to the task.
-- `tasks/photobleaching.py`, `tasks/photobleaching_dummy.py` (2026-10-09):
+- `tasks/photobleaching.py` (2026-10-09):
   new `PhotoBleachingRAMMTask` (no warnings; `user_config_path = 'TO FILL'`
   until the RAMM YAML location is known - the task then refuses to run with
   "user_config_path not set for PhotoBleachingRAMMTask — fill it in
   photobleaching.py", before any hardware call; commented config example in
   its docstring, not added to `RAMM_config.cfg`, which has no
-  `laser_control_logic` yet). New dummy subclasses
+  `laser_control_logic` yet). New dummy subclasses, at the end of
+  `photobleaching.py` (one file for all setups),
   `PhotoBleachingSDDummyTask` / `PhotoBleachingRAMMDummyTask`: the real
   SD/RAMM code on the dummy hardware, only `user_config_path` differs
   (`/home/jb/qudi/qudi_task_config_files/photobleaching_task_sd.yaml` /
-  `..._RAMM.yaml`). Registered in `dummy_config.cfg` as
+  `..._RAMM.yaml`). They first lived in a separate dummy file, folded into
+  `photobleaching.py` the same day. Registered in `dummy_config.cfg` as
   `photobleaching_sd_dummy` / `photobleaching_ramm_dummy` (connecting
   `roi_logic` and `laser_control_logic`). New experiment definition
   `custom_experiments_config/dummy/photobleaching_sd.yaml` (copy of the SD

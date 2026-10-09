@@ -33,7 +33,7 @@ Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): compact layo
 
 Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): optional start confirmation
   and end reminder declared by the task. Some tasks need a manual hardware step before they start
-  and after they end (e.g. photobleaching_sd.py: unplug, then re-plug, the Celesta shutter TTL
+  and after they end (e.g. photobleaching.py: unplug, then re-plug, the Celesta shutter TTL
   cable). A ModuleTask can now define the class attributes "start_warning" / "end_warning" (plain
   strings). When Run is clicked, start_warning is shown in a modal dialog that must be confirmed
   ("Done - start task"; Cancel/Esc/close aborts the start). When a task that this widget saw start
@@ -87,7 +87,7 @@ class TaskWidget(QtWidgets.QWidget):
                              Never shown when the button is used to interrupt a running task.
         end_warning (str): shown in a non-modal reminder when a task that this widget saw start
                            finishes, whether it succeeded, failed or was interrupted.
-    Both are plain class attributes of the ModuleTask (e.g. PhotoBleachingTask), because task
+    Both are plain class attributes of the ModuleTask (e.g. PhotoBleachingSDTask), because task
     config options are not passed to ModuleTasks. Dialogs are always opened here, in the GUI
     thread, never from the task itself (tasks run in a worker thread).
     """
