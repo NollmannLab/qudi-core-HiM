@@ -53,6 +53,11 @@ Modified for qudi-core-HiM (2026-09-26, Modified with Claude code): new file - q
   of the legacy ROI_multicolour_imaging_SD.py task, scoped down to stage motion + a single ZEN
   trigger handshake per ROI (see module docstring above), with checkpoint-based resume and
   exception-based interruption.
+
+Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): user_config_path now comes from
+  the config ("options: user_config_path: ..." in the task's entry, applied by the task runner)
+  instead of being hard-coded; the class default is None and the task fails at run start, before
+  any hardware call, with a clear message if it is not set. The config path is logged at info level.
 -----------------------------------------------------------------------------------
 """
 
@@ -74,12 +79,13 @@ class RoiScanTask(ModuleTask):
 
         module_tasks:
           roi_scan:
-            module.Class: 'qudi.tasks.roi_multicolour_scan_sd_task.RoiScanTask'
+            module.Class: 'qudi.tasks.roi_multicolour_scan_sd.RoiScanTask'
             connect:
-              roi: roi_logic
+              roi_logic: roi_logic
               trigger_logic: trigger_logic
+              laser_logic: laser_control_logic
             options:
-              path_to_user_config: '/home/him_spinning/qudi_task_config_files/roi_scan_task_sd.yml'
+              user_config_path: '/path/to/qudi_task_config_files/roi_multicolor_scan_task_sd.yaml'
               acquisition_timeout_s: 120.0   # max time to wait for ZEN's "done" trigger on one ROI
               poll_interval_s: 0.1
               scan_stage_velocity: {'x': 1, 'y': 1}
@@ -92,11 +98,11 @@ class RoiScanTask(ModuleTask):
     hardware/interfuse_hardware/daq_trigger_sync.py. The ready and per-ROI completion inputs
     preserve the legacy task's OUT7_ZEN / OUT8_ZEN structure.
 
-    User config file (path_to_user_config) expected keys:
+    User config file (user_config_path, given by the config file) expected keys:
         sample_name: 'Mysample'
         dapi: False           # optional, default False - affects only folder/file naming
         rna: False             # optional, default False - affects only folder/file naming
-        save_path: '/home/him_spinning/data'
+        save_path: '/path/to/data'
         roi_list_path: 'pathstem/qudi_roi_lists/roilist_20260101.json'
 
     Resuming an interrupted run: start the task with the extra argument resume=True (same task name).
@@ -110,7 +116,7 @@ class RoiScanTask(ModuleTask):
     trigger_logic = Connector(interface='TriggerLogic')
     laser_logic = Connector(interface='LaserControlLogic')
 
-    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/roi_multicolor_scan_task_sd.yaml'
+    user_config_path = None  # set by the config: options: user_config_path: ...
     acquisition_timeout_s = 120.0  # max time to wait for ZEN's "done" trigger on one ROI
     poll_interval_s = 0.1
     scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/S
@@ -140,6 +146,11 @@ class RoiScanTask(ModuleTask):
         """Run the scan. Pass resume=True to continue a previous, interrupted attempt on the same
         sample and ROI list (see class docstring).
         """
+        # Refuse to run, before touching any hardware, if the config gave no YAML path
+        if self.user_config_path in (None, '', 'TO FILL'):
+            raise RuntimeError(f'user_config_path not set for task {type(self).__name__} — add '
+                               f'`options: user_config_path: ...` to this task\'s entry in the '
+                               f'config file')
         self._load_user_parameters()
 
         checkpoint = self._load_checkpoint() if resume_from_roi else None
@@ -358,7 +369,7 @@ class RoiScanTask(ModuleTask):
         file at self.user_config_path. See class docstring for the expected keys.
         """
 
-        self.log.warning(self.user_config_path)
+        self.log.info(f'Loading ROI scan parameters from {self.user_config_path}')
         with open(self.user_config_path, 'r') as stream:
             user_param_dict = yaml.safe_load(stream)
 

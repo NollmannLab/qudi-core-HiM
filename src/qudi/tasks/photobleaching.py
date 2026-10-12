@@ -11,16 +11,15 @@ This is a qudi-core ModuleTask translation of the legacy qudi (InterruptableTask
 tasks/photobleaching_task_AIRYSCAN.py, logic/tasks/photobleaching_task_RAMM.py and
 logic/tasks/photobleaching_task_Celesta.py. The legacy files are left untouched.
 
-Structure - all five classes live in this one file, for all setups:
+Structure - one file for all setups:
   - PhotoBleachingBase: all the shared code. For each ROI: move the stage, wait until it is idle,
     switch the lasers on, wait for the illumination time (interruptible), switch the lasers off.
-  - PhotoBleachingSDTask / PhotoBleachingRAMMTask: one subclass per setup. They only set class
-    attributes (YAML location, and on the SD the start/end warnings).
-  - PhotoBleachingSDDummyTask / PhotoBleachingRAMMDummyTask: one dummy subclass per setup, at the
-    end of this file, running the same code on the dummy hardware (dummy_config.cfg); only the
-    YAML location differs.
-Per-setup differences are class attributes because qudi-core 1.7.0 does not pass the task config
-options to ModuleTasks.
+  - PhotoBleachingSDTask / PhotoBleachingRAMMTask: one subclass per setup. They differ only by
+    what the setup needs (on the SD: the start/end warnings for the manual TTL-cable step).
+The location of the YAML written by the experiment configurator differs between machines, so it is
+NOT in the code: each microscope's config file sets it in the task's entry, with
+"options: user_config_path: ..." (the task runner applies task options, see
+logic/taskrunner_logic.py). The dummy setup uses these same two classes with a dummy path.
 
 Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): added the class attributes
   start_warning / end_warning. The task only works if the TTL cable has been manually disconnected
@@ -44,6 +43,13 @@ Modified for qudi-core-HiM (2026-10-09, Modified with Claude code): unified phot
 Modified for qudi-core-HiM (2026-10-09, Modified with Claude code): dummy classes moved here from
   photobleaching_dummy.py (one file for all setups).
 
+Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): the YAML path now comes from the
+  config (task "options: user_config_path: ...", applied by the task runner) instead of being
+  hard-coded per class. PhotoBleachingSDTask and PhotoBleachingRAMMTask inherit
+  user_config_path = None; the RAMM 'TO FILL' default and the two dummy classes are removed (the
+  dummy config uses the real classes with a dummy path). If the path is missing (or still
+  'TO FILL' in a config), the task fails at run start with a clear message, before any hardware call.
+
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -66,9 +72,9 @@ class PhotoBleachingBase(ModuleTask):
     """Shared photobleaching code: scan a list of ROIs and illuminate each one for a fixed time.
 
     Not meant to be configured directly - use a setup subclass (PhotoBleachingSDTask,
-    PhotoBleachingRAMMTask) or one of the dummies at the end of this file. A subclass sets
-    ``user_config_path`` (and, if the setup needs a manual step, ``start_warning`` /
-    ``end_warning``, shown by the Task Runner GUI). Nothing is passed through the Task Runner: the
+    PhotoBleachingRAMMTask). ``user_config_path`` is given by the config file
+    ("options: user_config_path: ..." in the task's entry); a subclass may add ``start_warning`` /
+    ``end_warning`` if the setup needs a manual step (shown by the Task Runner GUI). Nothing is passed through the Task Runner: the
     task has no call parameters, everything comes from the YAML written by the experiment
     configurator.
 
@@ -88,7 +94,7 @@ class PhotoBleachingBase(ModuleTask):
     roi_logic = Connector(interface='RoiLogic')
     laser_logic = Connector(interface='LaserControlLogic')
 
-    user_config_path = None   # set by each setup subclass
+    user_config_path = None   # set by the config: options: user_config_path: ...
     poll_interval_s = 0.1
     scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/S
     idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}
@@ -216,10 +222,11 @@ class PhotoBleachingBase(ModuleTask):
     # ======================================================================================
 
     def _check_user_config_path(self) -> None:
-        """Refuse to run, before touching any hardware, if the setup subclass has no YAML path."""
+        """Refuse to run, before touching any hardware, if the config gave no YAML path."""
         if self.user_config_path in self._UNSET_PATHS:
-            raise RuntimeError(f'user_config_path not set for {type(self).__name__} — fill it in '
-                               f'photobleaching.py')
+            raise RuntimeError(f'user_config_path not set for task {type(self).__name__} — add '
+                               f'`options: user_config_path: ...` to this task\'s entry in the '
+                               f'config file')
 
     def _load_user_parameters(self) -> None:
         """Load the user-defined experiment parameters (ROI list, imaging sequence, illumination
@@ -250,16 +257,18 @@ class PhotoBleachingSDTask(PhotoBleachingBase):
     for confirmation before starting (start_warning) and shows a reminder when the task ends
     (end_warning).
 
-    Config example for copy-paste (logic: task_runner: options: module_tasks:):
+    user_config_path comes from the config. Config example for copy-paste
+    (logic: task_runner: options: module_tasks:):
 
         photobleaching:
           module.Class: 'qudi.tasks.photobleaching.PhotoBleachingSDTask'
           connect:
             roi_logic: roi_logic
             laser_logic: laser_control_logic
+          options:
+            user_config_path: '/path/to/qudi_task_config_files/photobleaching_task_sd.yaml'
     """
 
-    user_config_path = '/home/him_spinning/qudi/qudi_task_config_files/photobleaching_task_sd.yaml'
     # Shown by the Task Runner GUI (see gui/task_runner/taskwidget.py): confirmation before start,
     # reminder when the task ends.
     start_warning = ('Before starting the photobleaching: manually disconnect the TTL cable from the '
@@ -272,9 +281,9 @@ class PhotoBleachingSDTask(PhotoBleachingBase):
 class PhotoBleachingRAMMTask(PhotoBleachingBase):
     """Photobleaching on the RAMM setup. No manual step, so no start/end warning.
 
-    The location of the YAML written by the experiment configurator on the RAMM computer is not
-    known yet: user_config_path is 'TO FILL', and the task refuses to run (clear error, before any
-    hardware call) until it is filled in here.
+    user_config_path comes from the config. The location of the YAML written by the experiment
+    configurator on the RAMM computer is not known yet: until it is, the example below keeps
+    'TO FILL', which the task refuses (clear error at run start, before any hardware call).
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:) - not in
     RAMM_config.cfg yet, which has no laser_control_logic so far:
@@ -284,43 +293,6 @@ class PhotoBleachingRAMMTask(PhotoBleachingBase):
         #   connect:
         #     roi_logic: roi_logic
         #     laser_logic: laser_control_logic
+        #   options:
+        #     user_config_path: 'TO FILL'
     """
-
-    user_config_path = 'TO FILL'
-
-
-# ==========================================================================================
-# Dummy versions — same code, dummy-setup YAML path, for testing on dummy_config.cfg
-# ==========================================================================================
-
-class PhotoBleachingSDDummyTask(PhotoBleachingSDTask):
-    """Spinning-disk photobleaching on the dummy hardware (same code and warnings as the SD task).
-
-    Config example for copy-paste (dummy_config.cfg, logic: task_runner: options: module_tasks:):
-
-        photobleaching_sd_dummy:
-          module.Class: 'qudi.tasks.photobleaching.PhotoBleachingSDDummyTask'
-          connect:
-            roi_logic: roi_logic
-            laser_logic: laser_control_logic
-    """
-
-    # Written by the experiment configurator for the 'photobleaching_SD' dummy definition
-    user_config_path = '/home/jb/qudi/qudi_task_config_files/photobleaching_task_sd.yaml'
-
-
-class PhotoBleachingRAMMDummyTask(PhotoBleachingRAMMTask):
-    """RAMM photobleaching on the dummy hardware (same code as the RAMM task, no warnings).
-
-    Config example for copy-paste (dummy_config.cfg, logic: task_runner: options: module_tasks:):
-
-        photobleaching_ramm_dummy:
-          module.Class: 'qudi.tasks.photobleaching.PhotoBleachingRAMMDummyTask'
-          connect:
-            roi_logic: roi_logic
-            laser_logic: laser_control_logic
-    """
-
-    # Written by the experiment configurator for the 'photobleaching_RAMM' dummy definition
-    # (output_filename of custom_experiments_config/dummy/photobleaching_ramm.yaml)
-    user_config_path = '/home/jb/qudi/qudi_task_config_files/photobleaching_task_RAMM.yaml'

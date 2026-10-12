@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-09
+Last updated: 2026-10-12
 
 ### Cameras
 
@@ -391,6 +391,27 @@ Last updated: 2026-10-09
   failure and interrupt. Also checked once with the real modal `exec()`
   (timer-clicked buttons), the compact-layout smoke test, and `py_compile`.
   Still to be checked by JB on the SD microscope.
+- `logic/taskrunner_logic.py` (2026-10-12): task `options:` from the config.
+  qudi-core's task runner ignored a task entry's `options:` block and
+  created every task with no arguments, so machine-specific values (the
+  YAML path written by the experiment configurator) had to be hard-coded in
+  the task classes. Each task entry may now carry `options:`; they are
+  validated in `on_activate` - a mapping with str keys, each key a public
+  class attribute the task already declares and not a method, `Connector`,
+  Qt signal or property - otherwise activation fails with a clear error
+  naming the task, the key and the allowed attributes. The values are set
+  with `setattr()` on each new task instance in `__init_task`, so they
+  override the class default for that instance only. Run / interrupt
+  logic, signals, threading and the Task Runner GUI are unchanged (the GUI
+  still reads `start_warning` / `end_warning` from the class). Example:
+  `options: user_config_path: '/path/to/photobleaching_task_sd.yaml'`.
+  Verified with the real `on_activate` / `__init_task` methods against
+  `qudi-core==1.7.0` and 1.8.0: both real configs activate; the option is
+  set on the instance and not on the class or on another entry of the same
+  class; a task without `options:` is created as before; an unknown key, a
+  `_private` key, a method, a Connector, a property, a Qt signal, a
+  non-mapping and a non-str key each fail at `on_activate` with a clear
+  message.
 
 #### Changed
 
@@ -698,6 +719,38 @@ Last updated: 2026-10-09
   configs pass qudi-core's config validation on 1.8.0. The one 1.7.0
   failure is `Spinning_disk_config.cfg`, which already failed before this
   change: its multi-module `trigger_logic` connections need qudi-core 1.8.0.
+- `tasks/photobleaching.py`, `tasks/roi_multicolour_scan_sd.py`,
+  `Spinning_disk_config.cfg`, `dummy_config.cfg` (2026-10-12): the YAML path
+  of these tasks now comes from the config, through the task runner's new
+  `options:` (see Task runner > Added), instead of being hard-coded per
+  class. **Each microscope's `.cfg` must now set
+  `options: user_config_path: ...` in the entry of every photobleaching /
+  ROI-scan task it uses** - otherwise the task stops at run start with
+  "user_config_path not set for task <class> — add `options:
+  user_config_path: ...` to this task's entry in the config file", before
+  touching any hardware (a `'TO FILL'` placeholder is refused the same way).
+  - Photobleaching: `PhotoBleachingSDTask` and `PhotoBleachingRAMMTask`
+    inherit `user_config_path = None`; the RAMM `'TO FILL'` default and the
+    dummy classes `PhotoBleachingSDDummyTask` / `PhotoBleachingRAMMDummyTask`
+    are removed - `dummy_config.cfg` keeps the entries
+    `photobleaching_sd_dummy` / `photobleaching_ramm_dummy` but now uses the
+    real SD / RAMM classes with the dummy paths as options. The SD
+    start/end warnings are unchanged.
+  - ROI scan (`RoiScanTask`): `user_config_path = None` with the same early
+    error in `_run` (its `_cleanup` still restores stage velocity and ROI
+    GUI actions afterwards, unchanged); the config path is logged at info
+    level (was warning); docstring example updated to
+    `options: user_config_path` (and to the real module and connector names).
+  - `Spinning_disk_config.cfg`: `photobleaching` and `roi_multicolour_scan`
+    get `options: user_config_path:` with exactly the paths removed from the
+    code. `RAMM_config.cfg` unchanged (no laser logic there yet).
+  - Verified against `qudi-core==1.7.0` and 1.8.0 with fake ROI / laser
+    logic and the path given through options: 2 ROIs × 0.3 s take 0.60 s;
+    an interrupt during illumination switches the lasers off within ~50 ms
+    and cleanup completes; a missing or `'TO FILL'` path fails with the new
+    message and no hardware call. Config validation: `dummy_config.cfg`
+    passes on both versions, `Spinning_disk_config.cfg` on 1.8.0 (it
+    already failed on 1.7.0 before this change - `trigger_logic`).
 
 ### Experiment configurator
 

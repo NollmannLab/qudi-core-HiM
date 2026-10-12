@@ -24,8 +24,18 @@ Modified for qudi-core-HiM (2026-09-24, Modified with Claude code): added loggin
   already correctly implemented in qudi-core; see qudi.tasks.dummy_fluidics_task for what was
   actually fixed there (a stray, non-functional interrupt_task() method that had been added directly
   to a ModuleTask subclass, which is not how qudi-core tasks are interrupted).
+
+Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): task "options:" from the config.
+  qudi-core's task runner ignored a task's options block and created every task with no arguments,
+  so machine-specific values (e.g. the YAML path written by the experiment configurator) had to be
+  hard-coded in the task classes. Each task entry may now carry an "options:" mapping; it is
+  validated in on_activate (every key must be a public, non-callable, non-Connector, non-property
+  class attribute that the task already declares - otherwise activation fails with a clear error)
+  and applied with setattr() on each new task instance in __init_task, overriding the class
+  default for that instance only. Run / interrupt logic, signals and threading are unchanged.
 """
 
+import inspect
 from functools import partial
 from PySide6 import QtCore
 from typing import Any, Type, Mapping, List, Dict
@@ -35,12 +45,40 @@ from qudi.core.module import LogicBase
 from qudi.core.scripting.moduletask import ModuleTask
 from qudi.core.scripting.modulescript import import_module_script
 from qudi.core.configoption import ConfigOption
+from qudi.core.connector import Connector
+
+try:  # ConnectorList only exists from qudi-core 1.8.0 on
+    from qudi.core.connector import ConnectorList
+    _CONNECTOR_TYPES = (Connector, ConnectorList)
+except ImportError:
+    _CONNECTOR_TYPES = (Connector,)
 
 
 class TaskRunnerLogic(LogicBase):
     """This module keeps a collection of available ModuleTask subclasses (defined by config) and
     respective initialized instances that can be run.
     Handles module connections to tasks and allows monitoring of task states and results.
+
+    Task options (qudi-core-HiM): a task entry may carry an "options:" mapping. Each key must be a
+    public class attribute the task already declares (not private, not a method, Connector, Qt
+    signal or property); its value replaces the class default on the task instance created for
+    each run - the class itself and other tasks are not modified. Invalid options make the
+    activation of the task runner fail with a clear error. Typical use: the location of the YAML
+    file written by the experiment configurator, which differs between machines.
+
+    Config example:
+
+        task_runner:
+            module.Class: 'taskrunner_logic.TaskRunnerLogic'
+            options:
+                module_tasks:
+                    photobleaching:
+                        module.Class: 'qudi.tasks.photobleaching.PhotoBleachingSDTask'
+                        connect:
+                            roi_logic: roi_logic
+                            laser_logic: laser_control_logic
+                        options:
+                            user_config_path: '/path/to/photobleaching_task_sd.yaml'
     """
 
     _module_task_configs = ConfigOption(name='module_tasks', default=dict(), missing='warn')
@@ -55,12 +93,14 @@ class TaskRunnerLogic(LogicBase):
         self._thread_lock = Mutex()
         self._running_tasks = dict()
         self._configured_task_types = dict()
+        self._task_options = dict()  # task name -> validated options applied to each instance
         self._consecutive_activation = False  # Flag indicating consecutive activations
 
     def on_activate(self) -> None:
         """Initialise task runner."""
         self._running_tasks = dict()
         self._configured_task_types = dict()
+        self._task_options = dict()
         for name, task_cfg in self._module_task_configs.items():
             if name in self._configured_task_types:
                 raise KeyError(f'Duplicate task name "{name}" encountered in config')
@@ -68,9 +108,52 @@ class TaskRunnerLogic(LogicBase):
             task = import_module_script(module, cls, reload=self._consecutive_activation)
             if not issubclass(task, ModuleTask):
                 raise TypeError('Configured task is not a ModuleTask (sub)class')
+            options = task_cfg.get('options') or {}
+            self._task_options[name] = self._validate_task_options(name, task, options)
             self._configured_task_types[name] = task
         self._sigStartTask.connect(self._run_task, QtCore.Qt.QueuedConnection)
         self._consecutive_activation = True
+
+    @staticmethod
+    def _option_attributes(task_type: Type[ModuleTask]) -> List[str]:
+        """Names of the class attributes of task_type that may be set through "options:": public,
+        not callable (methods, classes), not a Connector, Qt signal or property.
+        """
+        allowed = list()
+        for attr_name in dir(task_type):
+            if attr_name.startswith('_'):
+                continue
+            value = inspect.getattr_static(task_type, attr_name)
+            if isinstance(value, (property, QtCore.Signal, QtCore.QMetaObject) + _CONNECTOR_TYPES):
+                continue
+            if callable(value) or isinstance(value, (staticmethod, classmethod)):
+                continue
+            allowed.append(attr_name)
+        return allowed
+
+    def _validate_task_options(self, name: str, task_type: Type[ModuleTask],
+                               options: Any) -> Dict[str, Any]:
+        """Check the "options:" of one task entry. Raises with a clear message if they are not a
+        mapping with str keys, or if a key is not a settable class attribute of the task.
+        """
+        if not isinstance(options, Mapping):
+            raise TypeError(f'Invalid "options" for task "{name}" ({task_type.__name__}): expected '
+                            f'a mapping of attribute names to values, got {type(options).__name__}.')
+        allowed = self._option_attributes(task_type)
+        for key in options:
+            if not isinstance(key, str):
+                raise TypeError(f'Invalid option key {key!r} for task "{name}" '
+                                f'({task_type.__name__}): option names must be strings.')
+            if key not in allowed:
+                if key.startswith('_'):
+                    reason = 'private attributes cannot be set from the config'
+                elif not hasattr(task_type, key):
+                    reason = 'the task class declares no such attribute'
+                else:
+                    reason = 'it is a method, Connector, signal or property, not a plain value'
+                raise KeyError(f'Invalid option "{key}" for task "{name}" ({task_type.__name__}): '
+                               f'{reason}. Allowed options: {", ".join(allowed) or "none"}.')
+        return dict(options)
 
     def on_deactivate(self) -> None:
         """Shut down task runner."""
@@ -158,7 +241,11 @@ class TaskRunnerLogic(LogicBase):
         try:
             if name in self._running_tasks:
                 raise RuntimeError(f'ModuleTask "{name}" is already initialized')
-            return self._configured_task_types[name]()
+            task = self._configured_task_types[name]()
+            # Config "options:" override the class defaults on this instance only
+            for key, value in self._task_options.get(name, {}).items():
+                setattr(task, key, value)
+            return task
         except:
             self.log.exception(f'Exception during initialization of ModuleTask "{name}":')
             raise
