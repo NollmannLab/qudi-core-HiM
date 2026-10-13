@@ -34,7 +34,8 @@ Sequence
                 check interrupt; reset intensities; set this line's intensity; lasers on;
                 snap one image; lasers off; invalid image -> raise
             append each frame (uint16) to its entry's TIFF immediately (no stack kept in memory)
-        close the TIFFs, write galvo_{i:03d}/metadata.txt, append a row to galvo_positions.csv
+        close the TIFFs, write galvo_{i:03d}/metadata.txt, append a row to galvo_positions.csv;
+        log "PSF stack: galvo position i/N (V volts) done"
     cleanup (always; each step protected on its own; never raises; nothing if no hardware touched):
         lasers off + intensities reset; galvo to rest; stage back to z_focus (z only);
         close any open TIFF (partial files are kept); restore the previous camera and its exposure;
@@ -82,43 +83,9 @@ Folder layout
     <save_path>/<YYYY-MM-DD>/psf_<HHMMSS>/          (never overwritten: _1, _2, ... appended)
         experiment_config.yaml                       copy of the experiment-configurator YAML
         galvo_positions.csv                          one row per COMPLETED galvo position
-        timing_log.csv                               one row per timed step (timing_log_enabled)
-        timing_summary.txt                           timing statistics per step (timing_log_enabled)
         galvo_000/  00_561nm_10pct.tif  [01_561nm_50pct.tif ...]  metadata.txt
                     (one TIFF per laser_lines entry: {index:02d}_{wavelength}nm_{intensity:g}pct.tif)
         galvo_001/  ...
-
-Timing log (timing_log_enabled = True, default; settable through the config options)
-----------
-    Instrumentation only - the acquisition sequence, files, checks and cleanup are the same with or
-    without it. Durations are measured with time.perf_counter() and written in ms (3 decimals).
-    timing_log.csv - columns
-        timestamp,galvo_index,galvo_voltage_V,z_index,z_offset_um,line_index,wavelength_nm,
-        intensity_pct,step,duration_ms            (empty cells where a column does not apply)
-        opened (append mode) before the first hardware action; one row per completed step, flushed
-        immediately; os.fsync() after each plane, each galvo position and in cleanup; closed by the
-        cleanup - nothing measured is lost if the task is interrupted or qudi crashes.
-    steps
-        once per run:          setup (from _run start to the first galvo move), cleanup (whole
-                               _cleanup)
-        per galvo position:    galvo_set, open_writers (folder + TIFF writers), close_writers,
-                               write_metadata, write_csv_row
-        per z plane:           stage_move_cmd, stage_wait_idle, plane_total (from just before
-                               move_stage to the end of the last TIFF write), plane_other
-                               (plane_total minus the plane's measured steps = Python / unmeasured
-                               overhead, e.g. reading the previous image before the snap)
-        per laser_lines entry: laser_set_intensity (reset + set), laser_enable, camera_snap
-                               (start_single_acquisition only), camera_get_image (get_last_image +
-                               validity check + uint16 conversion), laser_disable, tiff_write
-    timing_summary.txt - written at the end of the run, or by the cleanup if the run did not finish
-        (marked "run interrupted" / "run stopped by an error"): run parameters (galvo positions,
-        planes, lines, images, exposure set and read back, image size), per step count / mean /
-        median / min / max / total (s) / % of the total run time, snap overhead per image (mean
-        camera_snap - exposure), total run time, time per image, images per second. The same table
-        is logged at info level. A progress line (mean plane_total, time remaining) is logged after
-        each galvo position.
-    If the timing file cannot be written, ONE error is logged and the acquisition continues without
-    timing - timing never stops an acquisition.
 
 Config example (logic: task_runner: options: module_tasks:)
 --------------
@@ -134,7 +101,6 @@ Config example (logic: task_runner: options: module_tasks:)
         user_config_path: 'C:\\Users\\JB\\qudi_files\\qudi_task_config_files\\psf_stack_task_opm.yaml'
         metadata_template: 'C:\\path\\to\\custom_metadata_templates\\OPM_setup.cfg'
         camera_name: 'opm_camera_1'   # optional, default 'opm_camera_1'
-        timing_log_enabled: True      # optional, default True
 
 The experiment parameters come from the experiment-configurator YAML (user_config_path, see
 above); the setup-specific settings come from the config options (qudi-core-HiM task runner).
@@ -177,15 +143,16 @@ Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): the experime
 Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): every stage move (run and
   cleanup) is z-only - move_stage((None, None, z)) - so x and y are never commanded during the
   task; x0 / y0 are still read once at start and logged.
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): timing instrumentation removed
+  (diagnosis done; the stage wait was fixed in the Tiger driver). One plain progress line per galvo
+  position; the acquisition itself is unchanged.
 """
 
 import copy
 import csv
 import os
-from contextlib import contextmanager
 from datetime import datetime
-from time import perf_counter
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import yaml
@@ -194,80 +161,6 @@ from tifffile import TiffWriter
 
 from qudi.core.connector import Connector
 from qudi.core.scripting.moduletask import ModuleTask
-
-
-class _TimingLog:
-    """timing_log.csv writer + in-memory durations for the summary. Never raises: the first I/O
-    error is logged once and switches timing off (self.ok = False) for the rest of the run.
-    """
-
-    COLUMNS = ['timestamp', 'galvo_index', 'galvo_voltage_V', 'z_index', 'z_offset_um',
-               'line_index', 'wavelength_nm', 'intensity_pct', 'step', 'duration_ms']
-
-    def __init__(self, path: str, log) -> None:
-        self.path = path
-        self.log = log
-        self.ok = True
-        self.durations: Dict[str, List[float]] = {}  # step -> durations in ms
-        self._file = None
-        self._writer = None
-        try:
-            self._file = self._open_file(path)
-            self._writer = csv.writer(self._file)
-            if self._file.tell() == 0:
-                self._write(self.COLUMNS)
-        except Exception as err:
-            self._fail(err)
-
-    @staticmethod
-    def _open_file(path: str):
-        return open(path, 'a', newline='', encoding='utf-8')
-
-    def _write(self, row: list) -> None:
-        self._writer.writerow(row)
-        self._file.flush()
-
-    def _fail(self, err: Exception) -> None:
-        if self.ok:
-            self.log.error(f'Timing log "{self.path}" cannot be written ({err}) - timing switched '
-                           f'off, the acquisition continues.')
-        self.ok = False
-        file, self._file = self._file, None
-        if file is not None:
-            try:
-                file.close()
-            except Exception:
-                pass
-
-    def record(self, step: str, duration_s: float, ids: dict) -> None:
-        if not self.ok:
-            return
-        ms = round(duration_s * 1e3, 3)
-        try:
-            self._write([datetime.now().isoformat(timespec='milliseconds')]
-                        + [ids.get(c, '') for c in self.COLUMNS[1:8]] + [step, f'{ms:.3f}'])
-        except Exception as err:
-            self._fail(err)
-            return
-        self.durations.setdefault(step, []).append(ms)
-
-    def sync(self) -> None:
-        if not self.ok or self._file is None:
-            return
-        try:
-            self._file.flush()
-            os.fsync(self._file.fileno())
-        except Exception as err:
-            self._fail(err)
-
-    def close(self) -> None:
-        self.sync()
-        file, self._file = self._file, None
-        if file is not None:
-            try:
-                file.close()
-            except Exception as err:
-                self.log.error(f'Could not close the timing log "{self.path}": {err}')
 
 
 class PsfStackTask(ModuleTask):
@@ -292,7 +185,6 @@ class PsfStackTask(ModuleTask):
     user_config_path = None     # required: experiment-configurator YAML (experiment 'psf_stack')
     metadata_template = None    # required: OPM metadata template (YAML), e.g. .../OPM_setup.cfg
     camera_name = 'opm_camera_1'  # camera used (selected at start, previous camera restored at the end)
-    timing_log_enabled = True   # write timing_log.csv / timing_summary.txt
 
     _EXPERIMENT = 'psf_stack'
     _CONFIG_KEYS = ('galvo_start', 'galvo_stop', 'galvo_step', 'num_z_planes', 'z_step',
@@ -300,10 +192,6 @@ class PsfStackTask(ModuleTask):
 
     _UNSET = (None, '', 'TO FILL')
     _ROUND_DECIMALS = 4
-    _STEP_ORDER = ('setup', 'galvo_set', 'open_writers', 'stage_move_cmd', 'stage_wait_idle',
-                   'laser_set_intensity', 'laser_enable', 'camera_snap', 'camera_get_image',
-                   'laser_disable', 'tiff_write', 'plane_other', 'plane_total', 'close_writers',
-                   'write_metadata', 'write_csv_row', 'cleanup')
 
     # ------------------------------------------------------------------------------------------
     # ModuleTask
@@ -324,12 +212,6 @@ class PsfStackTask(ModuleTask):
         self._z_step_um: Optional[float] = None
         self._save_root: Optional[str] = None
         self._user_config_raw: Optional[bytes] = None
-        # timing instrumentation
-        self._tlog: Optional[_TimingLog] = None
-        self._t_run_start: Optional[float] = None
-        self._plane_acc = 0.0
-        self._run_finished = False
-        self._timing_info: dict = {}
 
         self._camera = self.camera_logic()
         self._laser = self.laser_logic()
@@ -338,7 +220,6 @@ class PsfStackTask(ModuleTask):
         self._filter = self.filter_wheel_logic()
 
     def _run(self) -> dict:
-        self._t_run_start = perf_counter()
         # ---- checks that do not touch any hardware ------------------------------------------
         self._check_setup_options()
         template = self._load_metadata_template()
@@ -356,8 +237,6 @@ class PsfStackTask(ModuleTask):
         with open(csv_path, 'w', newline='') as f:
             csv.writer(f).writerow(['folder', 'galvo_voltage_V', 'n_z_planes', 'laser_lines_nm',
                                     'completed', 'timestamp'])
-        if self.timing_log_enabled:  # opened before the first hardware action
-            self._tlog = _TimingLog(os.path.join(self._run_folder, 'timing_log.csv'), self.log)
         self._check_interrupt()
 
         # ---- hardware set-up -----------------------------------------------------------------
@@ -378,109 +257,50 @@ class PsfStackTask(ModuleTask):
         n_images = len(voltages) * len(z_offsets) * len(lines)
         width, height = self._camera.get_size()
         size_gb = n_images * int(width) * int(height) * 2 / 1e9
-        self._timing_info = {'galvo positions': len(voltages), 'z planes per position':
-                             len(z_offsets), 'laser_lines entries': len(lines),
-                             'images planned': n_images, 'exposure set (s)': self._exposure_s,
-                             'exposure read back (s)': exposure,
-                             'image size (px)': f'{width} x {height}'}
         self.log.info(f'PSF stack: {len(voltages)} galvo positions x {len(z_offsets)} z planes x '
                       f'{len(lines)} laser line(s) = {n_images} images of {width}x{height} px '
                       f'(~{size_gb:.2f} GB), exposure {exposure} s, focus at '
                       f'(x={x0}, y={y0}, z={z_focus}); saving to {self._run_folder}')
 
         # ---- acquisition ---------------------------------------------------------------------
-        t_acq_start = None
         for index, voltage in enumerate(voltages):
             self._check_interrupt()
-            gids = {'galvo_index': index, 'galvo_voltage_V': voltage}
-            if index == 0:
-                self._record('setup', perf_counter() - self._t_run_start, {})
-                t_acq_start = perf_counter()
-            with self._timed('galvo_set', gids):
-                ok = self._galvo.set_voltage(voltage)
-            if not ok:
+            if not self._galvo.set_voltage(voltage):
                 raise RuntimeError(f'Galvo refused or failed voltage {voltage} V (position {index}) '
                                    f'- see the log. Task stopped.')
-            with self._timed('open_writers', gids):
-                folder = self._unique_folder(os.path.join(self._run_folder, f'galvo_{index:03d}'))
-                os.makedirs(folder)
-                self._writers = {k: TiffWriter(os.path.join(folder, f'{name}.tif'))
-                                 for k, name in enumerate(self._line_names)}
+            folder = self._unique_folder(os.path.join(self._run_folder, f'galvo_{index:03d}'))
+            os.makedirs(folder)
+            self._writers = {k: TiffWriter(os.path.join(folder, f'{name}.tif'))
+                             for k, name in enumerate(self._line_names)}
             self.log.info(f'Galvo position {index + 1}/{len(voltages)}: {voltage} V -> {folder}')
 
-            for z_index, z_offset in enumerate(z_offsets):
+            for z_offset in z_offsets:
                 self._check_interrupt()
-                zids = dict(gids, z_index=z_index, z_offset_um=z_offset)
                 target = (None, None, round(z_focus + z_offset, self._ROUND_DECIMALS))  # z only
-                self._plane_acc = 0.0
-                t_plane = perf_counter()
-                with self._timed('stage_move_cmd', zids, plane=True):
-                    ok = self._roi.move_stage(target)
-                if not ok:
+                if not self._roi.move_stage(target):
                     raise RuntimeError(f'Stage refused the move to {target} - task stopped.')
-                with self._timed('stage_wait_idle', zids, plane=True):
-                    ok = self._roi.stage_wait_for_idle()
-                if not ok:
+                if not self._roi.stage_wait_for_idle():
                     raise RuntimeError(f'Stage did not reach {target} (timeout or communication '
                                        f'error) - task stopped.')
-                frames = self._acquire_plane(z_offset, zids)
+                frames = self._acquire_plane(z_offset)
                 for k in range(len(lines)):
-                    with self._timed('tiff_write', self._line_ids(zids, k), plane=True):
-                        self._writers[k].write(frames[k], contiguous=True)
-                if self._timing_on():
-                    plane_total = perf_counter() - t_plane
-                    self._record('plane_total', plane_total, zids)
-                    self._record('plane_other', max(plane_total - self._plane_acc, 0.0), zids)
-                    self._tlog.sync()
+                    self._writers[k].write(frames[k], contiguous=True)
 
-            with self._timed('close_writers', gids):
-                self._close_writers()
-            with self._timed('write_metadata', gids):
-                self._write_metadata(template, folder, index, voltage, z_focus, z_offsets, lines,
-                                     exposure)
-            with self._timed('write_csv_row', gids):
-                with open(csv_path, 'a', newline='') as f:
-                    csv.writer(f).writerow([os.path.basename(folder), voltage, len(z_offsets),
-                                            ';'.join(f'{wl}@{p:g}' for wl, p in lines), True,
-                                            datetime.now().isoformat(timespec='seconds')])
-                    f.flush()
+            self._close_writers()
+            self._write_metadata(template, folder, index, voltage, z_focus, z_offsets, lines,
+                                 exposure)
+            with open(csv_path, 'a', newline='') as f:
+                csv.writer(f).writerow([os.path.basename(folder), voltage, len(z_offsets),
+                                        ';'.join(f'{wl}@{p:g}' for wl, p in lines), True,
+                                        datetime.now().isoformat(timespec='seconds')])
+                f.flush()
             self._completed += 1
-            if self._timing_on():
-                self._tlog.sync()
-                self._log_progress(index, len(voltages), perf_counter() - t_acq_start)
+            self.log.info(f'PSF stack: galvo position {index + 1}/{len(voltages)} '
+                          f'({voltage} volts) done')
 
-        self._run_finished = True
-        if self._timing_on():
-            self._write_timing_summary('completed')
         return {'run_folder': self._run_folder, 'completed_galvo_positions': self._completed}
 
     def _cleanup(self) -> None:
-        """Safe state (_restore_safe_state), then close the timing log - never raises."""
-        t0 = perf_counter()
-        try:
-            self._restore_safe_state()
-        finally:
-            self._finish_timing(perf_counter() - t0)
-
-    def _finish_timing(self, cleanup_s: float) -> None:
-        """Record the cleanup, write the summary if the run did not finish, fsync and close the
-        timing log. Every step protected, never raises."""
-        tlog = getattr(self, '_tlog', None)
-        if tlog is None:
-            return
-        try:
-            self._record('cleanup', cleanup_s, {})
-            if not getattr(self, '_run_finished', False) and tlog.ok:
-                status = 'run interrupted' if self.interrupted else 'run stopped by an error'
-                self._write_timing_summary(status)
-        except Exception as err:
-            self.log.error(f'Cleanup: could not write the timing summary: {err}')
-        try:
-            tlog.close()
-        except Exception as err:
-            self.log.error(f'Cleanup: could not close the timing log: {err}')
-
-    def _restore_safe_state(self) -> None:
         """Safe state - every step protected on its own, never raises."""
         if not getattr(self, '_hardware_touched', False):
             self._close_writers()
@@ -546,124 +366,31 @@ class PsfStackTask(ModuleTask):
     # ------------------------------------------------------------------------------------------
     # Per-plane acquisition - the one step a DAQ-triggered version will replace
     # ------------------------------------------------------------------------------------------
-    def _acquire_plane(self, z_offset: float, zids: Optional[dict] = None) -> Dict[int, np.ndarray]:
+    def _acquire_plane(self, z_offset: float) -> Dict[int, np.ndarray]:
         """Acquire one image per laser line at the current z plane, in the laser_lines order.
 
-        Returns {entry index in laser_lines: uint16 frame}. Checks for an interrupt before every image; the lasers
-        are switched off after each image, also if the snap fails. zids: timing-log ids of the plane.
+        Returns {entry index in laser_lines: uint16 frame}. Checks for an interrupt before every
+        image; the lasers are switched off after each image, also if the snap fails.
         """
-        zids = zids or {}
         frames = {}
         for k, (wavelength, intensity) in enumerate(self._lines):
             self._check_interrupt()
-            ids = self._line_ids(zids, k)
-            with self._timed('laser_set_intensity', ids, plane=True):
-                self._laser.reset_laser_intensities()
-                self._laser.set_laser_line_intensity(wavelength, intensity)
-            previous = self._camera.get_last_image()  # unmeasured -> plane_other
-            with self._timed('laser_enable', ids, plane=True):
-                self._laser.set_laser_enabled()
+            self._laser.reset_laser_intensities()
+            self._laser.set_laser_line_intensity(wavelength, intensity)
+            previous = self._camera.get_last_image()
+            self._laser.set_laser_enabled()
             try:
-                with self._timed('camera_snap', ids, plane=True):
-                    self._camera.start_single_acquisition()
-                t_get = perf_counter()
+                self._camera.start_single_acquisition()
                 frame = self._camera.get_last_image()
-                get_s = perf_counter() - t_get
             finally:
-                with self._timed('laser_disable', ids, plane=True):
-                    self._laser.set_laser_disabled()
-            t_check = perf_counter()
+                self._laser.set_laser_disabled()
             # camera_logic keeps the previous image when a snap fails: a missing OR unchanged
             # image is an acquisition failure.
             if frame is None or np.size(frame) == 0 or frame is previous:
                 raise RuntimeError(f'No new image from the camera at z offset {z_offset} µm, '
                                    f'{self._line_names[k]} - task stopped.')
             frames[k] = np.asarray(frame).astype(np.uint16, copy=False)
-            if self._timing_on():  # get_last_image + validity check + uint16 conversion
-                self._record('camera_get_image', get_s + perf_counter() - t_check, ids, plane=True)
         return frames
-
-    # ------------------------------------------------------------------------------------------
-    # Timing instrumentation (never raises, never changes the acquisition)
-    # ------------------------------------------------------------------------------------------
-    def _timing_on(self) -> bool:
-        return self._tlog is not None and self._tlog.ok
-
-    def _line_ids(self, zids: dict, k: int) -> dict:
-        wavelength, intensity = self._lines[k]
-        return dict(zids, line_index=k, wavelength_nm=wavelength, intensity_pct=f'{intensity:g}')
-
-    def _record(self, step: str, duration_s: float, ids: dict, plane: bool = False) -> None:
-        if plane:
-            self._plane_acc += duration_s
-        if self._tlog is not None:
-            self._tlog.record(step, duration_s, ids)
-
-    @contextmanager
-    def _timed(self, step: str, ids: dict, plane: bool = False) -> Iterator[None]:
-        """Time the block; a row is written only if the block completes (no exception)."""
-        if not self._timing_on():
-            yield
-            return
-        t0 = perf_counter()
-        yield
-        self._record(step, perf_counter() - t0, ids, plane)
-
-    def _log_progress(self, index: int, n_positions: int, elapsed_s: float) -> None:
-        planes = self._tlog.durations.get('plane_total', [])
-        mean_plane = float(np.mean(planes)) if planes else float('nan')
-        done = index + 1
-        remaining = elapsed_s / done * (n_positions - done)
-        self.log.info(f'PSF stack: galvo position {done}/{n_positions} done - mean plane_total '
-                      f'{mean_plane:.1f} ms - estimated time remaining {remaining:.1f} s')
-
-    def _timing_summary_text(self, status: str) -> str:
-        total_s = perf_counter() - self._t_run_start
-        durations = self._tlog.durations
-        steps = [s for s in self._STEP_ORDER if s in durations]
-        steps += sorted(s for s in durations if s not in steps)
-        lines = [f'PSF stack timing summary - {status}',
-                 f'run folder: {self._run_folder}',
-                 f'written: {datetime.now().isoformat(timespec="seconds")}', '',
-                 'Run parameters']
-        for key, value in self._timing_info.items():
-            lines.append(f'  {key}: {value}')
-        lines.append(f'  galvo positions completed: {self._completed}')
-        lines += ['', f'{"step":<20}{"count":>8}{"mean_ms":>12}{"median_ms":>12}{"min_ms":>12}'
-                      f'{"max_ms":>12}{"total_s":>12}{"%_run":>8}']
-        for step in steps:
-            d = np.asarray(durations[step], dtype=float)
-            lines.append(f'{step:<20}{d.size:>8d}{d.mean():>12.3f}{np.median(d):>12.3f}'
-                         f'{d.min():>12.3f}{d.max():>12.3f}{d.sum() / 1e3:>12.3f}'
-                         f'{100 * d.sum() / 1e3 / total_s:>8.1f}')
-        lines.append('  (plane_total contains the per-plane steps; setup/cleanup are separate)')
-        n_img = len(durations.get('camera_snap', []))
-        lines.append('')
-        exposure = self._timing_info.get('exposure read back (s)')
-        if n_img and exposure is not None:
-            overhead = float(np.mean(durations['camera_snap'])) - float(exposure) * 1e3
-            lines.append(f'snap overhead per image (ms): {overhead:.3f}  (mean camera_snap - '
-                         f'exposure read back {float(exposure) * 1e3:.3f} ms)')
-        lines.append(f'total run time (s): {total_s:.3f}  (from _run start'
-                     f'{"" if status == "completed" else " to the cleanup end"})')
-        lines.append(f'images acquired: {n_img}')
-        if n_img:
-            lines.append(f'time per image (ms): {total_s * 1e3 / n_img:.3f}')
-            lines.append(f'images per second: {n_img / total_s:.3f}')
-        return '\n'.join(lines) + '\n'
-
-    def _write_timing_summary(self, status: str) -> None:
-        """Write timing_summary.txt and log the same table - errors logged, never raises."""
-        try:
-            text = self._timing_summary_text(status)
-            path = os.path.join(self._run_folder, 'timing_summary.txt')
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-            self.log.info('\n' + text)
-        except Exception as err:
-            self.log.error(f'Could not write the timing summary: {err}')
 
     # ------------------------------------------------------------------------------------------
     # Checks (no hardware call)

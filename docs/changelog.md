@@ -815,6 +815,17 @@ Last updated: 2026-10-13
 
 #### Changed
 
+- `tasks/psf_stack_opm.py` (2026-10-13): **timing instrumentation removed from
+  the PSF task** (diagnosis done; the stage wait was fixed in the Tiger
+  driver). Removed: `_TimingLog`, the `timing_log_enabled` option,
+  `timing_log.csv` / `timing_summary.txt`, and every timing-only helper,
+  attribute and import. `_cleanup` is one method again (same steps, same
+  order, each protected on its own); `_acquire_plane(z_offset)` takes no timing
+  ids. A plain progress line `PSF stack: galvo position i/N (V volts) done` is
+  logged after each galvo position. The acquisition is unchanged: hardware
+  call log identical to `main` over 15 scenarios (1090 calls). `OPM_config.cfg`
+  did not set `timing_log_enabled`: no config change. 917 -> 644 lines.
+
 - `tasks/psf_stack_opm.py` (2026-10-13): **z-only stage moves**. Every stage
   move in the run and in the cleanup is `move_stage((None, None, z))`: x and y
   are never commanded during the task. `x0` / `y0` are still read once at
