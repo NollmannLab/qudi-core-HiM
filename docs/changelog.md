@@ -321,6 +321,56 @@ Last updated: 2026-10-12
   subsystem object.
 - Fixed initialization and cleanup of DAQ channel information.
 
+### Galvo
+
+#### Added
+
+- `interface/galvo_interface.py`, `hardware/interfuse_hardware/daq_galvo_controller.py`,
+  `logic/galvo_logic.py` (2026-10-12): control of the OPM beam-sweep galvo
+  mirror, driven by one analog output of the DAQ (AO1 of `nidaq_6738`,
+  tested by hand so far but not controlled by any code). Standard hardware →
+  logic chain modelled on the DAQ pump; hardware + logic + config only (no
+  GUI, no task yet).
+  - `GalvoInterface`: `set_voltage`, `get_voltage` (last value written - an
+    AO cannot be read back), `get_limits`, `get_rest_voltage`, `go_to_rest`;
+    all in V.
+  - `DaqGalvoController`: GalvoInterface over one named DAQ AO task
+    (`write_named_ao`). Options `output_task` (required), `min_voltage` /
+    `max_voltage` (default -5 / 5 V), `rest_voltage` (default 0 V).
+    Activation checks `min < max`, `min <= rest <= max`, that the limits fit
+    inside the DAQ task's own range and that the task exists - any
+    inconsistency stops activation with an error naming the option and
+    values (raised, so qudi logs it and leaves the module deactivated) -
+    then moves the galvo to rest; deactivation moves it to rest. At run time
+    errors follow the qudi convention - logged, not raised: `set_voltage` /
+    `go_to_rest` return `True` on success and, for a voltage outside the
+    limits, a non-number or a failed DAQ write, log an error, write nothing
+    and return `False`. Write + stored value are protected by a mutex (task
+    and GUI threads).
+  - `GalvoLogic`: delegates to the hardware and returns its `True`/`False`,
+    emits `sigVoltageChanged` after each successful write only, moves the
+    galvo to rest on deactivation. A task using it must check the return
+    value and stop if it is `False`.
+  - `OPM_config.cfg`: AO task `galvo: ['/Dev1/AO1', [-5, 5]]` on
+    `nidaq_6738`, hardware `galvo` and logic `galvo_logic`.
+    `dummy_config.cfg`: the same on `dummy_daq` (AO task on `/Dev1/AO5`).
+  - Verified against `qudi-core==1.7.0` and 1.8.0 with the real `DummyDaq`,
+    modules built and activated the way qudi does (47/47 checks):
+    activation writes the rest voltage; `set_voltage(2.5)` writes 2.5,
+    returns `True` and `get_voltage()` returns it; 6, -5.01, 5.000001 V, a
+    string and `None` return `False` with an error logged, no exception and
+    nothing written; a failing DAQ write returns `False` with the DAQ error
+    logged and the stored value unchanged; rest outside the limits,
+    `min >= max`, limits wider than the DAQ task range, an unknown
+    `output_task` and a failing DAQ at activation each leave the module
+    deactivated with a clear message; deactivation writes the rest voltage,
+    and with a failing DAQ it logs the error without raising; the logic
+    returns the same `True`/`False` and emits `sigVoltageChanged` once per
+    successful write and not on a refused one; concurrent writers keep the
+    stored value consistent. Both configs pass qudi-core's config validation on both
+    versions, and the dummy-config entries run end to end. Still to be
+    checked by JB on the OPM.
+
 ### Fluidics
 
 #### Added
