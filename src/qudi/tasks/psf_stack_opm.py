@@ -257,7 +257,7 @@ class PsfStackTask(ModuleTask):
     galvo_step_v = 0.1          # V, galvo voltage step
     z_half_range_um = 5.0       # µm, z-stack from z_focus - z_half_range_um to z_focus + z_half_range_um
     z_step_um = 0.2             # µm, z step
-    laser_lines = [(561, 10.0)]  # [(wavelength nm, intensity %), ...] - fired in this order at each z;
+    laser_lines = [(561, 15.0)]  # [(wavelength nm, intensity %), ...] - fired in this order at each z;
     #                             the same wavelength may repeat, e.g. [(561, 10.0), (561, 50.0)]
     exposure_s = 0.05           # s, camera exposure time
     camera_name = 'opm_camera_1'  # camera used (selected at start, previous camera restored at the end)
