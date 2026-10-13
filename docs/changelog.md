@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-12
+Last updated: 2026-10-13
 
 ### Cameras
 
@@ -725,6 +725,52 @@ Last updated: 2026-10-12
   `custom_experiments_config/dummy/photobleaching_sd.yaml` (copy of the SD
   one, named `photobleaching_SD` so it does not clash with the dummy
   `photobleaching_RAMM`), added to the dummy configurator's `experiments`.
+- `tasks/psf_stack_opm.py` + `OPM_config.cfg` (2026-10-13): new
+  `PsfStackTask`, a first, software-timed PSF z-stack acquisition on the OPM
+  over galvo positions and laser lines. For each galvo voltage
+  (`galvo_start_v` → `galvo_stop_v`, step `galvo_step_v`; the task stops if
+  `galvo_logic.set_voltage` returns `False`), a z-stack around the focus the
+  user set by hand (`z_focus` read once from `roi_logic.stage_position`,
+  ±`z_half_range_um`, step `z_step_um`; x and y never change), one image per
+  laser line at each plane (`laser_lines`, fired in order: reset, set
+  intensity, lasers on, snap, lasers off). Experiment parameters are class
+  attributes ("EXPERIMENT PARAMETERS - edit here"); `data_root` and
+  `metadata_template` come from the task `options:` in the config (clear
+  error at run start if missing). Before any hardware call it checks the
+  steps, the galvo limits, the laser lines (exist + allowed), the camera,
+  the stage z axis and the live mode, then logs the totals and the disk
+  estimate. Output: `<data_root>/<YYYY-MM-DD>/psf_<HHMMSS>/` (never
+  overwritten), one `galvo_NNN/` per position with one uint16 TIFF per laser
+  line (`{wavelength}nm.tif`, frames appended as they arrive with
+  `tifffile.TiffWriter`, z order) and a `metadata.txt` from the OPM template
+  (Acquisition fields + a new `PSF` section), plus `galvo_positions.csv`
+  (one row per completed position). The per-plane step is one method,
+  `_acquire_plane`, to be replaced by a DAQ-triggered version later. A
+  failed snap is detected even though `camera_logic` keeps the previous
+  image. Interrupt is checked before every image; cleanup (never raises)
+  switches the lasers off, sends the galvo to rest, the stage back to focus,
+  closes the TIFFs (partial files kept, only complete planes written) and
+  restores the previous camera and exposure. Known limits: software-timed,
+  lasers on during the camera overhead, one camera. Registered as
+  `psf_stack` in `OPM_config.cfg` (same `D:\DATA` and template path as
+  `basic_imaging`). Verified against `qudi-core==1.7.0` and 1.8.0 with fake
+  camera / laser / galvo / ROI logic connected through qudi's connectors
+  (52/52 checks): call order per plane, x/y fixed, 3 folders × 2 TIFFs ×
+  5 frames in z order, metadata and CSV content, end state; 1.0 → 2.0 V at
+  0.1 V gives exactly 11 voltages; galvo outside its limits, a blocked or
+  unknown laser line, missing `data_root` / `metadata_template`, a stage
+  without z axis, bad steps and an unknown camera all fail with no hardware
+  action and no folder; a galvo failure mid-run stops the task with only the
+  completed positions in the CSV; an interrupt stops before the next image
+  with a safe end state and readable partial TIFFs; a stale camera image is
+  detected. Still to be checked by JB on the OPM.
+- `logic/roi_logic.py` (2026-10-13): `roi_logic._move_stage` made public as
+  `move_stage` (no behaviour change: `(x, y, z)` in ROI order, x/y always
+  sent, z only if the stage has a z axis, returns `True` if accepted, emits
+  `sigStageMoved`), for tasks that need absolute moves - e.g. the PSF task's
+  z-only moves. Its only callers, `go_to_roi` / `go_to_roi_xy`, were updated
+  and send exactly the same stage commands as before (checked against the
+  previous file, with and without a z axis).
 
 #### Changed
 

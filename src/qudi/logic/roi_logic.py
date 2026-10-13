@@ -20,6 +20,11 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
+
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): _move_stage made public as
+  move_stage (no behaviour change), so that tasks can move the stage to an absolute (x, y, z)
+  position - e.g. the OPM PSF task for z-only moves (current x, y and the new z). Its two internal
+  callers (go_to_roi, go_to_roi_xy) were updated.
 """
 
 from qtpy import QtCore
@@ -680,7 +685,7 @@ class RoiLogic(LogicBase):
         if not isinstance(name, str):
             self.log.error('ROI name to move to must be of type str.')
             return None
-        self._move_stage(self.get_roi_position(name))
+        self.move_stage(self.get_roi_position(name))
 
     def go_to_roi_xy(self, name=None):
         """ Move the translation stage to the xy position of the given roi.
@@ -694,8 +699,8 @@ class RoiLogic(LogicBase):
             return None
         x_roi, y_roi, z_roi = self.get_roi_position(name)
         x_stage, y_stage, z_stage = self.stage_position
-        target_pos = np.array((x_roi, y_roi, z_stage))  # conversion from tuple to np.ndarray for call of _move_stage
-        self._move_stage(target_pos)
+        target_pos = np.array((x_roi, y_roi, z_stage))  # conversion from tuple to np.ndarray for call of move_stage
+        self.move_stage(target_pos)
 
     @QtCore.Slot()
     def delete_roi(self, name=None):
@@ -1013,12 +1018,18 @@ class RoiLogic(LogicBase):
         """
         self._stage.led_control(intensity)
 
-    def _move_stage(self, position):
+    def move_stage(self, position):
         """
         Move the translation stage to position.
         X and Y are always sent to the connected stage. Z is sent only when a
         corresponding translation axis is configured; it is ignored for a
         two-axis stage.
+
+        Public (was ``_move_stage``): used by go_to_roi / go_to_roi_xy and by
+        tasks that need an absolute move, e.g. the OPM PSF task for z-only
+        moves - pass the current x and y and the new z. Note that on a stage
+        without a z axis the z value is silently ignored and the method still
+        returns ``True``, so a task relying on z must check for the z axis.
 
         :param position: Target position in ROI order ``(x, y, z)``.
         :return: ``True`` if the stage accepted at least one movement command.
