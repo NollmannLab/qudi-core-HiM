@@ -14,6 +14,14 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
+
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): fast idle detection.
+  A timing log of the OPM PSF task showed that wait_for_idle() took 513-528 ms for EVERY 0.2 µm
+  z step (79 % of the acquisition time): the status was queried once, the stage was still busy
+  right after the move command, and the loop then slept a fixed 0.5 s before the next query - so
+  every wait ended at ~0.5 s although the move itself is much shorter. wait_for_idle() now polls
+  every idle_poll_interval_s (config, default 0.02 s) and optionally waits settle_time_s (config,
+  default 0 s) once after the stage reports idle. Timeout logic and message unchanged.
 """
 
 import numpy as np
@@ -32,18 +40,28 @@ from qudi.interface.multi_axis_stage_interface import MultiAxisStageInterface
 # ======================================================================================================================
 
 class Tiger(MultiAxisStageInterface):
-    """ Class representing the ASI MS 2000 xy or xyz translation stage.
+    """ Class representing the ASI Tiger xy or xyz translation stage.
 
-  ms2000:
-    module.Class: 'multi_axis_translation_stage.MS2000_ASI.MS2000'
-    options:
-        com_port: 'COM6'
-        baud_rate: '9600' #'115200'
-        first_axis_label: 'x'
-        second_axis_label: 'y'
-        third_axis_label: 'z'
-        delay_after_move: 0.5
-        LED connected: True
+    Config example for copy-paste (hardware:):
+
+    tiger:
+        module.Class: 'multi_axis_translation_stage.tiger_ASI.Tiger'
+        options:
+            com_port: 'COM6'
+            baud_rate: 115200
+            card_address: 7
+            first_axis_property:
+                label: 'x'
+                max_velocity: 7500.0  # µm/s
+            second_axis_property:
+                label: 'y'
+                max_velocity: 7500.0  # µm/s
+            third_axis_property:
+                label: 'z'
+                max_velocity: 1900.0  # µm/s
+            LED connected: True
+            idle_poll_interval_s: 0.02  # optional, s between status queries while busy, [0.005, 1.0]
+            settle_time_s: 0.0          # optional, extra wait once idle (position stable), [0, 1.0]
     """
     # config options
     _com_port = ConfigOption("com_port", missing="error")
@@ -58,6 +76,13 @@ class Tiger(MultiAxisStageInterface):
     # for some model, ASI also provides a LED control
     _has_led = ConfigOption("LED connected", False, missing="warn")
     _led_mode = "Internal"
+
+    # idle detection (wait_for_idle): status polling interval while busy, and an optional extra
+    # settling wait applied once after the stage reports idle
+    _idle_poll_interval_s = ConfigOption("idle_poll_interval_s", 0.02, converter=float)
+    _settle_time_s = ConfigOption("settle_time_s", 0.0, converter=float)
+    _IDLE_POLL_RANGE_S = (0.005, 1.0)
+    _SETTLE_RANGE_S = (0.0, 1.0)
 
     # attributes
     _position_conversion_factor = 10.0  # user will send positions in um, stage uses 0.1 um
@@ -76,6 +101,7 @@ class Tiger(MultiAxisStageInterface):
     def on_activate(self):
         """ Initialization: opening serial port and setting internal attributes.
         """
+        self._check_idle_options()
         try:
             self._serial_connection = serial.Serial(
                 self._com_port, baudrate=self._baud_rate, bytesize=8, parity="N", stopbits=1, xonxoff=True
@@ -330,7 +356,9 @@ class Tiger(MultiAxisStageInterface):
 
     def wait_for_idle(self):
         """ Wait until a motorized stage is in idle state.
-        Checks every 1 s until timeout if a motor is running from a serial command 'B' or not 'N'
+        Queries the status ('/' -> 'B' busy / 'N' idle) immediately, then every idle_poll_interval_s
+        while busy, until idle or timeout (self._timeout). Once idle, waits settle_time_s once (if
+        > 0) so that the position is stable before an image.
         @return ``True`` when the stage becomes idle, otherwise ``False``.
         """
         t0 = time()
@@ -338,6 +366,8 @@ class Tiger(MultiAxisStageInterface):
         while True:
             status = self.get_status()
             if status and all(status.values()):
+                if self._settle_time_s > 0:
+                    sleep(self._settle_time_s)
                 return True
 
             waiting_time = time() - t0
@@ -347,7 +377,7 @@ class Tiger(MultiAxisStageInterface):
                 )
                 return False
 
-            sleep(0.5)
+            sleep(self._idle_poll_interval_s)
 
     # # ----------------------------------------------------------------------------------------------------------------------
     # # Additional custom functions not on the interface
@@ -449,6 +479,15 @@ class Tiger(MultiAxisStageInterface):
 
         self.log.warning(f'The ASI stage was unable to execute command: {command!r}')
         return False
+
+    def _check_idle_options(self) -> None:
+        """Validate idle_poll_interval_s and settle_time_s - a clear error at activation."""
+        for name, value, (low, high) in (
+                ('idle_poll_interval_s', self._idle_poll_interval_s, self._IDLE_POLL_RANGE_S),
+                ('settle_time_s', self._settle_time_s, self._SETTLE_RANGE_S)):
+            if not low <= value <= high:
+                raise ValueError(f'ASI Tiger config option {name} = {value} s is outside the allowed '
+                                 f'range [{low}, {high}] s.')
 
     def _selected_axes(self, param_list: Optional[List[str]] = None,) -> List[str]:
         """Return configured axes selected by an optional axis list."""
