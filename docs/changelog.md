@@ -774,6 +774,34 @@ Last updated: 2026-10-13
 
 #### Changed
 
+- `tasks/psf_stack_opm.py` (2026-10-13): **timing log** to find where the
+  time goes before a hardware-triggered redesign. Instrumentation only - the
+  acquisition sequence, files, checks and cleanup are unchanged.
+  - `timing_log.csv` in the run folder (columns `timestamp, galvo_index,
+    galvo_voltage_V, z_index, z_offset_um, line_index, wavelength_nm,
+    intensity_pct, step, duration_ms`; `time.perf_counter()`, ms with 3
+    decimals). Opened in append mode before the first hardware action, one
+    row per completed step flushed immediately, `os.fsync()` after each plane,
+    each galvo position and in cleanup, closed by the cleanup - nothing
+    measured is lost on an interrupt or a crash.
+  - Steps: `setup`, `cleanup` (per run); `galvo_set`, `open_writers`,
+    `close_writers`, `write_metadata`, `write_csv_row` (per galvo position);
+    `stage_move_cmd`, `stage_wait_idle`, `plane_total`, `plane_other` =
+    plane_total minus the plane's measured steps (per plane);
+    `laser_set_intensity`, `laser_enable`, `camera_snap`
+    (`start_single_acquisition` only), `camera_get_image` (get + check +
+    uint16), `laser_disable`, `tiff_write` (per laser_lines entry).
+  - `timing_summary.txt` (end of run, or written by the cleanup marked "run
+    interrupted" / "run stopped by an error"): run parameters, per step count
+    / mean / median / min / max / total / % of run time, snap overhead per
+    image (mean `camera_snap` - exposure), total run time, time per image,
+    images per second; the same table is logged at info level. A progress
+    line (mean `plane_total`, estimated time remaining) after each galvo
+    position.
+  - Class attribute `timing_log_enabled = True` (settable through the task
+    `options:`); `False` -> nothing timed or written. A timing-file I/O
+    error logs ONE error and switches timing off; the acquisition continues.
+  - Only the task measures; `camera_logic` and the hardware are untouched.
 - `tasks/psf_stack_opm.py` + `OPM_config.cfg` (2026-10-13): two changes
   after the first successful test on the OPM.
   - **Repeated laser lines**: the same wavelength may appear several times
