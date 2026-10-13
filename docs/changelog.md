@@ -257,6 +257,21 @@ Last updated: 2026-10-13
     options. `OPM_config.cfg`: `tiger` gets `idle_poll_interval_s: 0.02` and
     `settle_time_s: 0.0`.
 
+### ROI logic
+
+#### Changed
+
+- `logic/roi_logic.py` (2026-10-13): **`move_stage` skips the axes given as
+  `None`**. Only the non-None entries of `(x, y, z)` are sent (z only if the
+  z axis is a stage axis), so a z-only move `(None, None, z)` never commands
+  x / y: no serial time on them (~24 ms per plane on the OPM) and no lateral
+  correction / anti-backlash motion. If nothing would be sent (all `None`, or
+  only z on a 2-axis stage) the stage is not called, an error is logged and
+  `False` is returned (before: z silently ignored, `True`). `sigStageMoved`
+  still carries a full `(x, y, z)`: for a partial move the missing axes are
+  read from `stage_position` (one extra query). Full positions, `go_to_roi`
+  and `go_to_roi_xy` behave exactly as before.
+
 ### Pipetting robot
 
 #### Added
@@ -799,6 +814,12 @@ Last updated: 2026-10-13
   previous file, with and without a z axis).
 
 #### Changed
+
+- `tasks/psf_stack_opm.py` (2026-10-13): **z-only stage moves**. Every stage
+  move in the run and in the cleanup is `move_stage((None, None, z))`: x and y
+  are never commanded during the task. `x0` / `y0` are still read once at
+  start and logged; the "stage has a z axis" check stays (fails before any
+  hardware call).
 
 - `tasks/psf_stack_opm.py` + `OPM_config.cfg` (2026-10-13): **PSF parameters
   from the experiment configurator**. The hard-coded class attributes

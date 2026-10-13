@@ -25,6 +25,11 @@ Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): _move_stage 
   move_stage (no behaviour change), so that tasks can move the stage to an absolute (x, y, z)
   position - e.g. the OPM PSF task for z-only moves (current x, y and the new z). Its two internal
   callers (go_to_roi, go_to_roi_xy) were updated.
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): move_stage skips the axes given
+  as None (z-only moves send only z: no serial time on x / y, no lateral correction or
+  anti-backlash motion). Nothing to send -> error logged, False returned (before: z silently
+  ignored on a 2-axis stage, True returned). sigStageMoved still carries a full (x, y, z): the
+  missing axes are read from stage_position. Full (x, y, z) positions behave as before.
 """
 
 from qtpy import QtCore
@@ -1021,32 +1026,57 @@ class RoiLogic(LogicBase):
     def move_stage(self, position):
         """
         Move the translation stage to position.
-        X and Y are always sent to the connected stage. Z is sent only when a
-        corresponding translation axis is configured; it is ignored for a
-        two-axis stage.
 
-        Public (was ``_move_stage``): used by go_to_roi / go_to_roi_xy and by
-        tasks that need an absolute move, e.g. the OPM PSF task for z-only
-        moves - pass the current x and y and the new z. Note that on a stage
-        without a z axis the z value is silently ignored and the method still
-        returns ``True``, so a task relying on z must check for the z axis.
+        An entry given as ``None`` means "do not send this axis": only the
+        non-None entries are sent, so a z-only move ``(None, None, z)`` never
+        commands x and y (no serial time spent on them, no lateral correction or
+        anti-backlash motion). X and Y map to the x / y axis labels; Z is sent
+        only when the z axis label is one of the stage axes.
 
-        :param position: Target position in ROI order ``(x, y, z)``.
-        :return: ``True`` if the stage accepted at least one movement command.
+        Public (was ``_move_stage``): used by go_to_roi / go_to_roi_xy (always
+        full ``(x, y, z)`` positions, unchanged behaviour) and by tasks, e.g.
+        the OPM PSF task for z-only moves.
+
+        If no axis would be sent (all entries ``None``, or only z on a stage
+        without a z axis), the stage is not called, an error is logged and
+        ``False`` is returned.
+
+        After an accepted command, ``sigStageMoved`` is emitted with a full
+        ``(x, y, z)`` array. For a partial move the ``None`` entries are filled
+        from ``stage_position`` - one extra stage query - because the listeners
+        (e.g. the ROI GUI stage marker) expect three coordinates.
+
+        :param position: Target position in ROI order ``(x, y, z)``; entries may
+            be ``None``.
+        :return: ``True`` if the stage accepted the movement command, ``False``
+            if it was rejected or if there was nothing to send.
         """
         if len(position) != 3:
             self.log.error('Stage position to set must be iterable of length 3.')
             return False
 
-        pos_dict = {
-            self._x_axis_label: position[0],
-            self._y_axis_label: position[1],
-        }
-        if self._z_axis_label in self._stage_axis_labels:
-            pos_dict[self._z_axis_label] = position[2]
+        x, y, z = position
+        pos_dict = {}
+        if x is not None:
+            pos_dict[self._x_axis_label] = x
+        if y is not None:
+            pos_dict[self._y_axis_label] = y
+        if z is not None and self._z_axis_label in self._stage_axis_labels:
+            pos_dict[self._z_axis_label] = z
+        if not pos_dict:
+            self.log.error(f'No stage axis to move for position {tuple(position)}: every entry is '
+                           f'None, or only z was given and the stage has no z axis '
+                           f'"{self._z_axis_label}" (axes: {list(self._stage_axis_labels)}).')
+            return False
 
         moved = self._stage.move_abs(pos_dict)
         if moved:
+            if x is None or y is None or z is None:
+                # Partial move: sigStageMoved listeners expect a full (x, y, z) position, so the
+                # axes that were not sent are read back from the stage (one extra query).
+                current = self.stage_position
+                position = [current[i] if value is None else value
+                            for i, value in enumerate((x, y, z))]
             self.sigStageMoved.emit(np.asarray(position, dtype=float))
         else:
             self.log.warning('The connected stage rejected the ROI movement command.')
