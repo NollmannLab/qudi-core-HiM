@@ -13,19 +13,21 @@ at each z plane.
 Sequence
 --------
     setup (before any hardware call):
-        check the setup options (data_root, metadata_template) and the experiment parameters, build
-        the galvo-voltage and z-offset lists, check them against the hardware (galvo limits, laser
-        lines allowed, camera available, stage z axis), create the run folder
+        check the setup options (user_config_path, metadata_template), load the experiment
+        parameters from the experiment-configurator YAML (user_config_path), build the
+        galvo-voltage and z-offset lists, check them against the hardware (galvo limits, laser
+        lines allowed, camera available, stage z axis), create the run folder and copy the YAML
+        into it (experiment_config.yaml)
     then:
         lasers off; lock the GUI controls (laser, camera, filter, ROI / stage, tracking)
         select camera 'opm_camera_1', set the exposure
         x0, y0, z_focus = roi_logic.stage_position  (read once - focus manually before starting)
         lasers off, all intensities 0
-    for i, V in enumerate(galvo voltages):            # galvo_start_v -> galvo_stop_v inclusive
+    for i, V in enumerate(galvo voltages):            # galvo_start -> galvo_stop inclusive
         galvo_logic.set_voltage(V)                    # False -> stop the task (raise)
         create galvo_{i:03d}/, open one TIFF per laser_lines ENTRY (index k):
             {k:02d}_{wavelength}nm_{intensity:g}pct.tif
-        for each z offset (-z_half_range_um -> +z_half_range_um inclusive, step z_step_um):
+        for each z offset ((k - (N-1)/2) * z_step, k = 0..N-1, N = num_z_planes, odd):
             roi_logic.move_stage((x0, y0, z_focus + offset)) and stage_wait_for_idle()  # False -> raise
             _acquire_plane(offset): for each entry k = (wavelength, intensity) in laser_lines, in order:
                 check interrupt; reset intensities; set this line's intensity; lasers on;
@@ -39,6 +41,22 @@ Sequence
 
 The per-plane step is the single method _acquire_plane(z_offset) -> {entry index: frame}; a
 DAQ-triggered version can replace it later without touching the loops.
+
+Experiment parameters (experiment configurator -> user_config_path)
+---------------------
+    The parameters are set in the experiment configurator (experiment "psf_stack", definition
+    custom_experiments_config/opm/psf_stack.yaml), saved as psf_stack_task_opm.yaml and read at
+    run start, before any hardware call. A missing key, a wrong type or a wrong "experiment" value
+    stops the task with an error naming the file and the key.
+        experiment         must be 'psf_stack'
+        galvo_start / galvo_stop / galvo_step     V (stop included, step > 0)
+        num_z_planes       N, odd and >= 1 (so that the focus plane itself is acquired)
+        z_step             µm, > 0; z offsets (k - (N-1)/2) * z_step, k = 0..N-1
+        imaging_sequence   [[wavelength, intensity %], ...] -> laser_lines; the wavelength may be a
+                           string ('561'); repeated entries allowed; non-numeric sources
+                           ('Brightfield') are refused
+        exposure           s
+        save_path          root data folder (must exist)
 
 Laser lines
 -----------
@@ -56,7 +74,8 @@ GUI lock
 
 Folder layout
 -------------
-    <data_root>/<YYYY-MM-DD>/psf_<HHMMSS>/          (never overwritten: _1, _2, ... appended)
+    <save_path>/<YYYY-MM-DD>/psf_<HHMMSS>/          (never overwritten: _1, _2, ... appended)
+        experiment_config.yaml                       copy of the experiment-configurator YAML
         galvo_positions.csv                          one row per COMPLETED galvo position
         timing_log.csv                               one row per timed step (timing_log_enabled)
         timing_summary.txt                           timing statistics per step (timing_log_enabled)
@@ -107,12 +126,13 @@ Config example (logic: task_runner: options: module_tasks:)
         roi_logic: roi_logic
         filter_wheel_logic: filter_wheel_logic
       options:
-        data_root: 'D:\\DATA'
+        user_config_path: 'C:\\Users\\JB\\qudi_files\\qudi_task_config_files\\psf_stack_task_opm.yaml'
         metadata_template: 'C:\\path\\to\\custom_metadata_templates\\OPM_setup.cfg'
+        camera_name: 'opm_camera_1'   # optional, default 'opm_camera_1'
         timing_log_enabled: True      # optional, default True
 
-Experiment parameters are class attributes (see "EXPERIMENT PARAMETERS - edit here" below); the
-setup-specific paths come from the config options (qudi-core-HiM task runner).
+The experiment parameters come from the experiment-configurator YAML (user_config_path, see
+above); the setup-specific settings come from the config options (qudi-core-HiM task runner).
 
 Known limits of this first version
 ----------------------------------
@@ -143,6 +163,12 @@ Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): timing instr
   timing_log.csv (one row per timed step, saved while acquiring) and timing_summary.txt in the run
   folder, a progress line per galvo position; class attribute timing_log_enabled (config option).
   The acquisition itself is unchanged.
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): the experiment parameters
+  (galvo start / stop / step, number of z planes and z step, laser lines, exposure, save folder)
+  are no longer class attributes: they are read at run start from the experiment-configurator YAML
+  given by the new required option user_config_path (experiment 'psf_stack'), validated before any
+  hardware call, and the YAML is copied into the run folder as experiment_config.yaml. The z-stack
+  is N planes (odd) centred on the focus; save_path replaces the data_root option.
 """
 
 import copy
@@ -154,6 +180,7 @@ from time import perf_counter
 from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
+import yaml
 from ruamel.yaml import YAML
 from tifffile import TiffWriter
 
@@ -239,8 +266,8 @@ class PsfStackTask(ModuleTask):
     """PSF z-stacks on the OPM for a series of galvo voltages and laser lines (software-timed).
 
     See the module docstring for the sequence, the folder layout and the config example. The task has
-    no call parameters: experiment parameters are the class attributes below, the setup paths
-    (data_root, metadata_template) come from the task's "options:" in the config.
+    no call parameters: the experiment parameters are read from the experiment-configurator YAML
+    (option user_config_path); the setup settings come from the task's "options:" in the config.
     """
 
     camera_logic = Connector(interface='CameraLogic')
@@ -250,24 +277,18 @@ class PsfStackTask(ModuleTask):
     filter_wheel_logic = Connector(interface='FilterWheelLogic')
 
     # ==========================================================================================
-    # EXPERIMENT PARAMETERS - edit here
+    # SETUP OPTIONS - set in the config (task options), never hard-coded here. The experiment
+    # parameters (galvo, z-stack, laser lines, exposure, save folder) come from the
+    # experiment-configurator YAML given by user_config_path.
     # ==========================================================================================
-    galvo_start_v = 1.0         # V, first galvo voltage
-    galvo_stop_v = 2.0          # V, last galvo voltage (included)
-    galvo_step_v = 0.1          # V, galvo voltage step
-    z_half_range_um = 5.0       # µm, z-stack from z_focus - z_half_range_um to z_focus + z_half_range_um
-    z_step_um = 0.2             # µm, z step
-    laser_lines = [(561, 15.0)]  # [(wavelength nm, intensity %), ...] - fired in this order at each z;
-    #                             the same wavelength may repeat, e.g. [(561, 10.0), (561, 50.0)]
-    exposure_s = 0.05           # s, camera exposure time
+    user_config_path = None     # required: experiment-configurator YAML (experiment 'psf_stack')
+    metadata_template = None    # required: OPM metadata template (YAML), e.g. .../OPM_setup.cfg
     camera_name = 'opm_camera_1'  # camera used (selected at start, previous camera restored at the end)
-    timing_log_enabled = True   # write timing_log.csv / timing_summary.txt (also a config option)
+    timing_log_enabled = True   # write timing_log.csv / timing_summary.txt
 
-    # ==========================================================================================
-    # SETUP OPTIONS - set in the config (task options), never hard-coded here
-    # ==========================================================================================
-    data_root = None            # root data folder, e.g. 'D:\DATA'
-    metadata_template = None    # path to the OPM metadata template (YAML), e.g. .../OPM_setup.cfg
+    _EXPERIMENT = 'psf_stack'
+    _CONFIG_KEYS = ('galvo_start', 'galvo_stop', 'galvo_step', 'num_z_planes', 'z_step',
+                    'imaging_sequence', 'exposure', 'save_path')
 
     _UNSET = (None, '', 'TO FILL')
     _ROUND_DECIMALS = 4
@@ -290,6 +311,11 @@ class PsfStackTask(ModuleTask):
         self._completed = 0
         self._lines: List[Tuple[int, float]] = []
         self._line_names: List[str] = []
+        # experiment parameters, loaded from user_config_path in _run
+        self._exposure_s: Optional[float] = None
+        self._z_step_um: Optional[float] = None
+        self._save_root: Optional[str] = None
+        self._user_config_raw: Optional[bytes] = None
         # timing instrumentation
         self._tlog: Optional[_TimingLog] = None
         self._t_run_start: Optional[float] = None
@@ -308,13 +334,16 @@ class PsfStackTask(ModuleTask):
         # ---- checks that do not touch any hardware ------------------------------------------
         self._check_setup_options()
         template = self._load_metadata_template()
-        voltages = self._float_steps(self.galvo_start_v, self.galvo_stop_v, self.galvo_step_v,
-                                     'galvo')
-        z_offsets = self._float_steps(-self.z_half_range_um, self.z_half_range_um, self.z_step_um,
-                                      'z')
-        lines = self._checked_laser_lines()
+        params = self._load_user_config()
+        voltages = self._float_steps(params['galvo_start'], params['galvo_stop'],
+                                     params['galvo_step'], 'galvo')
+        z_offsets = self._centred_z_offsets(params['num_z_planes'], params['z_step'])
+        lines = self._checked_laser_lines(params['laser_lines'])
         self._validate_against_setup(voltages, lines)
         self._run_folder = self._make_run_folder()
+        # provenance: the exact YAML that drove this run (bytes read at load time)
+        with open(os.path.join(self._run_folder, 'experiment_config.yaml'), 'wb') as f:
+            f.write(self._user_config_raw)
         csv_path = os.path.join(self._run_folder, 'galvo_positions.csv')
         with open(csv_path, 'w', newline='') as f:
             csv.writer(f).writerow(['folder', 'galvo_voltage_V', 'n_z_planes', 'laser_lines_nm',
@@ -331,7 +360,7 @@ class PsfStackTask(ModuleTask):
         self._prev_exposure = self._camera.get_exposure()
         if not self._camera.select_camera(self.camera_name):
             raise RuntimeError(f'Could not select camera "{self.camera_name}" - see the log.')
-        self._camera.set_exposure(self.exposure_s)
+        self._camera.set_exposure(self._exposure_s)
         exposure = self._camera.get_exposure()
         x0, y0, z_focus = (float(v) for v in self._roi.stage_position)
         self._focus = (x0, y0, z_focus)
@@ -343,7 +372,7 @@ class PsfStackTask(ModuleTask):
         size_gb = n_images * int(width) * int(height) * 2 / 1e9
         self._timing_info = {'galvo positions': len(voltages), 'z planes per position':
                              len(z_offsets), 'laser_lines entries': len(lines),
-                             'images planned': n_images, 'exposure set (s)': self.exposure_s,
+                             'images planned': n_images, 'exposure set (s)': self._exposure_s,
                              'exposure read back (s)': exposure,
                              'image size (px)': f'{width} x {height}'}
         self.log.info(f'PSF stack: {len(voltages)} galvo positions x {len(z_offsets)} z planes x '
@@ -632,12 +661,13 @@ class PsfStackTask(ModuleTask):
     # ------------------------------------------------------------------------------------------
     def _check_setup_options(self) -> None:
         name = type(self).__name__
-        for option in ('data_root', 'metadata_template'):
+        for option in ('user_config_path', 'metadata_template'):
             if getattr(self, option) in self._UNSET:
                 raise RuntimeError(f'{option} not set for task {name} — add `options: {option}: ...` '
                                    f'to this task\'s entry in the config file')
-        if not os.path.isdir(self.data_root):
-            raise RuntimeError(f'data_root "{self.data_root}" is not an existing folder.')
+        if not os.path.isfile(self.user_config_path):
+            raise RuntimeError(f'user_config_path "{self.user_config_path}" is not an existing file - '
+                               f'save the psf_stack experiment from the experiment configurator.')
         if not os.path.isfile(self.metadata_template):
             raise RuntimeError(f'metadata_template "{self.metadata_template}" is not an existing '
                                f'file.')
@@ -651,6 +681,93 @@ class PsfStackTask(ModuleTask):
                                f'{err}') from err
         return dict(template or {})
 
+    def _load_user_config(self) -> dict:
+        """Read and check the experiment-configurator YAML (user_config_path) - no hardware call.
+
+        Returns {'galvo_start', 'galvo_stop', 'galvo_step', 'num_z_planes', 'z_step',
+        'laser_lines', 'exposure', 'save_path'} and sets the attributes used by the run. Any
+        problem raises a ValueError naming the file and the key.
+        """
+        path = self.user_config_path
+        try:
+            with open(path, 'rb') as f:
+                raw = f.read()
+            config = yaml.safe_load(raw.decode('utf-8'))
+        except Exception as err:
+            raise RuntimeError(f'Could not read the experiment config "{path}": {err}') from err
+        if not isinstance(config, dict):
+            raise ValueError(f'Experiment config "{path}": expected a YAML mapping.')
+
+        def fail(key, what):
+            raise ValueError(f'Experiment config "{path}", key "{key}": {what}')
+
+        experiment = config.get('experiment')
+        if experiment != self._EXPERIMENT:
+            fail('experiment', f'expected "{self._EXPERIMENT}", got {experiment!r} - is this the '
+                               f'psf_stack configuration?')
+        missing = [k for k in self._CONFIG_KEYS if k not in config]
+        if missing:
+            fail(missing[0], f'missing (missing keys: {", ".join(missing)}).')
+
+        def number(key):
+            value = config[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                fail(key, f'expected a number, got {value!r}.')
+            return float(value)
+
+        params = {k: number(k) for k in ('galvo_start', 'galvo_stop', 'galvo_step', 'z_step',
+                                         'exposure')}
+        n = config['num_z_planes']
+        if isinstance(n, bool) or not isinstance(n, int):
+            fail('num_z_planes', f'expected an integer, got {n!r}.')
+        params['num_z_planes'] = n
+        if not params['exposure'] > 0:
+            fail('exposure', f'must be > 0 s (got {params["exposure"]}).')
+
+        sequence = config['imaging_sequence']
+        if not isinstance(sequence, (list, tuple)) or not sequence:
+            fail('imaging_sequence', f'expected a non-empty list of [wavelength, intensity %], '
+                                     f'got {sequence!r}.')
+        lines = []
+        for k, entry in enumerate(sequence):
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                fail('imaging_sequence', f'entry {k} {entry!r} is not [wavelength, intensity %].')
+            source, intensity = entry
+            try:
+                wavelength = int(str(source).strip())
+            except ValueError:
+                fail('imaging_sequence', f'entry {k}: source {source!r} is not a laser wavelength '
+                                         f'(only laser lines can be used for a PSF stack).')
+            if isinstance(intensity, bool) or not isinstance(intensity, (int, float)):
+                fail('imaging_sequence', f'entry {k}: intensity {intensity!r} is not a number.')
+            lines.append((wavelength, float(intensity)))
+        params['laser_lines'] = lines
+
+        save_path = config['save_path']
+        if not isinstance(save_path, str) or not save_path.strip():
+            fail('save_path', f'expected a folder path, got {save_path!r}.')
+        if not os.path.isdir(save_path):
+            fail('save_path', f'"{save_path}" is not an existing folder.')
+        params['save_path'] = save_path
+
+        self._exposure_s = params['exposure']
+        self._z_step_um = params['z_step']
+        self._save_root = save_path
+        self._user_config_raw = raw
+        return params
+
+    def _centred_z_offsets(self, n_planes: int, step: float) -> List[float]:
+        """N z offsets centred on the focus: (k - (N-1)/2) * step, k = 0..N-1 (N odd, step > 0)."""
+        if n_planes < 1 or n_planes % 2 == 0:
+            raise ValueError(f'Experiment config "{self.user_config_path}", key "num_z_planes": '
+                             f'{n_planes} - an odd number of planes (>= 1) is required so that the '
+                             f'focus plane is acquired.')
+        if not step > 0:
+            raise ValueError(f'Experiment config "{self.user_config_path}", key "z_step": must be '
+                             f'> 0 µm (got {step}).')
+        half = (n_planes - 1) // 2
+        return [float(round((k - half) * step, self._ROUND_DECIMALS)) for k in range(n_planes)]
+
     def _float_steps(self, start: float, stop: float, step: float, what: str) -> List[float]:
         """start -> stop inclusive with a float step, stop included exactly once."""
         start, stop, step = float(start), float(stop), float(step)
@@ -661,11 +778,11 @@ class PsfStackTask(ModuleTask):
         values = np.round(np.arange(start, stop + step / 2, step), self._ROUND_DECIMALS)
         return [float(v) for v in values]
 
-    def _checked_laser_lines(self) -> List[Tuple[int, float]]:
-        if not self.laser_lines:
+    def _checked_laser_lines(self, laser_lines) -> List[Tuple[int, float]]:
+        if not laser_lines:
             raise ValueError('laser_lines is empty - give at least one (wavelength nm, intensity %).')
         lines = []
-        for item in self.laser_lines:
+        for item in laser_lines:
             try:
                 wavelength, intensity = int(item[0]), float(item[1])
             except (TypeError, ValueError, IndexError) as err:
@@ -731,7 +848,7 @@ class PsfStackTask(ModuleTask):
 
     def _make_run_folder(self) -> str:
         now = datetime.now()
-        day_folder = os.path.join(self.data_root, now.strftime('%Y-%m-%d'))
+        day_folder = os.path.join(self._save_root, now.strftime('%Y-%m-%d'))
         folder = self._unique_folder(os.path.join(day_folder, now.strftime('psf_%H%M%S')))
         os.makedirs(folder)
         return folder
@@ -774,7 +891,7 @@ class PsfStackTask(ModuleTask):
             'laser_lines': [wl for wl, _ in lines],
             'laser_power_(%)': [p for _, p in lines],
             'number_z_planes': len(z_offsets),
-            'distance_z_planes_(µm)': float(self.z_step_um),
+            'distance_z_planes_(µm)': float(self._z_step_um),
         }
         for key, value in acquisition.items():
             self._set_field(metadata, 'Acquisition', key, value)
@@ -784,6 +901,7 @@ class PsfStackTask(ModuleTask):
             {'z_focus_(µm)': z_focus},
             {'z_offsets_(µm)': list(z_offsets)},
             {'laser_order': [f'{name}.tif' for name in self._line_names]},
+            {'experiment_config': str(self.user_config_path)},
         ]
         with open(os.path.join(folder, 'metadata.txt'), 'w', encoding='utf-8') as f:
             YAML().dump(metadata, f)

@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1262</width>
-    <height>1106</height>
+    <height>1293</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -219,7 +219,17 @@
         </widget>
        </item>
        <item row="50" column="3">
-        <widget class="QDoubleSpinBox" name="doubleSpinBox_galvo_start"/>
+        <widget class="QDoubleSpinBox" name="galvo_start_DSpinBox">
+         <property name="minimum">
+          <double>-10.000000000000000</double>
+         </property>
+         <property name="maximum">
+          <double>10.000000000000000</double>
+         </property>
+         <property name="singleStep">
+          <double>0.010000000000000</double>
+         </property>
+        </widget>
        </item>
        <item row="8" column="3">
         <widget class="QSpinBox" name="num_frames_SpinBox">
@@ -391,7 +401,7 @@
         </widget>
        </item>
        <item row="50" column="1">
-        <widget class="QLabel" name="label_3">
+        <widget class="QLabel" name="galvo_start_Label">
          <property name="text">
           <string>Starting position (V)</string>
          </property>
@@ -560,7 +570,7 @@
         </widget>
        </item>
        <item row="45" column="1">
-        <widget class="QLabel" name="label">
+        <widget class="QLabel" name="zen_settings_Label">
          <property name="font">
           <font>
            <weight>75</weight>
@@ -673,7 +683,7 @@
         </widget>
        </item>
        <item row="51" column="1">
-        <widget class="QLabel" name="label_4">
+        <widget class="QLabel" name="galvo_stop_Label">
          <property name="text">
           <string>Ending position (V)</string>
          </property>
@@ -707,7 +717,7 @@
         </spacer>
        </item>
        <item row="49" column="1">
-        <widget class="QLabel" name="label_2">
+        <widget class="QLabel" name="galvo_settings_Label">
          <property name="font">
           <font>
            <weight>75</weight>
@@ -734,17 +744,31 @@
         </widget>
        </item>
        <item row="52" column="1">
-        <widget class="QLabel" name="label_5">
+        <widget class="QLabel" name="galvo_step_Label">
          <property name="text">
           <string>Step (V)</string>
          </property>
         </widget>
        </item>
        <item row="51" column="3">
-        <widget class="QDoubleSpinBox" name="doubleSpinBox_galvo_stop"/>
+        <widget class="QDoubleSpinBox" name="galvo_stop_DSpinBox">
+         <property name="minimum">
+          <double>-10.000000000000000</double>
+         </property>
+         <property name="maximum">
+          <double>10.000000000000000</double>
+         </property>
+         <property name="singleStep">
+          <double>0.010000000000000</double>
+         </property>
+        </widget>
        </item>
        <item row="52" column="3">
-        <widget class="QDoubleSpinBox" name="doubleSpinBox_galvo_step"/>
+        <widget class="QDoubleSpinBox" name="galvo_step_DSpinBox">
+         <property name="singleStep">
+          <double>0.010000000000000</double>
+         </property>
+        </widget>
        </item>
       </layout>
      </widget>

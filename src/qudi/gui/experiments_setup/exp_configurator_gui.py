@@ -64,6 +64,11 @@ combo box come from the ``experiment`` key inside those files.
 Author: F. Barho. Adapted to qudi-core by JB Fiche with chatGPT.
 Reformatted 2026-07-31.
 
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): ZEN section fixed after the ZEN
+  dock was removed from the .ui (header is now zen_settings_Label; the ZEN saving-folder widgets
+  belong to the "zen_security" section and are shown with it); new "galvo" section
+  (galvo_start / galvo_stop / galvo_step, in V) used by the OPM psf_stack experiment.
+
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -150,6 +155,7 @@ class ExpConfiguratorGUI(GuiBase):
         "prebleaching": "set_visibility_prebleaching_settings",
         "timelapse": "set_visibility_timelapse_settings",
         "zen_security": "set_visibility_ZEN_security_settings",
+        "galvo": "set_visibility_galvo_settings",
     }
 
     FIELD_SECTIONS = {
@@ -170,7 +176,6 @@ class ExpConfiguratorGUI(GuiBase):
         "save_network_path": "save",
         "transfer_data": "save",
         "file_format": "save",
-        "zen_saving_path": "save",
 
         "num_z_planes": "scan",
         "z_step": "scan",
@@ -188,6 +193,11 @@ class ExpConfiguratorGUI(GuiBase):
 
         "zen_ref_images_path": "zen_security",
         "correlation_threshold": "zen_security",
+        "zen_saving_path": "zen_security",
+
+        "galvo_start": "galvo",
+        "galvo_stop": "galvo",
+        "galvo_step": "galvo",
     }
 
     FIELD_WIDGETS = {
@@ -330,6 +340,21 @@ class ExpConfiguratorGUI(GuiBase):
             "Correlation_threshold_Label",
             "Zen_correlation_DSpinBox",
         ),
+
+        "galvo_start": (
+            "galvo_start_Label",
+            "galvo_start_DSpinBox",
+        ),
+
+        "galvo_stop": (
+            "galvo_stop_Label",
+            "galvo_stop_DSpinBox",
+        ),
+
+        "galvo_step": (
+            "galvo_step_Label",
+            "galvo_step_DSpinBox",
+        ),
     }
 
     # define the default language option as English (to make sure all float have a point as a separator)
@@ -421,6 +446,9 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.num_iterations_SpinBox.valueChanged.connect(self._exp_logic.update_num_iterations)
         self._mw.time_step_SpinBox.valueChanged.connect(self._exp_logic.update_time_step)
         self._mw.axial_calibration_path_lineEdit.textChanged.connect(self._exp_logic.update_axial_calibration_path)
+        self._mw.galvo_start_DSpinBox.valueChanged.connect(self._exp_logic.update_galvo_start)
+        self._mw.galvo_stop_DSpinBox.valueChanged.connect(self._exp_logic.update_galvo_stop)
+        self._mw.galvo_step_DSpinBox.valueChanged.connect(self._exp_logic.update_galvo_step)
 
         # pushbuttons
         # pushbuttons belonging to the listview
@@ -780,8 +808,8 @@ class ExpConfiguratorGUI(GuiBase):
     def set_visibility_save_settings(self, visible):
         """Show or hide local, network, transfer, and file-format controls.
 
-        ZEN-specific save controls are hidden here by default and are shown later only
-        when their field is declared by the active definition.
+        The ZEN saving-folder controls belong to the ZEN section
+        (``set_visibility_ZEN_security_settings``).
         """
         self._mw.save_settings_Label.setVisible(visible)
         self._mw.save_path_Label.setVisible(visible)
@@ -791,11 +819,6 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.fileformat_Label.setVisible(visible)
         self._mw.fileformat_ComboBox.setVisible(visible)
         self._mw.TransferData_checkBox.setVisible(visible)
-
-        # the saving settings for ZEN have been added here. By default, they are set to invisible.
-        self._mw.Zen_saving_folder_Label.setVisible(False)
-        self._mw.Zen_saving_folder_lineEdit.setVisible(False)
-        self._mw.Zen_saving_folder_pushButton.setVisible(False)
 
     def set_visibility_scan_settings(self, visible):
         """Show or hide z-stack and focal-plane controls."""
@@ -843,13 +866,27 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.load_dz_calibration_pushButton.setVisible(visible)
 
     def set_visibility_ZEN_security_settings(self, visible):
-        """Show or hide ZEN autofocus reference and threshold controls."""
-        self._mw.Autofocus_security_Label.setVisible(visible)
+        """Show or hide the ZEN section: header, autofocus reference images, correlation threshold
+        and ZEN saving folder."""
+        self._mw.zen_settings_Label.setVisible(visible)
         self._mw.reference_image_folder_Label.setVisible(visible)
         self._mw.reference_images_lineEdit.setVisible(visible)
         self._mw.reference_images_pushButton.setVisible(visible)
         self._mw.Correlation_threshold_Label.setVisible(visible)
         self._mw.Zen_correlation_DSpinBox.setVisible(visible)
+        self._mw.Zen_saving_folder_Label.setVisible(visible)
+        self._mw.Zen_saving_folder_lineEdit.setVisible(visible)
+        self._mw.Zen_saving_folder_pushButton.setVisible(visible)
+
+    def set_visibility_galvo_settings(self, visible):
+        """Show or hide the galvo section (start / stop / step voltages, in V)."""
+        self._mw.galvo_settings_Label.setVisible(visible)
+        self._mw.galvo_start_Label.setVisible(visible)
+        self._mw.galvo_start_DSpinBox.setVisible(visible)
+        self._mw.galvo_stop_Label.setVisible(visible)
+        self._mw.galvo_stop_DSpinBox.setVisible(visible)
+        self._mw.galvo_step_Label.setVisible(visible)
+        self._mw.galvo_step_DSpinBox.setVisible(visible)
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Callbacks of the toolbuttons
@@ -1033,6 +1070,9 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.axial_calibration_path_lineEdit.setText(self._exp_logic.config_dict.get('axial_calibration_path', ''))
             self._mw.mail_LineEdit.setText(self._exp_logic.config_dict.get('email', ''))
             self._mw.Zen_correlation_DSpinBox.setValue(self._exp_logic.config_dict.get('correlation_threshold', 0.6))
+            self._mw.galvo_start_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_start', 0.0))
+            self._mw.galvo_stop_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_stop', 0.0))
+            self._mw.galvo_step_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_step', 0.1))
 
             self._exp_logic.img_sequence_model.layoutChanged.emit()
             self._exp_logic.img_sequence_model_timelapse_ramm.layoutChanged.emit()
@@ -1116,6 +1156,9 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.num_iterations_SpinBox,
             self._mw.time_step_SpinBox,
             self._mw.axial_calibration_path_lineEdit,
+            self._mw.galvo_start_DSpinBox,
+            self._mw.galvo_stop_DSpinBox,
+            self._mw.galvo_step_DSpinBox,
         )
 
     # def update_form(self):

@@ -800,6 +800,27 @@ Last updated: 2026-10-13
 
 #### Changed
 
+- `tasks/psf_stack_opm.py` + `OPM_config.cfg` (2026-10-13): **PSF parameters
+  from the experiment configurator**. The hard-coded class attributes
+  (`galvo_start_v`, `galvo_stop_v`, `galvo_step_v`, `z_half_range_um`,
+  `z_step_um`, `laser_lines`, `exposure_s`) and the `data_root` option are
+  gone. New required option `user_config_path` (missing / `TO FILL` -> early,
+  hardware-free error, like `metadata_template`); `metadata_template`,
+  `camera_name`, `timing_log_enabled` stay options. At run start, before any
+  hardware call, the YAML is loaded and checked (`experiment` must be
+  `psf_stack`; missing key / wrong type -> error naming the file and the key):
+  galvo start / stop / step; `num_z_planes` N (odd, >= 1, so the focus plane
+  is acquired) and `z_step` (> 0) -> offsets `(k - (N-1)/2) * z_step`;
+  `imaging_sequence` -> laser lines (string wavelengths accepted, repeats
+  allowed, non-laser sources such as `Brightfield` refused); `exposure`;
+  `save_path` (must exist) replaces `data_root`. The galvo-limit, laser,
+  camera and stage checks still run on these values. The YAML is copied
+  byte-for-byte into the run folder as `experiment_config.yaml`; the metadata
+  `PSF` section records `experiment_config` (original path). Sequence, file
+  names, CSV, GUI lock, timing log and cleanup unchanged. `OPM_config.cfg`:
+  `psf_stack` options `data_root` -> `user_config_path`
+  (`C:\Users\JB\qudi_files\qudi_task_config_files\psf_stack_task_opm.yaml`).
+
 - `tasks/psf_stack_opm.py` (2026-10-13): **timing log** to find where the
   time goes before a hardware-triggered redesign. Instrumentation only - the
   acquisition sequence, files, checks and cleanup are unchanged.
@@ -930,6 +951,27 @@ Last updated: 2026-10-13
 
 #### Added
 
+- `exp_configurator_gui.py` + `experiment_configurator_logic.py` (2026-10-13):
+  new **Galvo section** (`galvo`): fields `galvo_start`, `galvo_stop`,
+  `galvo_step` (V) mapped to `galvo_settings_Label` and the
+  `galvo_start/stop/step_Label` / `_DSpinBox` widgets added by JB in
+  `ui_exp_configurator.ui`; `set_visibility_galvo_settings`; logic slots
+  `update_galvo_start/stop/step` (same style as `update_z_step`); spinbox
+  `valueChanged` connected, values refreshed in `update_entries` (defaults
+  0.0 / 0.0 / 0.1) and signal-blocked during refreshes. Definitions without
+  galvo fields are unchanged.
+- `custom_experiments_config/opm/psf_stack.yaml` (2026-10-13): experiment
+  definition `psf_stack` for the OPM (output `psf_stack_task_opm.yaml`):
+  galvo start / stop / step (1.0 / 2.0 / 0.1 V), `num_z_planes` (51),
+  `z_step` (0.2 µm), `centered_focal_plane` (hidden, true),
+  `imaging_sequence` (standard model), `exposure` (0.05 s), `save_path`
+  (`default_from: default_path_imagedata`). Sections galvo, camera, imaging,
+  scan, save.
+- `OPM_config.cfg` (2026-10-13): `experiments_configurator_logic` (camera,
+  laser and filter logic connected; definitions from
+  `custom_experiments_config\opm\`; `psf_stack.yaml`; `tif`; `D:\DATA`) and
+  `experiments_configurator_gui` (`default_path: C:\Users\JB\qudi_files`).
+
 - Moved the ZEN-specific controls into their own dock widget (2026-10-05).
   Context: JB is bringing two new microscopes onto qudi-core (an OPM
   light-sheet setup and a fly-training arena, the latter on hold for now)
@@ -1005,6 +1047,20 @@ Last updated: 2026-10-13
   mean 5 s).
 
 #### Fixed
+
+- `exp_configurator_gui.py` (2026-10-13): **ZEN section after the ZEN dock
+  removal** in `ui_exp_configurator.ui`. `set_visibility_ZEN_security_settings`
+  referenced `Autofocus_security_Label`, which no longer exists; since every
+  definition hides all sections first, selecting ANY experiment raised
+  `AttributeError`. The header is now `zen_settings_Label`; the ZEN
+  saving-folder field (`zen_saving_path`) moved from the "save" to the
+  "zen_security" section, and the three hard-coded `Zen_saving_folder_*`
+  lines left `set_visibility_save_settings`. The ZEN section now shows / hides
+  header, reference images, correlation threshold and saving folder together.
+  Checked on all SD, RAMM, PALM and dummy definitions: no ZEN widget unless a
+  ZEN field is declared. `_sync_dock_widgets_visibility` kept (no-op without
+  docks). The uncommitted widget renames in the `.ui` (galvo widgets,
+  `zen_settings_Label`) are part of this change.
 
 - `logic/experiment_configurator_logic.py` (2026-10-01): `ExpConfigLogic.on_activate()`
   built `self.lasers` (the list backing the imaging-sequence editor's

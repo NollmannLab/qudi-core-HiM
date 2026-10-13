@@ -83,6 +83,9 @@ update method, and support in ``update_entries``. A new imaging-sequence format 
 Author: F. Barho. Adapted to qudi-core by JB Fiche using chatGPT
 Created 2021-02-17; reformatted 2026-07-31.
 
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): update_galvo_start /
+  update_galvo_stop / update_galvo_step for the new galvo fields (V) of the GUI.
+
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -737,6 +740,24 @@ class ExpConfigLogic(LogicBase):
     def update_z_step(self, value):
         """Set the spacing between z planes and notify configuration listeners."""
         self.config_dict['z_step'] = value
+        self.sigConfigDictUpdated.emit()
+
+    @QtCore.Slot(float)
+    def update_galvo_start(self, value):
+        """Set the first galvo voltage (V) and notify configuration listeners."""
+        self.config_dict['galvo_start'] = value
+        self.sigConfigDictUpdated.emit()
+
+    @QtCore.Slot(float)
+    def update_galvo_stop(self, value):
+        """Set the last galvo voltage (V) and notify configuration listeners."""
+        self.config_dict['galvo_stop'] = value
+        self.sigConfigDictUpdated.emit()
+
+    @QtCore.Slot(float)
+    def update_galvo_step(self, value):
+        """Set the galvo voltage step (V) and notify configuration listeners."""
+        self.config_dict['galvo_step'] = value
         self.sigConfigDictUpdated.emit()
 
     @QtCore.Slot(int)

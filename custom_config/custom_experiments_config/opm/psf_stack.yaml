@@ -1,0 +1,70 @@
+experiment: psf_stack
+description: Configure a PSF z-stack acquisition on the OPM microscope over a series of galvo positions and laser lines.
+
+output_filename: psf_stack_task_opm.yaml
+
+sections:
+  general: false
+  camera: true
+  filter: false
+  imaging: true
+  save: true
+  scan: true
+  documents: false
+  prebleaching: false
+  timelapse: false
+  zen_security: false
+  galvo: true
+
+fields:
+  galvo_start:
+    visible: true
+    required: true
+    default: 1.0
+    unit: V
+
+  galvo_stop:
+    visible: true
+    required: true
+    default: 2.0
+    unit: V
+
+  galvo_step:
+    visible: true
+    required: true
+    default: 0.1
+    unit: V
+
+  num_z_planes:
+    visible: true
+    required: true
+    default: 51
+    minimum: 1
+
+  z_step:
+    visible: true
+    required: true
+    default: 0.2
+    unit: µm
+
+  centered_focal_plane:
+    visible: false
+    default: true
+
+  imaging_sequence:
+    visible: true
+    required: true
+    model: standard
+    default: []
+
+  exposure:
+    visible: true
+    required: true
+    default: 0.05
+    minimum: 0.001
+    unit: s
+
+  save_path:
+    visible: true
+    required: true
+    default_from: default_path_imagedata
