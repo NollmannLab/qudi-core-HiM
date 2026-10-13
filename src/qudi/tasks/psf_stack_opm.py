@@ -21,23 +21,28 @@ Sequence
     then:
         lasers off; lock the GUI controls (laser, camera, filter, ROI / stage, tracking)
         select camera 'opm_camera_1', set the exposure
-        x0, y0, z_focus = roi_logic.stage_position  (read once - focus manually before starting)
+        x0, y0, z_focus = roi_logic.stage_position  (read once - focus manually before starting;
+                                                     x0 / y0 are only logged, never sent)
         lasers off, all intensities 0
     for i, V in enumerate(galvo voltages):            # galvo_start -> galvo_stop inclusive
         galvo_logic.set_voltage(V)                    # False -> stop the task (raise)
         create galvo_{i:03d}/, open one TIFF per laser_lines ENTRY (index k):
             {k:02d}_{wavelength}nm_{intensity:g}pct.tif
         for each z offset ((k - (N-1)/2) * z_step, k = 0..N-1, N = num_z_planes, odd):
-            roi_logic.move_stage((x0, y0, z_focus + offset)) and stage_wait_for_idle()  # False -> raise
+            roi_logic.move_stage((None, None, z_focus + offset)) and stage_wait_for_idle()  # False -> raise
             _acquire_plane(offset): for each entry k = (wavelength, intensity) in laser_lines, in order:
                 check interrupt; reset intensities; set this line's intensity; lasers on;
                 snap one image; lasers off; invalid image -> raise
             append each frame (uint16) to its entry's TIFF immediately (no stack kept in memory)
         close the TIFFs, write galvo_{i:03d}/metadata.txt, append a row to galvo_positions.csv
     cleanup (always; each step protected on its own; never raises; nothing if no hardware touched):
-        lasers off + intensities reset; galvo to rest; stage back to (x0, y0, z_focus);
+        lasers off + intensities reset; galvo to rest; stage back to z_focus (z only);
         close any open TIFF (partial files are kept); restore the previous camera and its exposure;
         finally unlock the GUI controls (each unlock protected on its own, always attempted)
+
+Stage moves are z-only: move_stage((None, None, z)) sends only the z axis, so x and y are never
+commanded during the task (run and cleanup) - no serial time spent on them and no lateral
+correction or anti-backlash motion at each plane.
 
 The per-plane step is the single method _acquire_plane(z_offset) -> {entry index: frame}; a
 DAQ-triggered version can replace it later without touching the loops.
@@ -169,6 +174,9 @@ Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): the experime
   given by the new required option user_config_path (experiment 'psf_stack'), validated before any
   hardware call, and the YAML is copied into the run folder as experiment_config.yaml. The z-stack
   is N planes (odd) centred on the focus; save_path replaces the data_root option.
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): every stage move (run and
+  cleanup) is z-only - move_stage((None, None, z)) - so x and y are never commanded during the
+  task; x0 / y0 are still read once at start and logged.
 """
 
 import copy
@@ -403,7 +411,7 @@ class PsfStackTask(ModuleTask):
             for z_index, z_offset in enumerate(z_offsets):
                 self._check_interrupt()
                 zids = dict(gids, z_index=z_index, z_offset_um=z_offset)
-                target = (x0, y0, round(z_focus + z_offset, self._ROUND_DECIMALS))
+                target = (None, None, round(z_focus + z_offset, self._ROUND_DECIMALS))  # z only
                 self._plane_acc = 0.0
                 t_plane = perf_counter()
                 with self._timed('stage_move_cmd', zids, plane=True):
@@ -491,7 +499,8 @@ class PsfStackTask(ModuleTask):
             self.log.error(f'Cleanup: could not move the galvo to rest: {err}')
         try:
             if self._focus is not None:
-                if not (self._roi.move_stage(self._focus) and self._roi.stage_wait_for_idle()):
+                if not (self._roi.move_stage((None, None, self._focus[2]))  # z only
+                        and self._roi.stage_wait_for_idle()):
                     self.log.error(f'Cleanup: the stage did not return to the focus {self._focus}.')
         except Exception as err:
             self.log.error(f'Cleanup: could not move the stage back to the focus: {err}')
@@ -825,7 +834,8 @@ class PsfStackTask(ModuleTask):
         if getattr(self._camera, 'live_enabled', False):
             raise RuntimeError('Camera live mode is running - stop it before starting the task.')
 
-        # Same test as roi_logic.move_stage: without a z axis it ignores z and still returns True
+        # Same test as roi_logic.move_stage: without a z axis a z-only move is refused (False) -
+        # checked here so that the task fails before any hardware call
         z_label = getattr(self._roi, '_z_axis_label', None)
         stage_axes = getattr(self._roi, '_stage_axis_labels', None)
         if z_label is None or stage_axes is None:
