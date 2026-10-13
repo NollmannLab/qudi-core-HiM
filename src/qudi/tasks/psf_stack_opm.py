@@ -17,31 +17,49 @@ Sequence
         the galvo-voltage and z-offset lists, check them against the hardware (galvo limits, laser
         lines allowed, camera available, stage z axis), create the run folder
     then:
+        lasers off; lock the GUI controls (laser, camera, filter, ROI / stage, tracking)
         select camera 'opm_camera_1', set the exposure
         x0, y0, z_focus = roi_logic.stage_position  (read once - focus manually before starting)
         lasers off, all intensities 0
     for i, V in enumerate(galvo voltages):            # galvo_start_v -> galvo_stop_v inclusive
         galvo_logic.set_voltage(V)                    # False -> stop the task (raise)
-        create galvo_{i:03d}/, open one TIFF per laser line: {wavelength}nm.tif
+        create galvo_{i:03d}/, open one TIFF per laser_lines ENTRY (index k):
+            {k:02d}_{wavelength}nm_{intensity:g}pct.tif
         for each z offset (-z_half_range_um -> +z_half_range_um inclusive, step z_step_um):
             roi_logic.move_stage((x0, y0, z_focus + offset)) and stage_wait_for_idle()  # False -> raise
-            _acquire_plane(offset): for each (wavelength, intensity) in laser_lines, in this order:
+            _acquire_plane(offset): for each entry k = (wavelength, intensity) in laser_lines, in order:
                 check interrupt; reset intensities; set this line's intensity; lasers on;
                 snap one image; lasers off; invalid image -> raise
-            append each frame (uint16) to its line's TIFF immediately (no stack kept in memory)
+            append each frame (uint16) to its entry's TIFF immediately (no stack kept in memory)
         close the TIFFs, write galvo_{i:03d}/metadata.txt, append a row to galvo_positions.csv
     cleanup (always; each step protected on its own; never raises; nothing if no hardware touched):
         lasers off + intensities reset; galvo to rest; stage back to (x0, y0, z_focus);
-        close any open TIFF (partial files are kept); restore the previous camera and its exposure
+        close any open TIFF (partial files are kept); restore the previous camera and its exposure;
+        finally unlock the GUI controls (each unlock protected on its own, always attempted)
 
-The per-plane step is the single method _acquire_plane(z_offset) -> {wavelength: frame}; a
+The per-plane step is the single method _acquire_plane(z_offset) -> {entry index: frame}; a
 DAQ-triggered version can replace it later without touching the loops.
+
+Laser lines
+-----------
+    laser_lines is an ordered list of (wavelength nm, intensity %) entries. The same wavelength may
+    appear several times, e.g. [(561, 10.0), (561, 50.0)] images the sample at two powers. Every
+    entry gets its own TIFF; files, frames and messages are keyed by the entry's index, never by
+    the wavelength.
+
+GUI lock
+--------
+    While the task runs, the GUI controls of basic_imaging and of the ROI GUI (laser, camera,
+    filter, stage / ROI, tracking) are greyed out, so that a click cannot interfere with the
+    acquisition. The image display still updates at each snap. The cleanup unlocks them, also after
+    an interrupt or an error. A failure before any hardware call locks nothing.
 
 Folder layout
 -------------
     <data_root>/<YYYY-MM-DD>/psf_<HHMMSS>/          (never overwritten: _1, _2, ... appended)
         galvo_positions.csv                          one row per COMPLETED galvo position
-        galvo_000/  561nm.tif  [640nm.tif ...]  metadata.txt
+        galvo_000/  00_561nm_10pct.tif  [01_561nm_50pct.tif ...]  metadata.txt
+                    (one TIFF per laser_lines entry: {index:02d}_{wavelength}nm_{intensity:g}pct.tif)
         galvo_001/  ...
 
 Config example (logic: task_runner: options: module_tasks:)
@@ -53,6 +71,7 @@ Config example (logic: task_runner: options: module_tasks:)
         laser_logic: laser_control_logic
         galvo_logic: galvo_logic
         roi_logic: roi_logic
+        filter_wheel_logic: filter_wheel_logic
       options:
         data_root: 'D:\\DATA'
         metadata_template: 'C:\\path\\to\\custom_metadata_templates\\OPM_setup.cfg'
@@ -81,6 +100,10 @@ Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): new file - P
   software-timed PSF z-stack acquisition on the OPM over galvo positions and laser lines, writing
   one TIFF per galvo position and laser line, a metadata.txt per galvo position and a
   galvo_positions.csv per run.
+Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): the same laser line may appear
+  several times in laser_lines (files, frames and messages keyed by the entry index, file names
+  {index:02d}_{wavelength}nm_{intensity:g}pct.tif); the GUI controls (laser, camera, filter,
+  ROI / stage, tracking) are locked during the run and unlocked by the cleanup.
 """
 
 import copy
@@ -109,6 +132,7 @@ class PsfStackTask(ModuleTask):
     laser_logic = Connector(interface='LaserControlLogic')
     galvo_logic = Connector(interface='GalvoLogic')
     roi_logic = Connector(interface='RoiLogic')
+    filter_wheel_logic = Connector(interface='FilterWheelLogic')
 
     # ==========================================================================================
     # EXPERIMENT PARAMETERS - edit here
@@ -118,7 +142,8 @@ class PsfStackTask(ModuleTask):
     galvo_step_v = 0.1          # V, galvo voltage step
     z_half_range_um = 5.0       # µm, z-stack from z_focus - z_half_range_um to z_focus + z_half_range_um
     z_step_um = 0.2             # µm, z step
-    laser_lines = [(561, 10.0)]  # [(wavelength nm, intensity %), ...] - fired in this order at each z
+    laser_lines = [(561, 10.0)]  # [(wavelength nm, intensity %), ...] - fired in this order at each z;
+    #                             the same wavelength may repeat, e.g. [(561, 10.0), (561, 50.0)]
     exposure_s = 0.05           # s, camera exposure time
     camera_name = 'opm_camera_1'  # camera used (selected at start, previous camera restored at the end)
 
@@ -143,11 +168,14 @@ class PsfStackTask(ModuleTask):
         self._focus: Optional[Tuple[float, float, float]] = None
         self._run_folder: Optional[str] = None
         self._completed = 0
+        self._lines: List[Tuple[int, float]] = []
+        self._line_names: List[str] = []
 
         self._camera = self.camera_logic()
         self._laser = self.laser_logic()
         self._galvo = self.galvo_logic()
         self._roi = self.roi_logic()
+        self._filter = self.filter_wheel_logic()
 
     def _run(self) -> dict:
         # ---- checks that do not touch any hardware ------------------------------------------
@@ -168,6 +196,8 @@ class PsfStackTask(ModuleTask):
 
         # ---- hardware set-up -----------------------------------------------------------------
         self._hardware_touched = True
+        self._laser.set_laser_disabled()  # lasers off first
+        self._lock_gui()
         self._prev_camera = self._camera.get_active_camera()
         self._prev_exposure = self._camera.get_exposure()
         if not self._camera.select_camera(self.camera_name):
@@ -196,8 +226,8 @@ class PsfStackTask(ModuleTask):
             folder = self._unique_folder(os.path.join(self._run_folder, f'galvo_{index:03d}'))
             os.makedirs(folder)
             self.log.info(f'Galvo position {index + 1}/{len(voltages)}: {voltage} V -> {folder}')
-            self._writers = {wl: TiffWriter(os.path.join(folder, f'{wl}nm.tif'))
-                             for wl, _ in lines}
+            self._writers = {k: TiffWriter(os.path.join(folder, f'{name}.tif'))
+                             for k, name in enumerate(self._line_names)}
 
             for z_offset in z_offsets:
                 self._check_interrupt()
@@ -208,15 +238,15 @@ class PsfStackTask(ModuleTask):
                     raise RuntimeError(f'Stage did not reach {target} (timeout or communication '
                                        f'error) - task stopped.')
                 frames = self._acquire_plane(z_offset)
-                for wl, _ in lines:
-                    self._writers[wl].write(frames[wl], contiguous=True)
+                for k in range(len(lines)):
+                    self._writers[k].write(frames[k], contiguous=True)
 
             self._close_writers()
             self._write_metadata(template, folder, index, voltage, z_focus, z_offsets, lines,
                                  exposure)
             with open(csv_path, 'a', newline='') as f:
                 csv.writer(f).writerow([os.path.basename(folder), voltage, len(z_offsets),
-                                        ';'.join(str(wl) for wl, _ in lines), True,
+                                        ';'.join(f'{wl}@{p:g}' for wl, p in lines), True,
                                         datetime.now().isoformat(timespec='seconds')])
                 f.flush()
             self._completed += 1
@@ -255,8 +285,35 @@ class PsfStackTask(ModuleTask):
                     self._camera.set_exposure(self._prev_exposure)
         except Exception as err:
             self.log.error(f'Cleanup: could not restore the previous camera / exposure: {err}')
+        self._unlock_gui()
         self.log.info(f'PSF stack cleanup finished ({self._completed} galvo position(s) completed'
                       f'{", data in " + self._run_folder if self._run_folder else ""}).')
+
+    # ------------------------------------------------------------------------------------------
+    # GUI lock
+    # ------------------------------------------------------------------------------------------
+    def _lock_gui(self) -> None:
+        """Grey out the GUI controls that could interfere with the acquisition (the display still
+        updates). Called in _run after _hardware_touched is set; an error stops the task, and the
+        cleanup then unlocks everything."""
+        self._laser.disable_laser_actions()
+        self._camera.disable_camera_actions()
+        self._filter.disable_filter_actions()
+        self._roi.disable_tracking_mode()
+        self._roi.disable_roi_actions()
+
+    def _unlock_gui(self) -> None:
+        """Re-enable the GUI controls - every call protected on its own, never raises."""
+        steps = (('laser', lambda: self._laser.enable_laser_actions()),
+                 ('camera', lambda: self._camera.enable_camera_actions()),
+                 ('filter', lambda: self._filter.enable_filter_actions()),
+                 ('tracking', lambda: self._roi.enable_tracking_mode()),
+                 ('ROI / stage', lambda: self._roi.enable_roi_actions()))
+        for what, step in steps:
+            try:
+                step()
+            except Exception as err:
+                self.log.error(f'Cleanup: could not re-enable the {what} GUI controls: {err}')
 
     # ------------------------------------------------------------------------------------------
     # Per-plane acquisition - the one step a DAQ-triggered version will replace
@@ -264,11 +321,11 @@ class PsfStackTask(ModuleTask):
     def _acquire_plane(self, z_offset: float) -> Dict[int, np.ndarray]:
         """Acquire one image per laser line at the current z plane, in the laser_lines order.
 
-        Returns {wavelength: uint16 frame}. Checks for an interrupt before every image; the lasers
+        Returns {entry index in laser_lines: uint16 frame}. Checks for an interrupt before every image; the lasers
         are switched off after each image, also if the snap fails.
         """
         frames = {}
-        for wavelength, intensity in self._lines:
+        for k, (wavelength, intensity) in enumerate(self._lines):
             self._check_interrupt()
             self._laser.reset_laser_intensities()
             self._laser.set_laser_line_intensity(wavelength, intensity)
@@ -283,8 +340,8 @@ class PsfStackTask(ModuleTask):
             # image is an acquisition failure.
             if frame is None or np.size(frame) == 0 or frame is previous:
                 raise RuntimeError(f'No new image from the camera at z offset {z_offset} µm, '
-                                   f'{wavelength} nm - task stopped.')
-            frames[wavelength] = np.asarray(frame).astype(np.uint16, copy=False)
+                                   f'{self._line_names[k]} - task stopped.')
+            frames[k] = np.asarray(frame).astype(np.uint16, copy=False)
         return frames
 
     # ------------------------------------------------------------------------------------------
@@ -335,10 +392,15 @@ class PsfStackTask(ModuleTask):
                 raise ValueError(f'Laser intensity {intensity} % for {wavelength} nm is outside '
                                  f'[0, 100] %.')
             lines.append((wavelength, intensity))
-        if len({wl for wl, _ in lines}) != len(lines):
-            raise ValueError(f'laser_lines contains the same wavelength twice: {lines}.')
+        # The same wavelength may appear several times (e.g. two powers): entries are keyed by index
         self._lines = lines
+        self._line_names = [self._line_name(k, wl, p) for k, (wl, p) in enumerate(lines)]
         return lines
+
+    @staticmethod
+    def _line_name(index: int, wavelength: int, intensity: float) -> str:
+        """File stem / label of a laser_lines entry, e.g. '00_561nm_10pct'."""
+        return f'{index:02d}_{wavelength}nm_{intensity:g}pct'
 
     def _validate_against_setup(self, voltages: List[float],
                                 lines: List[Tuple[int, float]]) -> None:
@@ -349,7 +411,7 @@ class PsfStackTask(ModuleTask):
             raise ValueError(f'Galvo voltage(s) {outside} outside the galvo limits [{low}, {high}] V.')
 
         state = self._laser.laser_state
-        for wavelength, _ in lines:
+        for wavelength in dict.fromkeys(wl for wl, _ in lines):  # each distinct wavelength once
             if wavelength not in state:
                 raise ValueError(f'Laser line {wavelength} nm does not exist on this setup '
                                  f'(available: {sorted(state)}).')
@@ -392,11 +454,13 @@ class PsfStackTask(ModuleTask):
         return folder
 
     def _close_writers(self) -> None:
-        for wavelength, writer in list(getattr(self, '_writers', {}).items()):
+        names = getattr(self, '_line_names', [])
+        for k, writer in list(getattr(self, '_writers', {}).items()):
             try:
                 writer.close()
             except Exception as err:
-                self.log.error(f'Could not close the TIFF file for {wavelength} nm: {err}')
+                name = f'{names[k]}.tif' if k < len(names) else f'entry {k}'
+                self.log.error(f'Could not close the TIFF file {name}: {err}')
         self._writers = {}
 
     @staticmethod
@@ -436,7 +500,7 @@ class PsfStackTask(ModuleTask):
             {'galvo_index': index},
             {'z_focus_(µm)': z_focus},
             {'z_offsets_(µm)': list(z_offsets)},
-            {'laser_order': [wl for wl, _ in lines]},
+            {'laser_order': [f'{name}.tif' for name in self._line_names]},
         ]
         with open(os.path.join(folder, 'metadata.txt'), 'w', encoding='utf-8') as f:
             YAML().dump(metadata, f)

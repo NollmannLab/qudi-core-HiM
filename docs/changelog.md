@@ -774,6 +774,30 @@ Last updated: 2026-10-13
 
 #### Changed
 
+- `tasks/psf_stack_opm.py` + `OPM_config.cfg` (2026-10-13): two changes
+  after the first successful test on the OPM.
+  - **Repeated laser lines**: the same wavelength may appear several times
+    in `laser_lines` (e.g. `[(561, 10.0), (561, 50.0)]`, same sample at two
+    powers); the duplicate-wavelength check is gone. TIFF writers, the frames
+    returned by `_acquire_plane` and the z-loop writes are keyed by the
+    entry's index, never by wavelength. File names
+    `{index:02d}_{wavelength}nm_{intensity:g}pct.tif` (e.g.
+    `00_561nm_10pct.tif`, `01_561nm_50pct.tif`), also used in log and error
+    messages. `metadata.txt`: `laser_lines` / `laser_power_(%)` list every
+    entry in order; `PSF > laser_order` lists the file names. CSV
+    `laser_lines_nm` column: `wavelength@intensity` per entry, `;`-separated
+    (`561@10;561@50`). The setup checks (line exists, allowed by the filter)
+    run once per distinct wavelength.
+  - **GUI lock during the run**: new connector `filter_wheel_logic`. Right
+    after `_hardware_touched` is set, lasers off, then
+    `disable_laser_actions`, `disable_camera_actions`,
+    `disable_filter_actions`, `disable_tracking_mode`, `disable_roi_actions`
+    (as in `roi_multicolour_scan_sd.py`). The cleanup re-enables the five as
+    its last steps, each in its own try/except with `log.error`, also after
+    an interrupt or an error. A failure before any hardware call locks and
+    unlocks nothing. The live image still updates at each snap.
+    `OPM_config.cfg`: `filter_wheel_logic: filter_wheel_logic` added under
+    `psf_stack` > `connect:`.
 - `tasks/photobleaching_sd.py` → `tasks/photobleaching.py` (2026-10-09,
   `git mv`, rename authorized by JB): one photobleaching task file for all
   setups. Shared code in `PhotoBleachingBase`; `PhotoBleachingSDTask` is the
