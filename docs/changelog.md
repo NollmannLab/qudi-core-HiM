@@ -231,6 +231,32 @@ Last updated: 2026-10-13
     coordinates, `get_name()` returns the configured name, and
     `get_acquired_data()`'s buffer shape matches a non-square frame.
 
+### Stages
+
+#### Changed
+
+- `hardware/multi_axis_translation_stage/tiger_ASI.py` + `OPM_config.cfg`
+  (2026-10-13): **fast idle detection on the ASI Tiger (OPM stage)**. The
+  OPM PSF timing log showed `roi_logic.stage_wait_for_idle()` taking
+  513-528 ms for every 0.2 µm z step (79 % of the acquisition time):
+  `wait_for_idle()` queried the status once, the stage was still busy right
+  after the move, and the loop slept a fixed 0.5 s before the next query.
+  - New config options, validated at activation (out of range -> clear
+    error, module stays deactivated): `idle_poll_interval_s` (default
+    0.02 s, range [0.005, 1.0]) and `settle_time_s` (default 0 s, range
+    [0, 1.0]).
+  - `wait_for_idle()`: first status query immediately, then one query every
+    `idle_poll_interval_s` while busy; once idle, waits `settle_time_s` once
+    (if > 0) so the position is stable before an image. Timeout
+    (`_timeout`) logic, error message and `False` return unchanged.
+    Docstring fixed (it said "checks every 1 s").
+  - Unchanged: the 0.5 s wait in `on_deactivate` (waits for the serial port
+    to close, not a status-polling loop), `write()`'s 0.1 s retry delay, the
+    serial settings. `MS2000_ASI.py` keeps the 0.5 s poll for now.
+  - Class docstring: Tiger config example (was an MS2000 one) with both
+    options. `OPM_config.cfg`: `tiger` gets `idle_poll_interval_s: 0.02` and
+    `settle_time_s: 0.0`.
+
 ### Pipetting robot
 
 #### Added
