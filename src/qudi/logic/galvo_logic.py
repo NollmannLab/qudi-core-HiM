@@ -77,9 +77,21 @@ class GalvoLogic(LogicBase):
         """Return the galvo rest voltage (V)."""
         return self.galvo().get_rest_voltage()
 
+    def get_optical_axis_voltage(self) -> float:
+        """Return the galvo optical axis voltage (V)."""
+        return self.galvo().get_optical_axis_voltage()
+
     def go_to_rest(self) -> bool:
         """Move the galvo to its rest voltage. Returns True on success, False otherwise."""
         ok = self.galvo().go_to_rest()
+        if ok:
+            self.sigVoltageChanged.emit(self.galvo().get_voltage())
+        return bool(ok)
+
+    def go_to_optical_axis(self) -> bool:
+        """Move the galvo to its central position (for the microscope optical axis). Returns True on success, False
+        otherwise."""
+        ok = self.galvo().go_to_optical_axis()
         if ok:
             self.sigVoltageChanged.emit(self.galvo().get_voltage())
         return bool(ok)

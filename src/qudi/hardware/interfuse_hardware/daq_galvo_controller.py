@@ -62,6 +62,7 @@ class DaqGalvoController(GalvoInterface):
     _min_voltage = ConfigOption('min_voltage', default=-5.0, converter=float)
     _max_voltage = ConfigOption('max_voltage', default=5.0, converter=float)
     _rest_voltage = ConfigOption('rest_voltage', default=0.0, converter=float)
+    _optical_axis_voltage = ConfigOption('optical_axis_voltage', default=0.0, converter=float)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -77,9 +78,9 @@ class DaqGalvoController(GalvoInterface):
         """
         self._daq = self.daq()
         self._check_configuration()
-        if not self.go_to_rest():
-            raise RuntimeError(f'Galvo "{self.module_name}": could not move to the rest voltage '
-                               f'({self._rest_voltage} V) at activation - see the error above.')
+        if not self.go_to_optical_axis():
+            raise RuntimeError(f'Galvo "{self.module_name}": could not move to the optical axis voltage '
+                               f'({self._optical_axis_voltage} V) at activation - see the error above.')
 
     def on_deactivate(self) -> None:
         """Move the galvo to rest (errors are logged, never raised), then release the DAQ."""
@@ -88,12 +89,15 @@ class DaqGalvoController(GalvoInterface):
 
     def _check_configuration(self) -> None:
         """Raise ValueError with a clear message if the configured voltages are inconsistent."""
-        vmin, vmax, vrest = self._min_voltage, self._max_voltage, self._rest_voltage
+        vmin, vmax, vrest, vcenter = self._min_voltage, self._max_voltage, self._rest_voltage, self._optical_axis_voltage
         if not vmin < vmax:
             raise ValueError(f'Galvo "{self.module_name}": min_voltage ({vmin} V) must be smaller '
                              f'than max_voltage ({vmax} V).')
         if not vmin <= vrest <= vmax:
             raise ValueError(f'Galvo "{self.module_name}": rest_voltage ({vrest} V) must be within '
+                             f'[min_voltage, max_voltage] = [{vmin}, {vmax}] V.')
+        if not vmin <= vcenter <= vmax:
+            raise ValueError(f'Galvo "{self.module_name}": optical axis_voltage ({vcenter} V) must be within '
                              f'[min_voltage, max_voltage] = [{vmin}, {vmax}] V.')
         try:
             task_range = self._daq.get_task_range(self._output_task)
@@ -148,6 +152,14 @@ class DaqGalvoController(GalvoInterface):
     def get_rest_voltage(self) -> float:
         """Return the rest voltage in V."""
         return self._rest_voltage
+
+    def get_optical_axis_voltage(self) -> float:
+        """Return the voltage in V corresponding to the central position of the galvo mirror."""
+        return self._optical_axis_voltage
+
+    def go_to_optical_axis(self) -> bool:
+        """Move the galvo to optical axis."""
+        return self.set_voltage(self._optical_axis_voltage)
 
     def go_to_rest(self) -> bool:
         """Move the galvo to the rest voltage. Returns True on success, False otherwise."""

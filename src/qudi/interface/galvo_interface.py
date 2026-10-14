@@ -59,6 +59,16 @@ class GalvoInterface(Base):
         pass
 
     @abstractmethod
+    def get_optical_axis_voltage(self) -> float:
+        """Return the central voltage for the optical axis, in V."""
+        pass
+
+    @abstractmethod
+    def go_to_optical_axis(self) -> bool:
+        """Move the galvo to its optical axis voltage. Returns True on success, False otherwise."""
+        pass
+
+    @abstractmethod
     def go_to_rest(self) -> bool:
         """Move the galvo to its rest voltage. Returns True on success, False otherwise."""
         pass
