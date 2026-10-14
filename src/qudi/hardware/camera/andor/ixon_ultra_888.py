@@ -42,7 +42,7 @@ from time import sleep
 from qudi.core.configoption import ConfigOption
 from qudi.interface.camera_interface import CameraInterface
 
-verbose = True
+verbose = False
 
 # ======================================================================================================================
 # Decorator (for debugging)

@@ -76,7 +76,7 @@ from qudi.helpers.validators import NameValidator
 from qudi.qtwidgets.scan_plotwidget import ScanPlotWidget
 from ruamel.yaml import YAML
 
-verbose = True
+verbose = False
 
 
 # ======================================================================================================================

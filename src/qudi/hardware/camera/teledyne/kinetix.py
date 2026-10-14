@@ -37,6 +37,7 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 import ctypes
+import functools
 import numpy as np
 from time import sleep
 from qudi.core.configoption import ConfigOption
@@ -44,13 +45,17 @@ from qudi.interface.camera_interface import CameraInterface
 from pyvcam import pvc, constants
 from pyvcam.camera import Camera
 
+verbose = False  # set True to print every decorated hardware call
+
 
 # ======================================================================================================================
 # Decorator (for debugging)
 # ======================================================================================================================
 def decorator_print_function(function):
+    @functools.wraps(function)
     def new_function(*args, **kwargs):
-        print(f'*** DEBUGGING *** Executing in hardware {function.__name__} from kinetix.py')
+        if verbose:
+            print(f'*** DEBUGGING *** Executing in hardware {function.__name__} from kinetix.py')
         return function(*args, **kwargs)
 
     return new_function

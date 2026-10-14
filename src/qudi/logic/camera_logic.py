@@ -54,7 +54,7 @@ from qudi.core.module import LogicBase
 from qudi.core.configoption import ConfigOption
 from qudi.core.connector import Connector
 
-verbose = True
+verbose = False
 
 
 # ======================================================================================================================

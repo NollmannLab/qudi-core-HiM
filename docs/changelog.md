@@ -90,6 +90,17 @@ Last updated: 2026-10-14
 
 #### Changed
 
+- Debug prints silenced (2026-10-14): the `*** DEBUGGING ***` prints are off
+  by default, each module keeps its own switch. `hardware/camera/teledyne/kinetix.py`:
+  new module flag `verbose = False` (set True to print every decorated
+  hardware call); `decorator_print_function` prints only when `verbose` is
+  True, and now uses `functools.wraps` so the decorated methods keep their
+  names and docstrings. `logic/camera_logic.py`,
+  `gui/basic_imaging/basic_imaging_gui.py` and
+  `hardware/camera/andor/ixon_ultra_888.py`: `verbose = True` -> `False`
+  (the `mouse_area_selected` print in basic_imaging_gui was already gated by
+  `if verbose:`). Decorators kept; nothing converted to logging.
+
 - `CameraInterface.get_gain_limits` is no longer abstract (default `(0, 0)`),
   so that cameras without gain control (Kinetix, ORCA) can be instantiated.
 - `CameraInterface.get_most_recent_image` now has the `copy` argument used by
