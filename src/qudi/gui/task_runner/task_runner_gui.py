@@ -95,16 +95,34 @@ class TaskRunnerGui(GuiBase):
         self._qudi_main.module_manager.deactivate_module(self._meta['name'])
 
     def on_deactivate(self):
-        """Hide window and stop ipython console.
+        """Disconnect all signals, save the window geometry and close the window.
+
+        Idempotent: closing the window emits sigClosed, which would deactivate this module again
+        (re-entrant call). sigClosed is therefore disconnected first, and a call with no window
+        returns immediately.
         """
-        self._save_window_geometry(self._mw)
-        self._mw.close()
-        self._mw.sigStartTask.disconnect()
-        self._mw.sigInterruptTask.disconnect()
-        self._mw.sigClosed.disconnect()
+        if self._mw is None:
+            return
+        mw = self._mw
+        self._safe_disconnect(mw.sigClosed)
+        self._safe_disconnect(mw.sigStartTask)
+        self._safe_disconnect(mw.sigInterruptTask)
         taskrunner = self._task_runner()
-        taskrunner.sigTaskStarted.disconnect(self._mw.task_started, QtCore.Qt.QueuedConnection)
-        taskrunner.sigTaskStateChanged.disconnect(self._mw.task_state_changed,
-                                               QtCore.Qt.QueuedConnection)
-        taskrunner.sigTaskFinished.disconnect(self._mw.task_finished, QtCore.Qt.QueuedConnection)
+        self._safe_disconnect(taskrunner.sigTaskStarted, mw.task_started)
+        self._safe_disconnect(taskrunner.sigTaskStateChanged, mw.task_state_changed)
+        self._safe_disconnect(taskrunner.sigTaskFinished, mw.task_finished)
+        self._save_window_geometry(mw)
+        mw.close()
         self._mw = None
+
+    @staticmethod
+    def _safe_disconnect(signal, slot=None) -> None:
+        """Disconnect signal (from slot if given); a connection that is already gone is ignored, so
+        that it cannot break deactivation."""
+        try:
+            if slot is None:
+                signal.disconnect()
+            else:
+                signal.disconnect(slot)
+        except (RuntimeError, TypeError):
+            pass

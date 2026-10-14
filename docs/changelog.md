@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-13
+Last updated: 2026-10-14
 
 ### Cameras
 
@@ -548,6 +548,22 @@ Last updated: 2026-10-13
   saved window geometry may restore the old, large window size the first time.
 
 #### Fixed
+
+- `gui/task_runner/task_runner_gui.py` (2026-10-14): **traceback at qudi
+  shutdown** (`AttributeError: 'NoneType' object has no attribute
+  'sigStartTask'`, preceded by a PySide "Failed to disconnect" warning).
+  `on_deactivate` closed the window before disconnecting `sigClosed`; the close
+  emitted `sigClosed` -> `_deactivate_self` -> a second, re-entrant
+  `on_deactivate` that set `self._mw = None`, and the outer call then carried
+  on with `None`. `on_deactivate` is now idempotent (returns at once without a
+  window), disconnects `sigClosed` first, then `sigStartTask` /
+  `sigInterruptTask`, then the task-runner signals with `disconnect(slot)`;
+  each disconnect goes through `_safe_disconnect`, which ignores
+  `RuntimeError` / `TypeError` from an already-gone connection. Then the
+  geometry is saved, the window closed and `self._mw` reset. `on_activate`
+  (and the direct connection of `sigInterruptTask`) unchanged. Checked
+  offscreen with the real task runner: shutdown, closing the window by
+  itself, reopening and shutting down again - no traceback, no warning.
 
 - `tasks/dummy_fluidics_task.py` (2026-09-24): removed a non-functional
   `interrupt_task(name)` method that had been added directly to the `TestTask`
