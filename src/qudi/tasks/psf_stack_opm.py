@@ -128,6 +128,7 @@ Modified with Claude code (Anthropic)
 import copy
 import csv
 import os
+from time import sleep
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -169,6 +170,8 @@ class PsfStackTask(ModuleTask):
 
     _UNSET = (None, '', 'TO FILL')
     _ROUND_DECIMALS = 4
+    scan_stage_velocity = {'x': 500.0, 'y': 500.0, 'z':500.0}  # µm/S
+    idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}
 
     # ------------------------------------------------------------------------------------------
     # ModuleTask
@@ -207,6 +210,7 @@ class PsfStackTask(ModuleTask):
         lines = self._checked_laser_lines(params['laser_lines'])
         self._validate_against_setup(voltages, lines)
         self._run_folder = self._make_run_folder()
+
         # provenance: the exact YAML that drove this run (bytes read at load time)
         with open(os.path.join(self._run_folder, 'experiment_config.yaml'), 'wb') as f:
             f.write(self._user_config_raw)
@@ -228,6 +232,7 @@ class PsfStackTask(ModuleTask):
         exposure = self._camera.get_exposure()
         x0, y0, z_focus = (float(v) for v in self._roi.stage_position)
         self._focus = (x0, y0, z_focus)
+        self._roi.set_stage_velocity(self.scan_stage_velocity)
         self._laser.set_laser_disabled()
         self._laser.reset_laser_intensities()
 
@@ -356,6 +361,7 @@ class PsfStackTask(ModuleTask):
             self._laser.set_laser_line_intensity(wavelength, intensity)
             previous = self._camera.get_last_image()
             self._laser.set_laser_enabled()
+
             try:
                 self._camera.start_single_acquisition()
                 frame = self._camera.get_last_image()

@@ -145,6 +145,7 @@ class RoiScanTask(ModuleTask):
                                f'config file')
         self._load_user_parameters()
 
+        # Use checkpoint in case the program crashes or if we want to start from a different ROI
         checkpoint = self._load_checkpoint() if resume_from_roi else None
         checkpoint_is_usable = (
             checkpoint is not None
@@ -165,23 +166,21 @@ class RoiScanTask(ModuleTask):
             self._imaged_rois = set()
             self.directory = None
 
+        # Disable GUI actions on the basic imaging and ROI GUIs
         self._check_interrupt()
-
-        # make sure the laser are disabled when starting
         self._laser_logic.set_laser_disabled()
-
-        # disable interfering GUI actions - mirrors legacy startTask()
         self._roi_logic.disable_tracking_mode()
         self._roi_logic.disable_roi_actions()
         self._roi_logic.set_stage_velocity(self.scan_stage_velocity)
 
+        # Specific checkup for the SD microscope - handshake with ZEN
         self._check_interrupt()
-
         self.log.info('Waiting for ZEN to signal it is ready (select the right experiment block '
                       'and click "Start Experiment" in ZEN)...')
         self._wait_for_ready()
         self.log.info('ZEN is ready - starting the ROI scan.')
 
+        # Set directory for saving the images
         if self.directory is None:
             self.directory = self._create_directory(self.save_path)
             self._save_metadata_file()
@@ -192,6 +191,7 @@ class RoiScanTask(ModuleTask):
         remaining = [name for name in self.roi_names if name not in self._imaged_rois]
         self.log.info(f'{len(remaining)} of {len(self.roi_names)} ROI(s) remaining.')
 
+        # launch the loop on the ROI and acquisitions
         for roi_name in remaining:
             self._check_interrupt()
             self._scan_one_roi(roi_name)
