@@ -18,31 +18,7 @@ See the GNU Lesser General Public License for more details.
 You should have received a copy of the GNU Lesser General Public License along with qudi.
 If not, see <https://www.gnu.org/licenses/>.
 
-Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): compact layout. Each task used
-  far more vertical space than its 0-1 parameters needed (run/stop button was a square of twice the
-  state-label width with its icon scaled to fill it, controls were stacked vertically, and the
-  parameter grid added row stretch / minimum row heights). The widget is now a single horizontal
-  row "[parameters] | [state label] [busy indicator] [run/stop button]": parameters are laid out
-  row-major, at most 3 label/editor pairs per line by default (wrapping onto extra lines), and the
-  controls stay on the first line, top-right. The run/stop button is a normal QToolButton of
-  standard line height with a 16-24 px icon, the busy indicator is the same size and still retains
-  its space when hidden, and the state label has a fixed minimum width for the longest state text
-  so the controls do not shift. The unused TestToolButton class (it rescaled its icon to the button
-  size) was removed. The meaning of "max_columns" / "max_rows" changed accordingly - see the
-  TaskWidget docstring. Signals, slots and the start/interrupt logic are unchanged.
-
-Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): optional start confirmation
-  and end reminder declared by the task. Some tasks need a manual hardware step before they start
-  and after they end (e.g. photobleaching.py: unplug, then re-plug, the Celesta shutter TTL
-  cable). A ModuleTask can now define the class attributes "start_warning" / "end_warning" (plain
-  strings). When Run is clicked, start_warning is shown in a modal dialog that must be confirmed
-  ("Done - start task"; Cancel/Esc/close aborts the start). When a task that this widget saw start
-  finishes (success, failure or interrupt), end_warning is shown in a non-modal reminder. The
-  initialising task_finished() call made by TaskRunnerGui.on_activate does not show it. Both
-  events are logged at info level. Dialogs are opened here, in the GUI thread - never from the
-  task, which runs in a worker thread. Tasks without these attributes behave exactly as before.
-  New optional constructor argument "task_name" (configured display name, used in dialog titles
-  and log messages; defaults to the task class name).
+Modified with Claude code (Anthropic)
 """
 
 __all__ = ['TaskWidget']

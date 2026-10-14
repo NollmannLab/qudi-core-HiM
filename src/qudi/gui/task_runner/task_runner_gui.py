@@ -18,16 +18,7 @@ See the GNU Lesser General Public License for more details.
 You should have received a copy of the GNU Lesser General Public License along with qudi.
 If not, see <https://www.gnu.org/licenses/>.
 
-Modified for qudi-core-HiM (2026-09-25, Modified with Claude code): the interrupt (abort) button in
-  the Task Runner GUI had no effect on real hardware - a click was only ever processed by
-  TaskRunnerLogic.interrupt_task once the running task had already finished on its own, regardless
-  of when the button was clicked (confirmed on the dummy fluidics task: the "Interrupt requested"
-  log line always carried the same, late timestamp no matter when the click happened). Changed the
-  sigInterruptTask connection from QueuedConnection to DirectConnection - see the comment at that
-  line for why this is safe (interrupt_task only touches already-locked state). taskrunner_logic.py
-  and tasks/dummy_fluidics_task.py were not the source of this particular issue (their cooperative
-  interrupt / _check_interrupt logic already matches qudi-core 1.7.0 exactly) but were fixed
-  separately in the previous round (removed a non-functional interrupt_task method, added logging).
+Modified with Claude code (Anthropic)
 """
 
 #from PySide6 import QtCore

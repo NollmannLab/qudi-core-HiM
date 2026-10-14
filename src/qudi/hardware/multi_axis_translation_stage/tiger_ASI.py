@@ -15,13 +15,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): fast idle detection.
-  A timing log of the OPM PSF task showed that wait_for_idle() took 513-528 ms for EVERY 0.2 µm
-  z step (79 % of the acquisition time): the status was queried once, the stage was still busy
-  right after the move command, and the loop then slept a fixed 0.5 s before the next query - so
-  every wait ended at ~0.5 s although the move itself is much shorter. wait_for_idle() now polls
-  every idle_poll_interval_s (config, default 0.02 s) and optionally waits settle_time_s (config,
-  default 0 s) once after the stage reports idle. Timeout logic and message unchanged.
+Modified with Claude code (Anthropic)
 """
 
 import numpy as np

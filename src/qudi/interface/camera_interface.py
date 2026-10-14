@@ -1,19 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Interface for generic camera hardware used by qudi-core-HiM.
-Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
-  2026-09-19/20 : common contract for all cameras documented in this docstring and in each method (True = success,
-                  image formats, get_size / get_image_size, get_most_recent_image returns (image | None, count));
-                  get_gain_limits made optional (default (0, 0)); optional abort_movie_acquisition; 'copy' argument of
-                  get_most_recent_image.
-  2026-09-21    : optional multi-camera methods get_available_cameras, get_active_camera, set_active_camera and
-                  get_camera_type (defaults for a camera that is alone on the microscope).
-  2026-09-22    : optional is_available (False if the camera could not be initialized).
-  2026-09-22    : optional get_cycle_time (default: get_exposure()), so that a camera whose acquisition cycle takes
-                  longer than the requested exposure (e.g. Andor's kinetic time) can report it generically, instead
-                  of camera_logic / basic_imaging_gui special-casing the Andor camera by name (see camera_logic and
-                  basic_imaging_gui for the corresponding changes). Spooling was intentionally NOT generalized here:
-                  it stays a hardware-specific, tif/fits-only mode of the Andor camera - see camera_logic.can_spool.
+Modified with Claude code (Anthropic)
 
 Contract shared by all the camera hardware modules (Kinetix, ORCA, dummy, ...). camera_logic relies only on what is
 described here, so that it does not need to know which camera is connected.

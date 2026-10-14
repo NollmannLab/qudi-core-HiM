@@ -20,17 +20,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 
-Modified for qudi-core-HiM (2026-09-26, Modified with Claude code): new file - DAQ-backed
-  implementation of TriggerSyncInterface, added to support a ZEN-synchronized stage-scan task on the
-  spinning-disk setup. Written directly for qudi-core-HiM; no legacy equivalent existed as a
-  standalone module (the legacy task talked to the DAQ hardware directly).
-
-Modified for qudi-core-HiM (2026-09-28, Modified with Claude code): made trigger_channel optional,
-  so one instance can be configured with only a done_channel and used purely to watch for a one-way
-  signal ZEN raises on its own - send_trigger() then raises a clear error if ever called. This
-  supports a second, distinct channel pair for the one-time "ZEN is ready" signal (matching the
-  legacy task's OUT7_ZEN, a channel qudi only ever polled and never triggered), separate from the
-  per-ROI start/done pair (matching OUT8_ZEN) - see tasks/roi_multicolour_scan_sd.py.
+Modified with Claude code (Anthropic)
 """
 
 from typing import Optional

@@ -21,15 +21,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): _move_stage made public as
-  move_stage (no behaviour change), so that tasks can move the stage to an absolute (x, y, z)
-  position - e.g. the OPM PSF task for z-only moves (current x, y and the new z). Its two internal
-  callers (go_to_roi, go_to_roi_xy) were updated.
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): move_stage skips the axes given
-  as None (z-only moves send only z: no serial time on x / y, no lateral correction or
-  anti-backlash motion). Nothing to send -> error logged, False returned (before: z silently
-  ignored on a 2-axis stage, True returned). sigStageMoved still carries a full (x, y, z): the
-  missing axes are read from stage_position. Full (x, y, z) positions behave as before.
+Modified with Claude code (Anthropic)
 """
 
 from qtpy import QtCore

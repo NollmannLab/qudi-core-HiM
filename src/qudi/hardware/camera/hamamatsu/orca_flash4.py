@@ -10,16 +10,7 @@ module (camera/teledyne/kinetix.py), so that camera_logic can drive both cameras
 An extension to Qudi.
 
 @author: F. Barho - adapted for qudi-core-HiM by JB Fiche
-Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
-  2026-09-19    : module completed on the DCAM-API v4 bindings (activation, single / live / movie acquisition, ring
-                  buffer (live_buffer_frames), ROI, trigger and output-trigger configuration, exposure, get_acquired_data).
-  2026-09-20    : common contract of camera_interface.py: set_image and start_movie_acquisition return True on success,
-                  get_most_recent_image returns (None, 0) when no frame is available.
-  2026-09-22    : an activation failure is only logged (no error raised): new is_available method, so that the camera
-                  can be left out of a camera interfuse.
-  2026-09-28    : get_name() now always returns the configured camera_name, instead of the DCAM model/serial string -
-                  the multi-camera selector (camera_interfuse.py) uses get_name() as the display name, and JB found the
-                  DCAM string too cryptic there. The model/serial is still logged, from on_activate, for provenance.
+Modified with Claude code (Anthropic)
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.

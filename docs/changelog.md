@@ -6,6 +6,27 @@ This file records the main changes made to the project.
 
 Last updated: 2026-10-14
 
+### Documentation
+
+#### Changed
+
+- Docstrings and comments in `src/` (2026-10-14): they describe the code (what,
+  why, constraints), never who asked for it or where it was discussed.
+  Attributions such as "per discussion with JB", "per JB (date)", "found by
+  JB" were removed and the technical reason kept
+  (`tasks/roi_multicolour_scan_sd.py`, `hardware/camera/teledyne/kinetix.py`,
+  `hardware/camera/hamamatsu/orca_flash4.py`). The dated "Modified with Claude
+  code ..." change histories in 24 module headers were replaced by the single
+  line "Modified with Claude code (Anthropic)"; the history lives in this
+  changelog. The constraints those histories mentioned were checked to be
+  documented next to the code concerned (e.g. kinetix `set_image` 1-based ->
+  0-based ROI conversion, `get_name` returning the configured camera name, the
+  task-runner "options:" rules, the photobleaching interrupt / TTL warnings).
+  Kept unchanged: Author lines, license headers, `TODO (JB, date)` notes,
+  config paths and user-facing strings. Comments / docstrings only: for every
+  modified file, `ast.dump` with docstrings removed is identical before and
+  after.
+
 ### Cameras
 
 #### Added

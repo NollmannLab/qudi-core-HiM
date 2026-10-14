@@ -9,12 +9,7 @@ can be found here: "C:\Program Files\andor SDK\Python\pyAndorSDK2\pyAndorSDK2\at
 
 @author: JB. Fiche (original code from F. Barho)
 Created on Wed Nov 27 2024
-Last modified 2026-09-22: adapt hardware to qudi-core - make sure the code follows the format defined
-  from the Interface and used for other cameras. In particular make sure that error handling
-  follows the same rule everywhere : return True when success (Modified with Claude code)
-  Also added get_cycle_time (delegates to get_kinetic_time), implementing the new optional
-  CameraInterface.get_cycle_time so that camera_logic / basic_imaging_gui can ask for "the real time between
-  frames" generically instead of special-casing this camera by name.
+Modified with Claude code (Anthropic)
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.

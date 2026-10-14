@@ -6,10 +6,10 @@ ZEN acquisition program over a DAQ trigger handshake.
 This is a qudi-core ModuleTask translation of the legacy qudi (InterruptableTask) task
 tasks/ROI_multicolour_imaging_SD.py. It is a NEW file - the legacy file is left untouched.
 
-Compared to the legacy task, the scope is deliberately much smaller, per discussion with JB
-(2026-09-26): on the spinning-disk setup, z-stack acquisition, autofocus, and image acquisition
-itself are all handled by ZEN; the Lumencor laser source is switched by a dedicated TTL box that ZEN
-also controls directly. None of that is qudi's job any more. This task's only two responsibilities
+Compared to the legacy task, the scope is deliberately much smaller: on the spinning-disk setup,
+z-stack acquisition, autofocus, and image acquisition itself are all handled by ZEN; the Lumencor
+laser source is switched by a dedicated TTL box that ZEN also controls directly. None of that is
+qudi's job any more. This task's only two responsibilities
 are: (1) move the stage to each ROI in turn, and (2) tell ZEN when to start imaging that ROI and wait
 for ZEN to confirm it is done - one start/done trigger handshake per ROI, via TriggerLogic, which
 forwards requests to separate TriggerOutputInterface and TriggerInputInterface hardware modules
@@ -34,7 +34,7 @@ already done on the taskrunner (see taskrunner_logic.py, tasks/dummy_fluidics_ta
    (stage already moved, trigger already sent, still waiting for ZEN), that ROI is simply redone in
    full on the next launch.
 
-One thing NOT simplified away, per JB (2026-09-28): the legacy task also waited, once, for a ZEN
+One thing NOT simplified away: the legacy task also waited, once, for a ZEN
 "ready" signal before starting the whole experiment (the user has to manually select the right ZEN
 experiment block and click "Start Experiment" first, which can take a while). This version keeps
 that as a genuinely separate, one-way handshake - a second connector/channel pair (``ready``,
@@ -49,15 +49,7 @@ qudi-core's own qudi.tasks.dummy_fluidics_task (Copyright (c) 2021, the qudi dev
 This file as a whole is qudi-core-HiM code and follows the same license terms as the rest of this
 repository.
 
-Modified for qudi-core-HiM (2026-09-26, Modified with Claude code): new file - qudi-core translation
-  of the legacy ROI_multicolour_imaging_SD.py task, scoped down to stage motion + a single ZEN
-  trigger handshake per ROI (see module docstring above), with checkpoint-based resume and
-  exception-based interruption.
-
-Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): user_config_path now comes from
-  the config ("options: user_config_path: ..." in the task's entry, applied by the task runner)
-  instead of being hard-coded; the class default is None and the task fails at run start, before
-  any hardware call, with a clear message if it is not set. The config path is logged at info level.
+Modified with Claude code (Anthropic)
 -----------------------------------------------------------------------------------
 """
 
@@ -328,9 +320,7 @@ class RoiScanTask(ModuleTask):
         """Stable path (independent of the per-run dated/incrementing output directory) so a
         resume=True launch can find it before any new directory is created.
 
-        Deliberately a regular, visible file (no leading dot) rather than a hidden dotfile - per
-        JB (2026-10-02), it's meant to be easy to find and inspect in self.save_path, not tucked
-        away like a cache file.
+        A regular, visible file (no leading dot) so it is easy to find and inspect in save_path.
         """
         return os.path.join(self.save_path, f'{self.sample_name}_roi_scan_checkpoint.yaml')
 

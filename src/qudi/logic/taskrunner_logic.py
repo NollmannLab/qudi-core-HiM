@@ -18,21 +18,7 @@ See the GNU Lesser General Public License for more details.
 You should have received a copy of the GNU Lesser General Public License along with qudi.
 If not, see <https://www.gnu.org/licenses/>.
 
-Modified for qudi-core-HiM (2026-09-24, Modified with Claude code): added logging to
-  interrupt_task() so that an abort request from the Task Runner GUI is visible in the log console
-  (it used to be silent) - no behavior change otherwise. This module's own abort mechanism was
-  already correctly implemented in qudi-core; see qudi.tasks.dummy_fluidics_task for what was
-  actually fixed there (a stray, non-functional interrupt_task() method that had been added directly
-  to a ModuleTask subclass, which is not how qudi-core tasks are interrupted).
-
-Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): task "options:" from the config.
-  qudi-core's task runner ignored a task's options block and created every task with no arguments,
-  so machine-specific values (e.g. the YAML path written by the experiment configurator) had to be
-  hard-coded in the task classes. Each task entry may now carry an "options:" mapping; it is
-  validated in on_activate (every key must be a public, non-callable, non-Connector, non-property
-  class attribute that the task already declares - otherwise activation fails with a clear error)
-  and applied with setattr() on each new task instance in __init_task, overriding the class
-  default for that instance only. Run / interrupt logic, signals and threading are unchanged.
+Modified with Claude code (Anthropic)
 """
 
 import inspect

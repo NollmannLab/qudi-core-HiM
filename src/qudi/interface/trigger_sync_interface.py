@@ -19,9 +19,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 
-Modified for qudi-core-HiM (2026-09-26, Modified with Claude code): new file - interface for the
-  DaqTriggerSync interfuse (see hardware/interfuse_hardware/daq_trigger_sync.py), added to support a
-  ZEN-synchronized stage-scan task on the spinning-disk setup.
+Modified with Claude code (Anthropic)
 """
 
 from abc import abstractmethod

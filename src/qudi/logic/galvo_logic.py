@@ -17,10 +17,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 
-Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): new file - GalvoLogic, which
-  delegates set/get voltage, limits and rest position to the galvo hardware, emits
-  sigVoltageChanged after each successful write, and moves the galvo to rest on deactivation.
-  Errors are logged by the hardware and reported with a False return value (not raised).
+Modified with Claude code (Anthropic)
 """
 
 from typing import Tuple

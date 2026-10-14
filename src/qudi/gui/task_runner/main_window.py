@@ -18,17 +18,7 @@ See the GNU Lesser General Public License for more details.
 You should have received a copy of the GNU Lesser General Public License along with qudi.
 If not, see <https://www.gnu.org/licenses/>.
 
-Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): compact layout. Task group
-  boxes used to expand to share all the spare window height (no stretch at the end of
-  tasks_layout) and used a bold title enlarged by 2 pt that was inherited by every label and editor
-  inside. A stretch now closes tasks_layout so the tasks pack at the top (the QScrollArea is kept
-  for setups with very many tasks), new group boxes are inserted before that stretch, the group box
-  title is bold at normal size while its contents keep the normal (non-bold) font, and contents
-  margins/spacing are tight. Signals, slots and _clear_task_widgets are unchanged.
-
-Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): each TaskWidget now also
-  receives the configured task name (task_name=...), used in the titles and log messages of the
-  optional start-confirmation / end-reminder dialogs a task can declare (see taskwidget.py).
+Modified with Claude code (Anthropic)
 """
 
 import os

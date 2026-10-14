@@ -64,10 +64,7 @@ combo box come from the ``experiment`` key inside those files.
 Author: F. Barho. Adapted to qudi-core by JB Fiche with chatGPT.
 Reformatted 2026-07-31.
 
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): ZEN section fixed after the ZEN
-  dock was removed from the .ui (header is now zen_settings_Label; the ZEN saving-folder widgets
-  belong to the "zen_security" section and are shown with it); new "galvo" section
-  (galvo_start / galvo_stop / galvo_step, in V) used by the OPM psf_stack experiment.
+Modified with Claude code (Anthropic)
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License

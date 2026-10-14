@@ -19,15 +19,7 @@ See the GNU Lesser General Public License for more details.
 You should have received a copy of the GNU Lesser General Public License along with qudi.
 If not, see <https://www.gnu.org/licenses/>.
 
-Modified for qudi-core-HiM (2026-09-24, Modified with Claude code): removed a non-functional
-  interrupt_task(name) method that had been added directly to TestTask - it referenced
-  self._running_tasks / self._thread_lock, which belong to TaskRunnerLogic, not to a ModuleTask, so
-  it would have raised AttributeError if it were ever called (it wasn't - nothing in the GUI or
-  taskrunner calls a task by that name). The actual, correct abort mechanism (self._check_interrupt()
-  / self._interruptible_sleep(), triggered by TaskRunnerLogic.interrupt_task -> self.interrupt()) was
-  already implemented correctly in _run() and is documented on the TestTask class docstring below.
-  Also added log messages so an abort is visible in the log console (interrupt flag detected,
-  cleanup running).
+Modified with Claude code (Anthropic)
 """
 
 from typing import Iterable, Sequence, Mapping, Union, Any, Optional, Tuple

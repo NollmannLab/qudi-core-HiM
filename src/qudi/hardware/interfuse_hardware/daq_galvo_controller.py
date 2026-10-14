@@ -19,13 +19,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 
-Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): new file - DaqGalvoController,
-  GalvoInterface over one DAQ analog-output task, modelled on daq_pump_controller.py. Checks the
-  configured limits / rest voltage (and that they fit in the DAQ task range) at activation (a
-  configuration error raises, so qudi logs it and leaves the module deactivated), moves the galvo
-  to rest on activation and deactivation, and is thread-safe. At run time errors are logged, not
-  raised: set_voltage / go_to_rest return True on success and False (error logged, nothing
-  written) for an out-of-range voltage or a failed DAQ write.
+Modified with Claude code (Anthropic)
 """
 
 from typing import Optional, Tuple

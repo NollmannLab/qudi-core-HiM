@@ -122,30 +122,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): new file - PsfStackTask, a
-  software-timed PSF z-stack acquisition on the OPM over galvo positions and laser lines, writing
-  one TIFF per galvo position and laser line, a metadata.txt per galvo position and a
-  galvo_positions.csv per run.
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): the same laser line may appear
-  several times in laser_lines (files, frames and messages keyed by the entry index, file names
-  {index:02d}_{wavelength}nm_{intensity:g}pct.tif); the GUI controls (laser, camera, filter,
-  ROI / stage, tracking) are locked during the run and unlocked by the cleanup.
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): timing instrumentation -
-  timing_log.csv (one row per timed step, saved while acquiring) and timing_summary.txt in the run
-  folder, a progress line per galvo position; class attribute timing_log_enabled (config option).
-  The acquisition itself is unchanged.
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): the experiment parameters
-  (galvo start / stop / step, number of z planes and z step, laser lines, exposure, save folder)
-  are no longer class attributes: they are read at run start from the experiment-configurator YAML
-  given by the new required option user_config_path (experiment 'psf_stack'), validated before any
-  hardware call, and the YAML is copied into the run folder as experiment_config.yaml. The z-stack
-  is N planes (odd) centred on the focus; save_path replaces the data_root option.
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): every stage move (run and
-  cleanup) is z-only - move_stage((None, None, z)) - so x and y are never commanded during the
-  task; x0 / y0 are still read once at start and logged.
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): timing instrumentation removed
-  (diagnosis done; the stage wait was fixed in the Tiger driver). One plain progress line per galvo
-  position; the acquisition itself is unchanged.
+Modified with Claude code (Anthropic)
 """
 
 import copy

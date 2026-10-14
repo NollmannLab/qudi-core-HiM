@@ -11,33 +11,7 @@ An extension to Qudi.
 
 Created on Thu Oct 29 2020
 
-Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
-  2026-09-21    : selection of the camera among several cameras (camera_comboBox): signal sigSwitchCamera, methods
-                  _init_camera_combobox, camera_selected, camera_changed, _refresh_camera_ui, _camera_switch_allowed
-                  (the camera can only be changed when it is idle and the lasers / brightfield are off) and
-                  _update_camera_combo_state (called by the camera toolbar, live, laser and brightfield callbacks);
-                  the camera-dependent part of the initialization was moved to _update_camera_status_widgets,
-                  _update_camera_setting_widgets and _update_camera_settings_dialog so that it can be repeated after a
-                  camera change; the duplicated call of init_save_settings_ui in on_activate was removed.
-  2026-09-22    : the display is fully reset at a camera change (image, rubberband, contrast controls, view fitted to the
-                  size of the first image of the new camera, see _autorange_next_image in update_data).
-  2026-09-22    : removed the remaining Andor-only special-casing by camera name ('iXon Ultra 897'/'iXon Ultra 888')
-                  from the GUI, following the camera_interface.py / camera_logic.py changes of the same day:
-                  - exposure/kinetic-time label: _update_camera_setting_widgets and update_exposure used to each
-                    carry their own copy of the name check; factored into one _update_exposure_display, driven by
-                    camera_logic.get_cycle_time() vs get_exposure() instead (labelled "Cycle time (s):" only when
-                    they actually differ).
-                  - spooling: save_video_accepted, save_video_clicked and video_quickstart_clicked now check
-                    camera_logic.can_spool instead of the camera name; while at it, every branch now explicitly sets
-                    both self._video and self._spooling (the previous code sometimes only set one of the two, which
-                    could leave a stale flag from a previous camera/dialog state after the camera-switch feature was
-                    added).
-                  - metadata: 'kinetic_time_(s)' (Andor-only) replaced by 'cycle_time_(s)' (always recorded, from
-                    camera_logic.get_cycle_time) in _create_metadata_dict; this also fixes a crash in
-                    camera_logic.save_to_ome_tif, which read this key back out and multiplied it (delta_t = kinetic *
-                    i) without checking it was present - always None, hence a TypeError, for every non-Andor camera.
-                  get_non_interfaced_parameters is intentionally NOT touched here and stays gated by the camera name:
-                  it is genuinely Andor-only (not part of camera_interface.py) and out of scope for this round.
+Modified with Claude code (Anthropic)
 -----------------------------------------------------------------------------------
 
 Qudi is free software: you can redistribute it and/or modify

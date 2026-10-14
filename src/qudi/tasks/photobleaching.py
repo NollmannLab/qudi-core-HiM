@@ -21,34 +21,7 @@ NOT in the code: each microscope's config file sets it in the task's entry, with
 "options: user_config_path: ..." (the task runner applies task options, see
 logic/taskrunner_logic.py). The dummy setup uses these same two classes with a dummy path.
 
-Modified for qudi-core-HiM (2026-10-08, Modified with Claude code): added the class attributes
-  start_warning / end_warning. The task only works if the TTL cable has been manually disconnected
-  from the Lumencor (Celesta) shutter input beforehand, and the cable must be reconnected afterwards.
-  The Task Runner GUI shows start_warning as a confirmation dialog when Run is clicked and
-  end_warning as a reminder when the task ends (dialogs are opened by the GUI, never by the task,
-  which runs in a worker thread). No other change to this task.
-
-Modified for qudi-core-HiM (2026-10-09, Modified with Claude code): unified photobleaching task.
-  Renamed from photobleaching_sd.py (git mv). The shared code moved to PhotoBleachingBase, with
-  PhotoBleachingSDTask (the former PhotoBleachingTask: same YAML path and warnings) and the new
-  PhotoBleachingRAMMTask (YAML path still 'TO FILL': the task refuses to run, before touching any
-  hardware, until it is filled in). Illumination time is now in SECONDS everywhere (the "* 60"
-  conversion is gone). The illumination wait checks for an interrupt at least every 0.1 s, so a
-  stop from the Task Runner takes effect during illumination too; _cleanup then switches the
-  lasers off. Removed the trigger_logic connector and the Celesta shutter trigger pulse (it was
-  only a test - on the SD the shutter TTL cable is disconnected by hand, see the warnings), the
-  unused ZEN handshake methods _wait_for_ready / _wait_for_done, the resume text and unused
-  imports. The config path is now logged at info level. Returns {'photobleached_rois': [...]}.
-
-Modified for qudi-core-HiM (2026-10-09, Modified with Claude code): dummy classes moved here from
-  photobleaching_dummy.py (one file for all setups).
-
-Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): the YAML path now comes from the
-  config (task "options: user_config_path: ...", applied by the task runner) instead of being
-  hard-coded per class. PhotoBleachingSDTask and PhotoBleachingRAMMTask inherit
-  user_config_path = None; the RAMM 'TO FILL' default and the two dummy classes are removed (the
-  dummy config uses the real classes with a dummy path). If the path is missing (or still
-  'TO FILL' in a config), the task fails at run start with a clear message, before any hardware call.
+Modified with Claude code (Anthropic)
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License

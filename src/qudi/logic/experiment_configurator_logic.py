@@ -83,8 +83,7 @@ update method, and support in ``update_entries``. A new imaging-sequence format 
 Author: F. Barho. Adapted to qudi-core by JB Fiche using chatGPT
 Created 2021-02-17; reformatted 2026-07-31.
 
-Modified for qudi-core-HiM (2026-10-13, Modified with Claude code): update_galvo_start /
-  update_galvo_stop / update_galvo_step for the new galvo fields (V) of the GUI.
+Modified with Claude code (Anthropic)
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License

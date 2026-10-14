@@ -2,28 +2,7 @@
 """
 Author: F. Barho & JB Fiche - adapted for qudi-core-HiM by JB Fiche
 Created: 2026-08-06
-Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
-  2026-09-19/20 : logic independent of the camera type (no more cam_type / POLLING_CAMERAS branching) following the
-                  common contract of camera_interface.py: get_max_size, set_sensor_region, reset_sensor_region,
-                  start_single_acquisition, start_loop, loop, stop_loop, start_save_video, save_video_loop,
-                  start_spooling, spooling_loop, start_acquisition (uses _n_frames_prepared, set in
-                  prepare_camera_for_multichannel_imaging), abort_acquisition; new _is_valid_image guard; fix of the
-                  undefined variable 'exc' in the live loop.
-  2026-09-21    : selection of the camera among several cameras: get_available_cameras, get_active_camera,
-                  select_camera, signal sigCameraChanged; on_activate split into on_activate and
-                  _init_from_hardware (re-read at each camera change); cam_type read with get_camera_type.
-  2026-09-22    : on_activate raises a clear error if the (single) camera is not available (is_available).
-  2026-09-22    : removed the Andor-only special-casing that was scattered through the GUI (get_name() ==
-                  'iXon Ultra 897'/'iXon Ultra 888') for two unrelated things:
-                  - kinetic time: get_kinetic_time (Andor-only) replaced by get_cycle_time, which now relies on the
-                    new optional CameraInterface.get_cycle_time (defaults to get_exposure() for every other camera) -
-                    refreshed in _init_from_hardware like get_exposure/get_gain/get_temperature, so it stays correct
-                    across a camera switch. _kinetic_time attribute renamed to _cycle_time accordingly.
-                  - spooling: new can_spool attribute (refreshed in _init_from_hardware, same pattern as has_gain /
-                    has_temp / has_shutter), True only if the active camera exposes set_spool - this stays a
-                    hardware-specific, tif/fits-only mode of the Andor camera, not a general CameraInterface method.
-                    start_spooling now checks can_spool itself and logs+returns instead of letting an unsupported
-                    camera raise AttributeError on set_spool.
+Modified with Claude code (Anthropic)
 
 This module contains the logic to control a microscope camera.
 

@@ -10,21 +10,7 @@ An extension to Qudi.
 
 @author: JB Fiche
 Created on Mon July 22, 2024 - Modified for qudi-core Mon Sept 14, 2026
-Modified with Claude code (Anthropic) - functionalities modified or added by Claude:
-  2026-09-20    : common contract of camera_interface.py: set_image and start_movie_acquisition return True on success,
-                  start_single_acquisition returns None on failure, get_most_recent_image returns (None, 0) when no frame
-                  is available; set_image clears the previous ROI (reset_rois) before setting the new one.
-  2026-09-22    : an activation failure is only logged (no error raised): new is_available method, so that the camera
-                  can be left out of a camera interfuse; on_deactivate also works if the camera was not initialized.
-  2026-09-28    : fixed two bugs found by JB on real hardware:
-                  - set_image() cropped every ROI (including "reset to full sensor") by 1 pixel in both directions
-                    (3199x3199 instead of 3200x3200 on the full sensor): it passed the 1-based hstart/vstart straight
-                    through to pyvcam's 0-based set_roi() (missing "- 1"), and sized the ROI as end - start (missing
-                    "+ 1"). It also assigned self._width/self._height from the wrong (swapped) axis; get_acquired_data's
-                    buffer shape was relying on that swap to end up correctly ordered, so it was updated to match.
-                  - get_name() now always returns the configured camera_name, instead of pyvcam's own cryptic hardware
-                    model string - the multi-camera selector (camera_interfuse.py) uses get_name() as the display name.
-                    The pyvcam model string is still logged, from on_activate, for provenance.
+Modified with Claude code (Anthropic)
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.

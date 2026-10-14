@@ -22,9 +22,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 -----------------------------------------------------------------------------------
 
-Modified for qudi-core-HiM (2026-10-12, Modified with Claude code): new file - GalvoInterface, the
-  hardware contract for a voltage-positioned galvo mirror (set/get voltage, limits, rest position).
-  set_voltage / go_to_rest return True/False (errors are logged, not raised).
+Modified with Claude code (Anthropic)
 """
 
 from abc import abstractmethod
