@@ -1074,12 +1074,27 @@ class RoiLogic(LogicBase):
             self.log.warning('The connected stage rejected the ROI movement command.')
         return moved
 
+    def get_stage_velocity(self, axes=None):
+        """ Return the current stage velocity of the given axes.
+
+        @param: list axes: axis labels to query; None for all the stage axes.
+        @return: dict: axis label -> velocity (stage velocity unit, µm/s for the ASI stages).
+        """
+        return self._stage.get_velocity(list(axes) if axes is not None else None)
+
     def set_stage_velocity(self, param_dict):
         """ Set the stage velocity. This method is needed for tasks to make the method in the hardware module
         accessible from logic layer.
+
+        The stage interface returns 0 when the command was accepted and -1 otherwise; this is converted to a bool.
         @param: dict param_dict: dictionary containing axes labels as keys and target velocity as values.
+        @return: bool: True if the stage accepted the new velocity, False otherwise (error logged).
         """
-        self._stage.set_velocity(param_dict)
+        result = self._stage.set_velocity(param_dict)
+        if result != 0:
+            self.log.error(f'The stage refused the velocity {param_dict}.')
+            return False
+        return True
 
     def stage_wait_for_idle(self):  # needed in tasks
         """ Wait until the stage status is idle. This method is needed for tasks to make the corresponding method

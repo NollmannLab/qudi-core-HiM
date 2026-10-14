@@ -80,8 +80,6 @@ class RoiScanTask(ModuleTask):
               user_config_path: '/path/to/qudi_task_config_files/roi_multicolor_scan_task_sd.yaml'
               acquisition_timeout_s: 120.0   # max time to wait for ZEN's "done" trigger on one ROI
               poll_interval_s: 0.1
-              scan_stage_velocity: {'x': 1, 'y': 1}
-              idle_stage_velocity: {'x': 6, 'y': 6}
 
     ``trigger_logic`` must be a TriggerLogic instance connected to the required trigger hardware.
     The task addresses its output and input modules by their configured Qudi module names:
@@ -111,8 +109,7 @@ class RoiScanTask(ModuleTask):
     user_config_path = None  # set by the config: options: user_config_path: ...
     acquisition_timeout_s = 120.0  # max time to wait for ZEN's "done" trigger on one ROI
     poll_interval_s = 0.1
-    scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/S
-    idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}
+    scan_stage_velocity = {'x': 1000.0, 'y': 1000.0}  # µm/s during the scan, restored afterwards
 
     def _setup(self) -> None:
         self._roi_logic = self.roi_logic()
@@ -129,6 +126,7 @@ class RoiScanTask(ModuleTask):
         self.directory = None
         self._imaged_rois = set()
         self.imaging_sequence = None
+        self._prev_stage_velocity = None  # stage velocity read before the scan, restored by _cleanup
 
     # ======================================================================================
     # Main entry point
@@ -171,7 +169,10 @@ class RoiScanTask(ModuleTask):
         self._laser_logic.set_laser_disabled()
         self._roi_logic.disable_tracking_mode()
         self._roi_logic.disable_roi_actions()
-        self._roi_logic.set_stage_velocity(self.scan_stage_velocity)
+        self._prev_stage_velocity = dict(self._roi_logic.get_stage_velocity(list(self.scan_stage_velocity)))
+        if not self._roi_logic.set_stage_velocity(self.scan_stage_velocity):
+            raise RuntimeError(f'Could not set the scan stage velocity {self.scan_stage_velocity} - '
+                               f'see the log.')
 
         # Specific checkup for the SD microscope - handshake with ZEN
         self._check_interrupt()
@@ -225,9 +226,12 @@ class RoiScanTask(ModuleTask):
                 self.log.warning(f'Could not disable lasers: {e}')
 
         try:
-            self._roi_logic.set_stage_velocity(self.idle_stage_velocity)
+            if self._prev_stage_velocity:
+                if not self._roi_logic.set_stage_velocity(self._prev_stage_velocity):
+                    self.log.error(f'Could not restore the stage velocity {self._prev_stage_velocity} '
+                                   f'during cleanup.')
         except Exception as e:
-            self.log.warning(f'Could not reset stage velocity during cleanup: {e}')
+            self.log.error(f'Could not restore the stage velocity during cleanup: {e}')
 
         try:
             self._roi_logic.enable_tracking_mode()

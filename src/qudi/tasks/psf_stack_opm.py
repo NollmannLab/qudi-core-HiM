@@ -20,9 +20,10 @@ Sequence
         into it (experiment_config.yaml)
     then:
         lasers off; lock the GUI controls (laser, camera, filter, ROI / stage, tracking)
-        select camera 'opm_camera_1', set the exposure
+        select the camera given in the YAML, set the exposure
         x0, y0, z_focus = roi_logic.stage_position  (read once - focus manually before starting;
                                                      x0 / y0 are only logged, never sent)
+        read the stage velocity of the axes in scan_stage_velocity, then set scan_stage_velocity
         lasers off, all intensities 0
     for i, V in enumerate(galvo voltages):            # galvo_start -> galvo_stop inclusive
         galvo_logic.set_voltage(V)                    # False -> stop the task (raise)
@@ -32,18 +33,21 @@ Sequence
             roi_logic.move_stage((None, None, z_focus + offset)) and stage_wait_for_idle()  # False -> raise
             _acquire_plane(offset): for each entry k = (wavelength, intensity) in laser_lines, in order:
                 check interrupt; reset intensities; set this line's intensity; lasers on;
-                snap one image; lasers off; invalid image -> raise
+                snap one image; lasers off; no image -> raise
             append each frame (uint16) to its entry's TIFF immediately (no stack kept in memory)
         close the TIFFs, write galvo_{i:03d}/metadata.txt, append a row to galvo_positions.csv;
         log "PSF stack: galvo position i/N (V volts) done"
     cleanup (always; each step protected on its own; never raises; nothing if no hardware touched):
-        lasers off + intensities reset; galvo to rest; stage back to z_focus (z only);
-        close any open TIFF (partial files are kept); restore the previous camera and its exposure;
+        lasers off + intensities reset; galvo to the optical axis; stage back to z_focus (z only);
+        restore the stage velocity read at start; close any open TIFF (partial files are kept);
+        restore the previous camera and its exposure;
         finally unlock the GUI controls (each unlock protected on its own, always attempted)
 
 Stage moves are z-only: move_stage((None, None, z)) sends only the z axis, so x and y are never
 commanded during the task (run and cleanup) - no serial time spent on them and no lateral
-correction or anti-backlash motion at each plane.
+correction or anti-backlash motion at each plane. During the run the z axis moves at
+scan_stage_velocity (slow z moves avoid stage ringing between planes); the velocity read at start
+is restored by the cleanup.
 
 The per-plane step is the single method _acquire_plane(z_offset) -> {entry index: frame}; a
 DAQ-triggered version can replace it later without touching the loops.
@@ -62,6 +66,7 @@ Experiment parameters (experiment configurator -> user_config_path)
                            string ('561'); repeated entries allowed; non-numeric sources
                            ('Brightfield') are refused
         exposure           s
+        camera             camera name, must be one of camera_logic.get_available_cameras()
         save_path          root data folder (must exist)
 
 Laser lines
@@ -100,7 +105,6 @@ Config example (logic: task_runner: options: module_tasks:)
       options:
         user_config_path: 'C:\\Users\\JB\\qudi_files\\qudi_task_config_files\\psf_stack_task_opm.yaml'
         metadata_template: 'C:\\path\\to\\custom_metadata_templates\\OPM_setup.cfg'
-        camera_name: 'opm_camera_1'   # optional, default 'opm_camera_1'
 
 The experiment parameters come from the experiment-configurator YAML (user_config_path, see
 above); the setup-specific settings come from the config options (qudi-core-HiM task runner).
@@ -109,7 +113,7 @@ Known limits of this first version
 ----------------------------------
     - software-timed: every move, laser switch and snap is a separate software call (slow);
     - the lasers stay on during the camera overhead of each snap, not only during the exposure;
-    - one camera only (opm_camera_1);
+    - one camera per run (chosen in the experiment configurator);
     - stage positions are used in the stage units returned by roi_logic (µm on the ASI Tiger).
 
 -----------------------------------------------------------------------------------
@@ -128,7 +132,6 @@ Modified with Claude code (Anthropic)
 import copy
 import csv
 import os
-from time import sleep
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -162,16 +165,13 @@ class PsfStackTask(ModuleTask):
     # ==========================================================================================
     user_config_path = None     # required: experiment-configurator YAML (experiment 'psf_stack')
     metadata_template = None    # required: OPM metadata template (YAML), e.g. .../OPM_setup.cfg
-    camera_name = 'opm_camera_1'  # camera used (selected at start, previous camera restored at the end)
+
+    scan_stage_velocity = {'z': 500.0}  # µm/s, slow z moves avoid stage ringing between planes
 
     _EXPERIMENT = 'psf_stack'
     _CONFIG_KEYS = ('galvo_start', 'galvo_stop', 'galvo_step', 'num_z_planes', 'z_step',
-                    'imaging_sequence', 'exposure', 'save_path')
-
-    _UNSET = (None, '', 'TO FILL')
+                    'imaging_sequence', 'exposure', 'camera', 'save_path')
     _ROUND_DECIMALS = 4
-    scan_stage_velocity = {'x': 500.0, 'y': 500.0, 'z':500.0}  # µm/S
-    idle_stage_velocity = {'x': 6000.0, 'y': 6000.0}
 
     # ------------------------------------------------------------------------------------------
     # ModuleTask
@@ -183,6 +183,7 @@ class PsfStackTask(ModuleTask):
         self._prev_camera: Optional[str] = None
         self._prev_exposure: Optional[float] = None
         self._focus: Optional[Tuple[float, float, float]] = None
+        self._prev_stage_velocity: Optional[Dict[str, float]] = None
         self._run_folder: Optional[str] = None
         self._completed = 0
         self._lines: List[Tuple[int, float]] = []
@@ -191,6 +192,7 @@ class PsfStackTask(ModuleTask):
         self._exposure_s: Optional[float] = None
         self._z_step_um: Optional[float] = None
         self._save_root: Optional[str] = None
+        self._camera_name: Optional[str] = None
         self._user_config_raw: Optional[bytes] = None
 
         self._camera = self.camera_logic()
@@ -210,7 +212,6 @@ class PsfStackTask(ModuleTask):
         lines = self._checked_laser_lines(params['laser_lines'])
         self._validate_against_setup(voltages, lines)
         self._run_folder = self._make_run_folder()
-
         # provenance: the exact YAML that drove this run (bytes read at load time)
         with open(os.path.join(self._run_folder, 'experiment_config.yaml'), 'wb') as f:
             f.write(self._user_config_raw)
@@ -226,13 +227,16 @@ class PsfStackTask(ModuleTask):
         self._lock_gui()
         self._prev_camera = self._camera.get_active_camera()
         self._prev_exposure = self._camera.get_exposure()
-        if not self._camera.select_camera(self.camera_name):
-            raise RuntimeError(f'Could not select camera "{self.camera_name}" - see the log.')
+        if not self._camera.select_camera(self._camera_name):
+            raise RuntimeError(f'Could not select camera "{self._camera_name}" - see the log.')
         self._camera.set_exposure(self._exposure_s)
         exposure = self._camera.get_exposure()
         x0, y0, z_focus = (float(v) for v in self._roi.stage_position)
         self._focus = (x0, y0, z_focus)
-        self._roi.set_stage_velocity(self.scan_stage_velocity)
+        self._prev_stage_velocity = dict(self._roi.get_stage_velocity(list(self.scan_stage_velocity)))
+        if not self._roi.set_stage_velocity(self.scan_stage_velocity):
+            raise RuntimeError(f'Could not set the scan stage velocity {self.scan_stage_velocity} - '
+                               f'see the log.')
         self._laser.set_laser_disabled()
         self._laser.reset_laser_intensities()
 
@@ -295,10 +299,10 @@ class PsfStackTask(ModuleTask):
         except Exception as err:
             self.log.error(f'Cleanup: could not switch the lasers off: {err}')
         try:
-            if not self._galvo.go_to_rest():
-                self.log.error('Cleanup: the galvo did not go to rest - see the log.')
+            if not self._galvo.go_to_optical_axis():
+                self.log.error('Cleanup: the galvo did not go to the optical axis - see the log.')
         except Exception as err:
-            self.log.error(f'Cleanup: could not move the galvo to rest: {err}')
+            self.log.error(f'Cleanup: could not move the galvo to the optical axis: {err}')
         try:
             if self._focus is not None:
                 if not (self._roi.move_stage((None, None, self._focus[2]))  # z only
@@ -306,6 +310,13 @@ class PsfStackTask(ModuleTask):
                     self.log.error(f'Cleanup: the stage did not return to the focus {self._focus}.')
         except Exception as err:
             self.log.error(f'Cleanup: could not move the stage back to the focus: {err}')
+        try:
+            if self._prev_stage_velocity:
+                if not self._roi.set_stage_velocity(self._prev_stage_velocity):
+                    self.log.error(f'Cleanup: could not restore the stage velocity '
+                                   f'{self._prev_stage_velocity}.')
+        except Exception as err:
+            self.log.error(f'Cleanup: could not restore the stage velocity: {err}')
         self._close_writers()
         try:
             if self._prev_camera is not None:
@@ -351,25 +362,21 @@ class PsfStackTask(ModuleTask):
     def _acquire_plane(self, z_offset: float) -> Dict[int, np.ndarray]:
         """Acquire one image per laser line at the current z plane, in the laser_lines order.
 
-        Returns {entry index in laser_lines: uint16 frame}. Checks for an interrupt before every
-        image; the lasers are switched off after each image, also if the snap fails.
+        Returns {entry index in laser_lines: uint16 frame}. One new frame per line is required: a
+        missing frame stops the task. Checks for an interrupt before every image; the lasers are
+        switched off after each image, also if the snap fails.
         """
         frames = {}
         for k, (wavelength, intensity) in enumerate(self._lines):
             self._check_interrupt()
             self._laser.reset_laser_intensities()
             self._laser.set_laser_line_intensity(wavelength, intensity)
-            previous = self._camera.get_last_image()
             self._laser.set_laser_enabled()
-
             try:
-                self._camera.start_single_acquisition()
-                frame = self._camera.get_last_image()
+                frame = self._camera.start_single_acquisition()
             finally:
                 self._laser.set_laser_disabled()
-            # camera_logic keeps the previous image when a snap fails: a missing OR unchanged
-            # image is an acquisition failure.
-            if frame is None or np.size(frame) == 0 or frame is previous:
+            if frame is None or np.size(frame) == 0:
                 raise RuntimeError(f'No new image from the camera at z offset {z_offset} µm, '
                                    f'{self._line_names[k]} - task stopped.')
             frames[k] = np.asarray(frame).astype(np.uint16, copy=False)
@@ -379,10 +386,13 @@ class PsfStackTask(ModuleTask):
     # Checks (no hardware call)
     # ------------------------------------------------------------------------------------------
     def _check_setup_options(self) -> None:
+        """user_config_path and metadata_template are task options of the qudi config: each must be
+        set and point to an existing file."""
         name = type(self).__name__
         for option in ('user_config_path', 'metadata_template'):
-            if getattr(self, option) in self._UNSET:
-                raise RuntimeError(f'{option} not set for task {name} — add `options: {option}: ...` '
+            value = getattr(self, option)
+            if value is None or not str(value).strip():
+                raise RuntimeError(f'{option} not set for task {name} - add `options: {option}: ...` '
                                    f'to this task\'s entry in the config file')
         if not os.path.isfile(self.user_config_path):
             raise RuntimeError(f'user_config_path "{self.user_config_path}" is not an existing file - '
@@ -404,7 +414,7 @@ class PsfStackTask(ModuleTask):
         """Read and check the experiment-configurator YAML (user_config_path) - no hardware call.
 
         Returns {'galvo_start', 'galvo_stop', 'galvo_step', 'num_z_planes', 'z_step',
-        'laser_lines', 'exposure', 'save_path'} and sets the attributes used by the run. Any
+        'laser_lines', 'exposure', 'camera', 'save_path'} and sets the attributes used by the run. Any
         problem raises a ValueError naming the file and the key.
         """
         path = self.user_config_path
@@ -462,6 +472,11 @@ class PsfStackTask(ModuleTask):
             lines.append((wavelength, float(intensity)))
         params['laser_lines'] = lines
 
+        camera = config['camera']
+        if not isinstance(camera, str) or not camera.strip():
+            fail('camera', f'expected a camera name, got {camera!r}.')
+        params['camera'] = camera
+
         save_path = config['save_path']
         if not isinstance(save_path, str) or not save_path.strip():
             fail('save_path', f'expected a folder path, got {save_path!r}.')
@@ -472,6 +487,7 @@ class PsfStackTask(ModuleTask):
         self._exposure_s = params['exposure']
         self._z_step_um = params['z_step']
         self._save_root = save_path
+        self._camera_name = camera
         self._user_config_raw = raw
         return params
 
@@ -539,8 +555,9 @@ class PsfStackTask(ModuleTask):
                                  f'dichroic / filter.')
 
         cameras = list(self._camera.get_available_cameras())
-        if self.camera_name not in cameras:
-            raise ValueError(f'Camera "{self.camera_name}" not available (available: {cameras}).')
+        if self._camera_name not in cameras:
+            raise ValueError(f'Camera "{self._camera_name}" (key "camera" of the experiment config) '
+                             f'not available (available: {cameras}).')
         if getattr(self._camera, 'live_enabled', False):
             raise RuntimeError('Camera live mode is running - stop it before starting the task.')
 
@@ -606,6 +623,7 @@ class PsfStackTask(ModuleTask):
         metadata = copy.deepcopy(template)
         metadata['Time'] = datetime.now().strftime('%m-%d-%Y, %H:%M:%S')
         acquisition = {
+            'selected_camera': self._camera_name,
             'number_frames': len(z_offsets),
             'exposure_time_(s)': exposure,
             'laser_lines': [wl for wl, _ in lines],
@@ -620,6 +638,7 @@ class PsfStackTask(ModuleTask):
             {'galvo_index': index},
             {'z_focus_(µm)': z_focus},
             {'z_offsets_(µm)': list(z_offsets)},
+            {'z_scan_velocity_(µm/s)': float(self.scan_stage_velocity['z'])},
             {'laser_order': [f'{name}.tif' for name in self._line_names]},
             {'experiment_config': str(self.user_config_path)},
         ]
