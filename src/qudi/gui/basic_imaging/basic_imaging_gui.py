@@ -269,7 +269,7 @@ class BasicImagingGUI(GuiBase):
     sigLaserOff = QtCore.Signal()
 
     # signals to brightfield control logic
-    sigBFOn = QtCore.Signal(int)
+    sigBFOn = QtCore.Signal(float)  # LED intensity in percent
     sigBFOff = QtCore.Signal()
     
     # signals to filterwheel logic
@@ -691,6 +691,7 @@ class BasicImagingGUI(GuiBase):
 
         self.bf_Label = QtWidgets.QLabel('BF')
         self.bf_control_DSpinBox = QtWidgets.QDoubleSpinBox()
+        self.bf_control_DSpinBox.setRange(0, 99)  # LED intensity in percent, hardware range
         self._mw.formLayout_3.addRow(self.bf_Label, self.bf_control_DSpinBox)
 
         self.brightfield_on_Action = self._mw.toolBar_2.addAction('Brightfield on')
@@ -1788,8 +1789,8 @@ class BasicImagingGUI(GuiBase):
                 self.start_video_clicked()
                 self.reset_start_video_button()
         # switch laser off when window is closed
-        if self._laser_logic.enabled:
-            self._laser_logic.voltage_off()
+        if self._laser_logic.laser_enabled or self._mw.laser_on_Action.isChecked():
+            self._laser_logic.set_laser_disabled()
             self.reset_laser_toolbutton()
         # switch brightfield off when window is closed
         if self._brightfield_logic:

@@ -444,6 +444,56 @@ Last updated: 2026-10-14
     versions, and the dummy-config entries run end to end. Still to be
     checked by JB on the OPM.
 
+### Bright-field
+
+#### Added
+
+- `interface/brightfield_interface.py`, `logic/brightfield_logic.py`
+  (2026-10-15): bright-field LED control, so that the BF controls of the
+  basic imaging GUI (optional `brightfield` connector) appear when the logic
+  is connected.
+  - `BrightfieldInterface`: one abstract method `led_control(intensity)`
+    returning `True`/`False` (intensity in percent, clamped by the hardware).
+  - `Tiger` (`tiger_ASI.py`) and `MS2000` (`MS2000_ASI.py`) now also derive
+    from `BrightfieldInterface` (second base, after
+    `MultiAxisStageInterface`). No other driver change: the LED command,
+    the 0-99 % clamp and the `LED connected` gate are unchanged.
+  - `BrightfieldLogic` (API used by the GUI and the RAMM tasks): `enabled` (read-only)
+    and the stored `intensity`; `led_control(intensity)` stores the value,
+    sends it and sets `enabled`; `led_off()` sends 0, clears `enabled` and
+    emits `sigBrightfieldStopped`; `update_intensity(value)` stores the value
+    and sends it only while the LED is on; `stop_brightfield_output()`
+    switches the LED off if it is on (task preparation); the LED is
+    switched off on deactivation. A command refused by the hardware logs an
+    error and returns `False` (a refused switch-on emits
+    `sigBrightfieldStopped` so the GUI button is reset). GUI buttons are
+    disabled during tasks by `disable_laser_actions()`, as before.
+  - `OPM_config.cfg`: logic `brightfield_logic` connected to `tiger`;
+    `basic_imaging` connects `brightfield: 'brightfield_logic'`. RAMM and
+    spinning-disk configs unchanged.
+
+#### Fixed
+
+- Basic imaging GUI:
+  - `sigBFOn` is `Signal(float)`: the BF spinbox value was truncated to an
+    int (37.5 -> 37). The BF spinbox range is now 0-99 (hardware range).
+  - Closing the window really switches the lasers off: the close handler
+    called `laser_logic.voltage_off()` (does not exist) behind a test of
+    `laser_logic.enabled` (never updated, so always `False`). It now calls
+    `set_laser_disabled()` when `laser_enabled` is `True` or the laser
+    button is checked, then resets the button.
+- Verified offscreen with `qudi-core==1.7.0` and 1.8.0 (43/43 checks): real
+  `BasicImagingGUI`, `LaserControlLogic` and `BrightfieldLogic` with fake
+  hardware, plus the real `Tiger` / `MS2000` drivers on a fake serial port.
+  BF button and spinbox shown; on / intensity change / off reach
+  `led_control` with 37.5, 50, 99 and 0; a change while off is stored, not
+  sent; closing the window switches LED and lasers off (also lasers enabled
+  from the logic only); without the brightfield connection the BF controls
+  are absent and the GUI works; Tiger / MS2000 still send
+  `<card>LED X=<0-99>? `; `OPM_config.cfg` passes the qudi-core config
+  validator. The same test on the previous GUI fails 9 checks (lasers left
+  on at close, intensity truncated).
+
 ### Fluidics
 
 #### Added
