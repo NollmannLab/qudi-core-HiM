@@ -264,6 +264,8 @@ class FluidicsGUI(GuiBase):
 
         # signals from logic
         self._valve_logic.sigValvePositionChanged.connect(self.update_combobox_index)
+        self._valve_logic.sigDisableValveActions.connect(self.disable_valve_positioning)
+        self._valve_logic.sigEnableValveActions.connect(self.enable_valve_positioning)
 
     def init_flowcontrol(self):
         """ This method initializes the flowcontrol dockwidget.

@@ -576,6 +576,76 @@ Last updated: 2026-10-14
     logs one error and falls back to `'next'`, an incomplete file leaves the
     mode unchanged.
 
+### Fluidics task
+
+#### Added
+
+- `tasks/fluidics.py` (2026-10-15): runs the hybridization list of an
+  injections file with the valves, the flow control and the pipetting robot.
+  - `FluidicsTaskBase(ModuleTask)`, connectors `valve_logic`, `flow_logic`,
+    `robot_logic`; options `user_config_path` (experiment YAML, key
+    `injections_path`) and `probe_valve_number` (both required). Setup values
+    are class attributes set by the subclasses: `start_`, `needle_move_`,
+    `needle_moved_`, `incubation_`, `incubation_end_` and
+    `cleanup_valve_positions` (applied in the given order); shared
+    `volume_poll_interval_s` 1 s, `robot_timeout_s` 120 s,
+    `injection_timeout_factor` 3, `injection_timeout_margin_s` 60 s,
+    `incubation_log_interval_s` 30 s.
+  - Sequence: read the experiment YAML and the injections file (buffer,
+    probes, hybridization list, `probe_needle_mode`, missing -> `'next'`);
+    validate without any hardware call and report every problem in one error
+    (unknown product, volume / flowrate <= 0, negative incubation time, probe
+    valve used without probes or without robot origin, invalid needle mode,
+    too many tubes for the robot, valve addresses / positions not on the
+    valves); plan the needle tube of each probe injection (lowest probe tube,
+    then +1 per injection in `'next'`, always the first tube in `'same'`);
+    log the plan; lock the valve, flow-control and robot GUIs; needle to the
+    first tube; start positions; then each step: injection (valve `a` to the
+    product, needle move if needed, pressure 0, PID regulation, volume count,
+    poll until reached with an interrupt check every 0.1 s and a timeout of
+    factor * volume / flowrate (min -> s) + margin raising "volume not reached
+    - check the line", stop regulation, 1 s, pressure 0, injected volume
+    logged) or incubation (incubation positions, interruptible wait with
+    progress logged, end positions). Returns
+    `{steps_done, steps_total, probe_needle_mode, tubes_used}`.
+  - Needle move: needle-move positions, `start_move_to_target`, wait while
+    `moving` (interruptible, `robot_timeout_s`), check the arrival at the
+    tube (`sigStageMovedToTarget`), robot GUI locked again (the fluidics GUI
+    re-enables its robot buttons on arrival; the lock is sent from the arrival
+    signal itself, so the buttons never show as enabled), needle-moved
+    positions.
+  - Every valve move is checked: a position not reached (or an exception)
+    raises naming the valve and the position.
+  - `_cleanup`: stop the regulation and the volume count, pressure 0,
+    `cleanup_valve_positions` one by one, unlock the three GUIs; each step in
+    its own try/except (`log.error`, never raises). A needle move in progress
+    is left to finish.
+  - Subclasses: `FluidicsRAMMTask` (start b=2 c=2, syringe valve c closed
+    around needle moves and incubations, cleanup c=1 b=1 a=1),
+    `FluidicsSDTask` (start b=1, cleanup b=1 a=1), `FluidicsDummyTask`
+    (RAMM layout, for `dummy_config.cfg`).
+- `FluidicsValveLogic`: `sigDisableValveActions` / `sigEnableValveActions`,
+  `disable_valve_positioning()` / `enable_valve_positioning()`, connected in
+  `fluidics_gui.py` to the existing GUI slots (same pattern as the flow logic).
+- Configs: `fluidics_dummy` task in `dummy_config.cfg`
+  (`probe_valve_number: 7`); commented `fluidics` entries (path TO FILL) in
+  `RAMM_config.cfg` (7) and `Spinning_disk_config.cfg` (3). Example
+  injections file
+  `custom_config/custom_experiments_config/dummy/fluidics_test_injections.yml`.
+- Verified with `qudi-core==1.7.0` and 1.8.0 (60/60 checks), offscreen, the
+  task in its own thread and the logic in the main event loop: real
+  `DummyValve`, `DummyMultiAxisStage` + `PipettingRobot`, valve / flow /
+  robot logic and `FluidicsGUI`; pump and flow sensor from test modules with
+  the dummy flowboard behaviour (~200 µl/min). Full run (~75 s): mode
+  `'next'` uses tubes 1 then 2, `'same'` tube 1 only; exact valve sequence;
+  4 injections of >= 20 µl; pressure 0, valves c=1 b=1 a=1 and GUIs unlocked
+  at the end; robot buttons never seen enabled during the run (sampled
+  every 20 ms). Interrupt during an injection and during an incubation:
+  cleanup starts ~0.1 s later. Unknown product + missing origin (+ bad
+  volume and time): one error listing the 4 problems, no hardware call.
+  Missing options, experiment file or injections file, refused valve
+  position and injection timeout each stop the task with a clear message.
+
 ### Task runner
 
 #### Added

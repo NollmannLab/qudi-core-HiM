@@ -1,0 +1,44 @@
+# Example injections file for the fluidics task on the dummy setup (FluidicsDummyTask).
+# Same format as the files written by the injections configurator. The dummy flow sensor gives
+# ~200 µl/min, so each 20 µl injection takes ~6 s.
+buffer:
+  1: SSC
+  2: Wash buffer
+  3: Imaging buffer
+  7: Probe
+probes:
+  1: probe_A
+  2: DAPI
+hybridization list:
+- step_number: 1
+  procedure: Hybridization
+  product: SSC
+  volume: 20
+  flowrate: 200
+  time: null
+- step_number: 2
+  procedure: Hybridization
+  product: Probe
+  volume: 20
+  flowrate: 200
+  time: null
+- step_number: 3
+  procedure: Hybridization
+  product: null
+  volume: null
+  flowrate: null
+  time: 10
+- step_number: 4
+  procedure: Hybridization
+  product: Probe
+  volume: 20
+  flowrate: 200
+  time: null
+- step_number: 5
+  procedure: Hybridization
+  product: Wash buffer
+  volume: 20
+  flowrate: 200
+  time: null
+photobleaching list: []
+probe_needle_mode: next
