@@ -46,6 +46,8 @@ class FluidicsValveLogic(LogicBase):
     sigValvePositionsUpdated = QtCore.Signal(dict)
     sigValveStatusUpdated = QtCore.Signal(dict)
     sigValvePositionChanged = QtCore.Signal(str, int)
+    sigDisableValveActions = QtCore.Signal()
+    sigEnableValveActions = QtCore.Signal()
 
     # attributes
     _valve = None
@@ -210,6 +212,18 @@ class FluidicsValveLogic(LogicBase):
                     valve_address, self._valve_positions[valve_address]
                 )
         return self.valve_positions
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # Methods to handle the user interface state
+    # ------------------------------------------------------------------------------------------------------------------
+
+    def disable_valve_positioning(self):
+        """Disable the GUI valve controls, for example while a task is running."""
+        self.sigDisableValveActions.emit()
+
+    def enable_valve_positioning(self):
+        """Re-enable the GUI valve controls, for example after a task finishes."""
+        self.sigEnableValveActions.emit()
 
     def _validate_hardware(self):
         """Check whether the connected hardware implements the expected API.
