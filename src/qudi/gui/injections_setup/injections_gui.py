@@ -68,6 +68,13 @@ class InjectionsGUI(GuiBase):
 
     sigLoadInjections = QtCore.Signal(str)
     sigSaveInjections = QtCore.Signal(str)
+    sigProbeNeedleModeChanged = QtCore.Signal(str)
+
+    # probe needle mode entries (displayed text, code sent to the logic), in display order
+    PROBE_NEEDLE_MODE_ITEMS = (('Move to the next tube', 'next'),
+                               ('Stay in the same tube', 'same'))
+    PROBE_NEEDLE_MODE_TOOLTIP = ('When the probe valve is used several times in the sequence: move the needle to the '
+                                 'next tube (tube + 1) for each new probe injection, or keep it in the same tube.')
 
     def __init__(self, config, **kwargs):
         super().__init__(config=config, **kwargs)
@@ -93,6 +100,10 @@ class InjectionsGUI(GuiBase):
         self._mw.valve_position_ComboBox.addItems([str(i) for i in range(1, self._injections_logic.num_valve_positions + 1)])
         self._mw.probe_position_ComboBox.addItems([str(i) for i in range(1, self._injections_logic.num_probes + 1)])
         self._mw.procedure_ComboBox.addItems(self._injections_logic.procedures)
+        for text, code in self.PROBE_NEEDLE_MODE_ITEMS:
+            self._mw.probe_handling_comboBox.addItem(text, code)
+        self._mw.probe_handling_comboBox.setToolTip(self.PROBE_NEEDLE_MODE_TOOLTIP)
+        self.update_probe_handling_combobox(self._injections_logic.probe_needle_mode)
 
         # signals
         # internal signals
@@ -116,6 +127,9 @@ class InjectionsGUI(GuiBase):
         self._mw.delete_hybridization_PushButton.clicked.connect(self.delete_hybr_step_clicked)
         self._mw.delete_photobleaching_PushButton.clicked.connect(self.delete_photobl_step_clicked)
 
+        # comboboxes
+        self._mw.probe_handling_comboBox.currentIndexChanged.connect(self.probe_handling_changed)
+
         # signals to logic
         self.sigAddBuffer.connect(self._injections_logic.add_buffer)
         self.sigDeleteBuffer.connect(self._injections_logic.delete_buffer)
@@ -131,6 +145,7 @@ class InjectionsGUI(GuiBase):
         self._mw.delete_all_photobl_PushButton.clicked.connect(self._injections_logic.delete_photobl_all)
         self.sigSaveInjections.connect(self._injections_logic.save_injections)
         self.sigLoadInjections.connect(self._injections_logic.load_injections)
+        self.sigProbeNeedleModeChanged.connect(self._injections_logic.set_probe_needle_mode)
 
         # signals from logic
         self._injections_logic.sigBufferListChanged.connect(self.update_buffer_listview)
@@ -138,6 +153,7 @@ class InjectionsGUI(GuiBase):
         self._injections_logic.sigHybridizationListChanged.connect(self.update_hybridization_listview)
         self._injections_logic.sigPhotobleachingListChanged.connect(self.update_photobleaching_listview)
         self._injections_logic.sigIncompleteLoad.connect(self.show_incomplete_load_warning)
+        self._injections_logic.sigProbeNeedleModeChanged.connect(self.update_probe_handling_combobox)
 
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
@@ -229,9 +245,26 @@ class InjectionsGUI(GuiBase):
             index = indexes[0]  # single select mode
             self.sigDeletePhotoblStep.emit(index)
 
+    def probe_handling_changed(self, index):
+        """ Callback of the probe needle mode combobox: sends the code ('next' / 'same') of the selected entry to
+        the logic. """
+        code = self._mw.probe_handling_comboBox.itemData(index)
+        if code is not None:
+            self.sigProbeNeedleModeChanged.emit(code)
+
 # ======================================================================================================================
 # Callbacks of signals sent from logic to update the listview contents
 # ======================================================================================================================
+
+    def update_probe_handling_combobox(self, mode):
+        """ Callback of sigProbeNeedleModeChanged (and used at activation): selects the combobox entry whose code
+        is mode, without sending it back to the logic. """
+        index = self._mw.probe_handling_comboBox.findData(mode)
+        if index < 0:
+            self.log.warning(f'Unknown probe needle mode {mode!r} - combobox not updated.')
+            return
+        with QtCore.QSignalBlocker(self._mw.probe_handling_comboBox):
+            self._mw.probe_handling_comboBox.setCurrentIndex(index)
 
     def update_buffer_listview(self):
         """ Callback of a signal sent from logic (sigBufferListChanged) notifying that the listview model has

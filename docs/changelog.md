@@ -541,6 +541,41 @@ Last updated: 2026-10-14
 - Fixed the valve-combobox callback so that both the valve number and selected
   position are passed correctly.
 
+### Injections configurator
+
+#### Added
+
+- Probe needle mode (2026-10-15): records how the needle behaves when the
+  probe valve is used several times in one sequence.
+  - `injections_gui.py`: `probe_handling_comboBox` (with
+    `needle_handling_Label`, both in `ui_injection_setup.ui`) lists
+    "Move to the next tube" (`'next'`, default) and "Stay in the same tube"
+    (`'same'`); the code is stored as item data and sent to the logic on
+    every selection change (`sigProbeNeedleModeChanged` ->
+    `set_probe_needle_mode`). Tooltip: "When the probe valve is used several
+    times in the sequence: move the needle to the next tube (tube + 1) for
+    each new probe injection, or keep it in the same tube."
+  - `injections_configurator_logic.py`: `probe_needle_mode` (default
+    `'next'`, valid values `'next'` / `'same'`); the setter and
+    `set_probe_needle_mode()` reject any other value with `log.error` and
+    return `False`. `save_injections()` writes the top-level key
+    `probe_needle_mode` next to `buffer`, `probes`, `hybridization list` and
+    `photobleaching list`. `load_injections()` reads it: a missing key gives
+    `'next'` (files written before the key existed), an invalid value logs an
+    error and falls back to `'next'`; `sigProbeNeedleModeChanged` updates the
+    combobox (signals blocked, so the value is not sent back).
+    `check_injection_sequence_consistency()` unchanged. The Hi-M tasks read
+    the injection file key by key, so the new key does not affect them; they
+    do not use the mode yet.
+  - Verified offscreen with `qudi-core==1.7.0` and 1.8.0 (21/21 checks): real
+    `InjectionsLogic` + `InjectionsGUI` with fake valve / robot logic; entries
+    and order, default `'next'`, tooltip, GUI -> logic in both directions,
+    setter rejection, saved file contains `probe_needle_mode`, reload of a
+    `'same'` file selects "Stay in the same tube", an old file without the
+    key selects "Move to the next tube" without any warning, an invalid value
+    logs one error and falls back to `'next'`, an incomplete file leaves the
+    mode unchanged.
+
 ### Task runner
 
 #### Added
