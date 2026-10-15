@@ -115,6 +115,7 @@ class InjectionsLogic(LogicBase):
     sigHybridizationListChanged = QtCore.Signal()
     sigPhotobleachingListChanged = QtCore.Signal()
     sigIncompleteLoad = QtCore.Signal()
+    sigProbeNeedleModeChanged = QtCore.Signal(str)  # probe needle mode set by load_injections
 
     # attributes
     _robot = None
@@ -123,6 +124,12 @@ class InjectionsLogic(LogicBase):
     num_probes = 0
     procedures = ['Hybridization', 'Photobleaching']
     products = ['Probe']
+
+    # needle behaviour when the probe valve is used several times in one sequence:
+    # 'next' -> move to the next tube (tube + 1) for each new probe injection, 'same' -> stay in the same tube
+    PROBE_NEEDLE_MODES = ('next', 'same')
+    DEFAULT_PROBE_NEEDLE_MODE = 'next'
+    _probe_needle_mode = DEFAULT_PROBE_NEEDLE_MODE
 
     buffer_dict = {}  # key: value = valve_number: buffer_name (to make sure that each valve is only used once)
     probe_dict = {}  # key: value = position_number: probe_name (same comment)
@@ -149,9 +156,37 @@ class InjectionsLogic(LogicBase):
         # add the probe entry as default into the bufferlist
         self.add_buffer('Probe', self.probe_valve_number)
 
+        self._probe_needle_mode = self.DEFAULT_PROBE_NEEDLE_MODE
+
     def on_deactivate(self):
         """ Perform required deactivation. """
         pass
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Probe needle mode
+# ----------------------------------------------------------------------------------------------------------------------
+
+    @property
+    def probe_needle_mode(self):
+        """ Needle behaviour when the probe valve is used several times in the sequence: 'next' (move to the next
+        tube for each new probe injection) or 'same' (stay in the same tube). """
+        return self._probe_needle_mode
+
+    @probe_needle_mode.setter
+    def probe_needle_mode(self, mode):
+        self.set_probe_needle_mode(mode)
+
+    @QtCore.Slot(str)
+    def set_probe_needle_mode(self, mode):
+        """ Set the probe needle mode.
+        :param: str mode: 'next' or 'same'
+        :return: bool: True if the mode was set, False if the value is not valid (error logged, mode unchanged)
+        """
+        if mode not in self.PROBE_NEEDLE_MODES:
+            self.log.error(f'Invalid probe needle mode {mode!r} - valid values: {list(self.PROBE_NEEDLE_MODES)}.')
+            return False
+        self._probe_needle_mode = mode
+        return True
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Methods to insert / delete items into the listview models
@@ -305,6 +340,8 @@ class InjectionsLogic(LogicBase):
                 self.probe_dict = documents['probes']
                 hybridization_list = documents['hybridization list']
                 photobleaching_list = documents['photobleaching list']
+                # files written before this key existed use the default mode
+                probe_needle_mode = documents.get('probe_needle_mode', self.DEFAULT_PROBE_NEEDLE_MODE)
 
                 # update the models based on the dictionaries / lists content
                 self.buffer_list_model.items = [(self.buffer_dict[key], key) for key in self.buffer_dict]
@@ -322,6 +359,13 @@ class InjectionsLogic(LogicBase):
                 self.sigProbeListChanged.emit()
                 self.sigHybridizationListChanged.emit()
                 self.sigPhotobleachingListChanged.emit()
+
+                if probe_needle_mode not in self.PROBE_NEEDLE_MODES:
+                    self.log.error(f'Invalid probe needle mode {probe_needle_mode!r} in {path} (valid values: '
+                                   f'{list(self.PROBE_NEEDLE_MODES)}) - using {self.DEFAULT_PROBE_NEEDLE_MODE!r}.')
+                    probe_needle_mode = self.DEFAULT_PROBE_NEEDLE_MODE
+                self._probe_needle_mode = probe_needle_mode
+                self.sigProbeNeedleModeChanged.emit(self._probe_needle_mode)
 
         except KeyError:
             self.log.warning('Injections not loaded. Document is incomplete.')
@@ -361,7 +405,8 @@ class InjectionsLogic(LogicBase):
                 photobleaching_list.append(entry)
 
             with open(file_path, 'w') as file:
-                dict_file = {'buffer': self.buffer_dict, 'probes': self.probe_dict, 'hybridization list': hybridization_list, 'photobleaching list': photobleaching_list}
+                dict_file = {'buffer': self.buffer_dict, 'probes': self.probe_dict, 'hybridization list': hybridization_list, 'photobleaching list': photobleaching_list,
+                             'probe_needle_mode': self._probe_needle_mode}
                 yaml.safe_dump(dict_file, file, default_flow_style=False)  # , sort_keys=False
                 self.log.info('Injections saved to {}'.format(file_path))
 
