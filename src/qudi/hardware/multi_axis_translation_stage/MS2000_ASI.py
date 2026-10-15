@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 
 from qudi.core.configoption import ConfigOption
 from qudi.interface.multi_axis_stage_interface import MultiAxisStageInterface
+from qudi.interface.brightfield_interface import BrightfieldInterface
 # from interface.brightfield_interface import BrightfieldInterface
 
 
@@ -30,7 +31,7 @@ from qudi.interface.multi_axis_stage_interface import MultiAxisStageInterface
 # Hardware class
 # ======================================================================================================================
 
-class MS2000(MultiAxisStageInterface):
+class MS2000(MultiAxisStageInterface, BrightfieldInterface):
     """ Class representing the ASI MS 2000 xy or xyz translation stage.
 
   ms2000:

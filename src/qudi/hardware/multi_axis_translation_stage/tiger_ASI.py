@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 
 from qudi.core.configoption import ConfigOption
 from qudi.interface.multi_axis_stage_interface import MultiAxisStageInterface
+from qudi.interface.brightfield_interface import BrightfieldInterface
 # from interface.brightfield_interface import BrightfieldInterface
 
 
@@ -33,7 +34,7 @@ from qudi.interface.multi_axis_stage_interface import MultiAxisStageInterface
 # Hardware class
 # ======================================================================================================================
 
-class Tiger(MultiAxisStageInterface):
+class Tiger(MultiAxisStageInterface, BrightfieldInterface):
     """ Class representing the ASI Tiger xy or xyz translation stage.
 
     Config example for copy-paste (hardware:):
