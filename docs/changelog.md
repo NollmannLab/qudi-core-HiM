@@ -509,6 +509,47 @@ Last updated: 2026-10-14
 
 #### Added
 
+- `hardware/interfuse_hardware/dummy_flow_sensor.py` (2026-10-15):
+  `DummyFlowSensor` (`FlowSensorInterface`), same options and return format
+  as `FluigentFlowSensor` (`sensor_channel_IDs`, `unit`; `get_flowrate` ->
+  `{channel: float}`, `get_sensor_unit` -> `{channel: str}`). Optional
+  connector `pump` (`PumpInterface`): flow = `flow_per_unit` (default 100,
+  sensor unit per pump output unit) * pump output + gaussian noise
+  (`noise_std`, default 5), never negative; without a pump `mean_flow`
+  (default 200) + noise. A requested channel that is not configured is
+  logged as an error and left out (no exception).
+- `dummy_config.cfg`: the dummy fluidics setup now mirrors the spinning-disk
+  one, with only the flow sensor simulated:
+  - AO task `fluidics_pump` (`/Dev1/AO6`, [0, 10] V) on `dummy_daq`;
+    `fluidics_pump` (`DaqPumpController`, voltage 0-3 V);
+  - `rinsing_pump` updated to the current `DaqPumpController` options
+    (`kind`, `unit`, `minimum`, `maximum`; `stop_voltage` /
+    `rinsing_voltage` removed);
+  - `dummy_flow_sensor` connected to `fluidics_pump`;
+  - `fluidics_flow_logic` connects `flow_sensor`, `fluidics_pump`,
+    `rinsing_pump` and `valve_logic` (`flowboard` removed; it no longer
+    matched the logic's connectors). `pid_output_max: 3` (pump maximum);
+    `p_gain` / `i_gain` halved (0.0025 / 0.005): with 100 µl/min per V the
+    spinning-disk gains put the 1 s regulation loop at the edge of
+    stability (sustained oscillation between ~30 and ~250 µl/min at a
+    150 µl/min setpoint);
+  - `fluidics_gui` connect keys corrected to the GUI connector names
+    (`fluidics_logic`, `pipetting_robot_logic`, as in the spinning-disk
+    config); with the previous keys the GUI could not be connected.
+  - `dummy_flowboard` kept but no longer connected; task-runner entry
+    `dummy_fluidics` (`dummy_fluidics_task.TestTask`) removed from the config
+    (the file `tasks/dummy_fluidics_task.py` is kept).
+- Verified with `qudi-core==1.7.0` and 1.8.0, every module created from its
+  `dummy_config.cfg` entry (20/20 checks): `fluidics_flow_logic`, the
+  fluidics GUI and the `fluidics_dummy` task activate without error; a
+  pressure set in the GUI reaches the pump and the measured flow follows
+  (1 V -> ~100, 2.5 V -> ~250, 0 V -> ~2 µl/min); regulation at 150 µl/min
+  settles at ~150 µl/min (sd 4-7) at ~1.5 V within ~8 s; a 60 µl volume
+  measurement reaches its target; the fluidics dummy task runs buffer /
+  probe / incubation / buffer to the end (~20-23 µl per injection) and ends
+  with pressure 0, valves c=1 b=1 a=1 and the GUIs unlocked. The config
+  passes the qudi-core validator on both versions.
+
 - Added a shared Fluigent SDK hardware module responsible for SDK
   initialization, hardware discovery, and SDK shutdown.
 - Added a separate Fluigent pump module.

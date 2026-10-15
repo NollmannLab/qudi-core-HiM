@@ -278,7 +278,7 @@ class FluidicsTaskBase(ModuleTask):
         self.log.info(f'Moving the needle to tube {tube}')
         self._robot.start_move_to_target(tube)
         if not self._robot.moving and self._needle_arrived_at != tube:
-            raise RuntimeError(f'The robot did not start the move to tube {tube} - see the log.')
+            raise RuntimeError(f'The robot did not start the move to tube {tube}.')
 
         start = monotonic()
         while self._robot.moving:
@@ -286,7 +286,7 @@ class FluidicsTaskBase(ModuleTask):
                 raise RuntimeError(f'The needle did not reach tube {tube} within {self.robot_timeout_s:g} s.')
             self._interruptible_sleep(self._MAX_WAIT_STEP_S)
         if self._needle_arrived_at != tube:
-            raise RuntimeError(f'The robot stopped before reaching tube {tube} - see the log.')
+            raise RuntimeError(f'The robot stopped before reaching tube {tube}.')
 
         # the fluidics GUI re-enables its robot buttons at the end of every move
         self._robot.disable_positioning_actions()
