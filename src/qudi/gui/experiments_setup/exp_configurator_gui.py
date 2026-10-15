@@ -161,6 +161,7 @@ class ExpConfiguratorGUI(GuiBase):
         "rna": "general",
         "email": "general",
 
+        "camera": "camera",
         "exposure": "camera",
         "gain": "camera",
         "num_frames": "camera",
@@ -214,6 +215,11 @@ class ExpConfiguratorGUI(GuiBase):
         "email": (
             "mail_Label",
             "mail_LineEdit",
+        ),
+
+        "camera": (
+            "Camera_Label",
+            "select_camera_comboBox",
         ),
 
         "exposure": (
@@ -423,6 +429,7 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.dapi_CheckBox.stateChanged.connect(self._exp_logic.update_is_dapi)
         self._mw.rna_CheckBox.stateChanged.connect(self._exp_logic.update_is_rna)
         self._mw.TransferData_checkBox.stateChanged.connect(self._exp_logic.update_data_transfer)
+        self._mw.select_camera_comboBox.currentTextChanged.connect(self._exp_logic.update_camera)
         self._mw.exposure_DSpinBox.valueChanged.connect(self._exp_logic.update_exposure)
         self._mw.gain_SpinBox.valueChanged.connect(self._exp_logic.update_gain)
         self._mw.num_frames_SpinBox.valueChanged.connect(self._exp_logic.update_frames)
@@ -500,6 +507,10 @@ class ExpConfiguratorGUI(GuiBase):
             [str(wavelength) for wavelength in (self._exp_logic.lasers or [])]
         )
         self._mw.fileformat_ComboBox.addItems(list(self._exp_logic.supported_fileformats or []))
+        cameras = list(self._exp_logic.cameras or [])
+        self._mw.select_camera_comboBox.addItems(cameras)
+        # without a camera logic there is nothing to choose from
+        self._mw.select_camera_comboBox.setEnabled(bool(cameras))
 
 # ----------------------------------------------------------------------------------------------------------------------
 # General private methods to hide or reset widgets
@@ -748,6 +759,7 @@ class ExpConfiguratorGUI(GuiBase):
         try:
             self._exp_logic.init_config_from_definition(experiment)
             self.apply_experiment_definition(definition)
+            self._default_camera_selection()
             self.update_entries()
 
         except Exception:
@@ -775,6 +787,8 @@ class ExpConfiguratorGUI(GuiBase):
     def set_visibility_camera_settings(self, visible):
         """Show or hide the camera-settings section and its widgets."""
         self._mw.cam_settings_Label.setVisible(visible)
+        self._mw.Camera_Label.setVisible(visible)
+        self._mw.select_camera_comboBox.setVisible(visible)
         self._mw.exposure_Label.setVisible(visible)
         self._mw.exposure_DSpinBox.setVisible(visible)
         self._mw.get_exposure_PushButton.setVisible(visible)
@@ -931,6 +945,7 @@ class ExpConfiguratorGUI(GuiBase):
             return
 
         self._exp_logic.init_config_from_definition(experiment)
+        self._default_camera_selection()
         self.update_entries()
         self._mw.laser_ComboBox.setCurrentIndex(0)
         self._mw.laser_intensity_DSpinBox.setValue(0.0)
@@ -1041,6 +1056,7 @@ class ExpConfiguratorGUI(GuiBase):
         try:
             config = self._exp_logic.config_dict
             self._mw.sample_name_LineEdit.setText(self._exp_logic.config_dict.get('sample_name', ''))
+            self._select_camera_entry(self._exp_logic.config_dict.get('camera'))
             self._mw.exposure_DSpinBox.setValue(self._exp_logic.config_dict.get('exposure', 0.0))
             self._mw.gain_SpinBox.setValue(self._exp_logic.config_dict.get('gain', 0))
             self._mw.num_frames_SpinBox.setValue(self._exp_logic.config_dict.get('num_frames', 1))
@@ -1077,6 +1093,27 @@ class ExpConfiguratorGUI(GuiBase):
 
         finally:
             del blockers
+
+    def _select_camera_entry(self, name) -> None:
+        """Select the camera combobox entry matching name; an unknown name is logged and leaves
+        the selection unchanged."""
+        if not name:
+            return
+        index = self._mw.select_camera_comboBox.findText(str(name))
+        if index < 0:
+            self.log.warning(f'Camera {name!r} is not available on this setup.')
+            return
+        self._mw.select_camera_comboBox.setCurrentIndex(index)
+
+    def _default_camera_selection(self) -> None:
+        """For an experiment with a "camera" field and no camera set yet, use the camera shown in
+        the combobox (the first one), so that a single available camera is selected by default."""
+        config = self._exp_logic.config_dict
+        if 'camera' not in config or config.get('camera'):
+            return
+        current = self._mw.select_camera_comboBox.currentText()
+        if current:
+            config['camera'] = current
 
     def update_listview(self):
         """Refresh imaging-sequence rows and clear any stale row selection."""
@@ -1129,6 +1166,7 @@ class ExpConfiguratorGUI(GuiBase):
         """Return widgets whose signals must be blocked during GUI refreshes."""
         return (
             self._mw.sample_name_LineEdit,
+            self._mw.select_camera_comboBox,
             self._mw.mail_LineEdit,
             self._mw.dapi_CheckBox,
             self._mw.rna_CheckBox,

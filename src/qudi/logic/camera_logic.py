@@ -584,6 +584,9 @@ class CameraLogic(LogicBase):
     # Method invoked by snap button on GUI ---------------------------------------------------------------------------------
     def start_single_acquisition(self):
         """ Take a single camera image.
+
+        :return: the new image (np.ndarray), or None if the camera returned no image. Callers
+            connected through a Qt signal (snap button) ignore the return value.
         """
         # For the RAMM microscope, a shutter is used to block the IR laser
         if self._security_shutter is not None:
@@ -598,8 +601,10 @@ class CameraLogic(LogicBase):
             self.sigUpdateDisplay.emit()
         else:
             self.log.warning('The camera did not return any image.')
+            image = None
         self._hardware.stop_acquisition()  # this in needed to reset the acquisition mode to default
         self.sigAcquisitionFinished.emit()
+        return image
 
     # Methods invoked to handle workers ------------------------------------------------------------------------------------
     def worker_finished(self, worker_id):

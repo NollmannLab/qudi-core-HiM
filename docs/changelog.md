@@ -111,6 +111,12 @@ Last updated: 2026-10-14
 
 #### Changed
 
+- `logic/camera_logic.py` (2026-10-14): `start_single_acquisition()` returns
+  the acquired image when it is valid, otherwise None. Shutter handling,
+  `_last_image` / `sigUpdateDisplay`, the "no image" warning,
+  `stop_acquisition` and `sigAcquisitionFinished` are unchanged; the snap
+  button (Qt signal) ignores the return value.
+
 - Debug prints silenced (2026-10-14): the `*** DEBUGGING ***` prints are off
   by default, each module keeps its own switch. `hardware/camera/teledyne/kinetix.py`:
   new module flag `verbose = False` (set True to print every decorated
@@ -292,6 +298,11 @@ Last updated: 2026-10-14
 ### ROI logic
 
 #### Changed
+
+- `logic/roi_logic.py` (2026-10-14): new `get_stage_velocity(axes=None)`
+  (wraps the stage's `get_velocity`). `set_stage_velocity` returns a bool:
+  True when the stage accepted the command (interface code 0), otherwise an
+  error is logged and False returned.
 
 - `logic/roi_logic.py` (2026-10-13): **`move_stage` skips the axes given as
   `None`**. Only the non-None entries of `(x, y, z)` are sent (z only if the
@@ -863,6 +874,30 @@ Last updated: 2026-10-14
 
 #### Changed
 
+- `tasks/psf_stack_opm.py`, `tasks/roi_multicolour_scan_sd.py` (2026-10-14):
+  scan stage speed, camera from the experiment configurator, snap check.
+  - Stage speed: `scan_stage_velocity` is a class attribute (PSF:
+    `{'z': 500.0}` µm/s, slow z moves avoid stage ringing between planes; SD:
+    `{'x': 1000.0, 'y': 1000.0}`). At run start the current velocity of these
+    axes is read (`roi_logic.get_stage_velocity`) and the scan velocity set
+    (a refusal stops the task); the cleanup restores the velocity read at
+    start (error logged on failure). `idle_stage_velocity` removed (and from
+    the SD config example).
+  - PSF cleanup sends the galvo to the optical axis
+    (`galvo_logic.go_to_optical_axis()`), no longer to rest.
+  - PSF camera: the `camera_name` option is gone; the camera comes from the
+    experiment YAML (key `camera`, in `_CONFIG_KEYS`), still checked against
+    `get_available_cameras()`, selected at start, previous camera + exposure
+    restored by the cleanup.
+  - PSF setup options: `_UNSET` removed; `user_config_path` and
+    `metadata_template` must be set (None / empty -> error naming the option)
+    and point to existing files.
+  - PSF snap: `_acquire_plane` uses the frame returned by
+    `camera_logic.start_single_acquisition()` (no `get_last_image()`, no
+    "previous image" comparison); a missing frame stops the task.
+  - PSF metadata: Acquisition `selected_camera` (template key) and PSF
+    `z_scan_velocity_(µm/s)`. Unused `from time import sleep` removed.
+
 - `tasks/psf_stack_opm.py` (2026-10-13): **timing instrumentation removed from
   the PSF task** (diagnosis done; the stage wait was fixed in the Tiger
   driver). Removed: `_TimingLog`, the `timing_log_enabled` option,
@@ -1030,6 +1065,16 @@ Last updated: 2026-10-14
 ### Experiment configurator
 
 #### Added
+
+- `exp_configurator_gui.py`, `experiment_configurator_logic.py`,
+  `opm/psf_stack.yaml` (2026-10-14): field `camera` (camera section) on the
+  `select_camera_comboBox` / `Camera_Label` widgets of the `.ui`. The logic
+  lists `camera_logic.get_available_cameras()` (empty without a camera logic:
+  the combobox is then empty and disabled). For an experiment with the field
+  and no camera yet, the first camera is selected (a single camera is shown
+  and selected); the choice is saved under `camera` and selected again when a
+  YAML is loaded. Hidden for experiments without the field. `psf_stack.yaml`:
+  `camera` (visible, required).
 
 - `exp_configurator_gui.py` + `experiment_configurator_logic.py` (2026-10-13):
   new **Galvo section** (`galvo`): fields `galvo_start`, `galvo_stop`,

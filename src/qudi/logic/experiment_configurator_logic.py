@@ -234,6 +234,7 @@ class ExpConfigLogic(LogicBase):
     _filter_logic = None
     filters = None
     lasers = None
+    cameras = None
     img_sequence_model = None
     is_timelapse_ramm = False
     is_timelapse_palm = False
@@ -265,6 +266,11 @@ class ExpConfigLogic(LogicBase):
         if self._filter_logic  is not None:
             filter_dict = self._filter_logic.get_filter_dict()
             self.filters = [filter['name'] for filter in filter_dict.values()]
+
+        # camera names offered by the "camera" field (empty without a connected camera logic)
+        self.cameras = []
+        if self._camera_logic is not None:
+            self.cameras = [str(name) for name in self._camera_logic.get_available_cameras()]
 
         self.img_sequence_model = ImagingSequenceModel()
         self.img_sequence_model_timelapse_ramm = ImagingSequenceModelTimelapseRAMM()
@@ -684,6 +690,12 @@ class ExpConfigLogic(LogicBase):
             self.config_dict['transfer_data'] = True
         elif state == 0:  # Unchecked = 0
             self.config_dict['transfer_data'] = False
+        self.sigConfigDictUpdated.emit()
+
+    @QtCore.Slot(str)
+    def update_camera(self, name):
+        """Set the camera used by the experiment and notify configuration listeners."""
+        self.config_dict['camera'] = name
         self.sigConfigDictUpdated.emit()
 
     @QtCore.Slot(float)

@@ -57,6 +57,11 @@ fields:
     model: standard
     default: []
 
+  camera:
+    visible: true
+    required: true
+    default: ""
+
   exposure:
     visible: true
     required: true
