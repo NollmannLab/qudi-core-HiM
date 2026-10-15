@@ -102,10 +102,10 @@ class FluidicsFlowLogic(LogicBase):
     """
 
     # Connectors to hardware
-    flow_sensor = Connector(interface="FlowSensorInterface", name="flow_sensor")
     fluidics_pump = Connector(interface="PumpInterface", name="fluidics_pump")
     rinsing_pump = Connector(interface="PumpInterface", name="rinsing_pump")
     valve_logic = Connector(interface="FluidicsValveLogic", name="valve_logic")
+    flow_sensor = Connector(interface="FlowSensorInterface", name="flow_sensor")
 
     # Options
     p_gain = ConfigOption("p_gain", 0.005, missing="warn")
