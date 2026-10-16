@@ -532,6 +532,53 @@ Last updated: 2026-10-14
   test on the previous code fails 6 checks. Bright-field GUI test
   unchanged (43/43).
 
+### Basic imaging GUI
+
+#### Fixed
+
+- Task lock of the camera and laser controls (2026-10-16). During a task the
+  controls became clickable again after the first image: every snap
+  (`sigAcquisitionFinished` -> `acquisition_finished()`) and every
+  `sigVideoFinished` called `enable_camera_toolbuttons()`. Some controls were
+  never locked.
+  - Two flags, changed only by the logic lock signals: `_camera_locked`
+    (`sigDisableCameraActions` / `sigEnableCameraActions`, now connected to
+    the new slots `lock_camera_actions()` / `unlock_camera_actions()`) and
+    `_laser_locked` (set in `disable_laser_toolbuttons()` /
+    `enable_laser_toolbuttons()`, still the slots of `sigDisableLaserActions`
+    / `sigEnableLaserActions`). Filter-wheel lock unchanged.
+  - While `_camera_locked`, `enable_camera_toolbuttons()` (end of a snap,
+    `sigVideoFinished`, save dialog cancelled, end / abort of a saved video)
+    only resets the checked states and enables nothing; stopping live does
+    not re-enable Snap. Locked: Snap, Live, Save last image, Save video,
+    Quickstart video, Set / reset sensor region, Reuse last sensor ROI,
+    Camera settings, Piezo settings and the camera combobox
+    (`_camera_switch_allowed()` returns `False`); a rubber-band selection on
+    the image is ignored.
+  - While `_laser_locked`: Laser on, Zero all, every laser intensity spinbox
+    (also after a filter change) and, with a brightfield logic, the
+    brightfield button and spinbox.
+  - On unlock each control gets its normal state back: Snap disabled while
+    live runs, Reuse last sensor ROI only if a previous ROI exists, camera
+    combobox from `_camera_switch_allowed()`, laser spinboxes from the
+    current filter.
+  - Display-only controls (image rotation, contrast, dock views) stay
+    available. The Abort button keeps its previous behaviour (enabled by
+    `disable_camera_toolbuttons()`).
+- Verified offscreen with `qudi-core==1.7.0` and 1.8.0 (33/33 checks): real
+  `BasicImagingGUI`, fake camera logic with the same signals as
+  `CameraLogic` (names and signatures checked), real `LaserControlLogic`
+  and `BrightfieldLogic` on fake hardware. Without a lock, snap and live
+  behave as before. Locked: every listed control stays disabled after 3x
+  `sigAcquisitionFinished`, 3x `sigVideoFinished`, a live stop / start from
+  the logic and a cancelled save dialog; a rubber-band selection and a
+  camera switch do not reach the camera logic; display controls stay
+  enabled. Unlock with live running and a previous ROI, then with live off
+  and no ROI: Snap, Reuse last sensor ROI, the camera combobox and the
+  laser spinboxes get their normal states. The same test on the previous
+  GUI fails 8 checks. Bright-field (43/43) and laser-stop (11/11) tests
+  unchanged.
+
 ### Fluidics
 
 #### Added

@@ -313,6 +313,10 @@ class BasicImagingGUI(GuiBase):
         self.metadata_template = None
         self.laser_spinboxes_by_wavelength = {}
         self._last_sensor_roi = None
+        # task locks: changed only by the lock / unlock signals of the camera and laser logic
+        self._camera_locked = False
+        self._laser_locked = False
+        self._allowed_laser_wavelengths = None  # laser lines allowed by the current filter (None: all)
         self._active_camera_name = None  # name of the camera currently displayed in the GUI
         self._autorange_next_image = False  # True after a camera change : fit the view to the next image
 
@@ -570,8 +574,8 @@ class BasicImagingGUI(GuiBase):
         # control of the UI state by logic
         self._camera_logic.sigLiveStopped.connect(self.reset_start_video_button)
         self._camera_logic.sigLiveStarted.connect(self.start_video_clicked)
-        self._camera_logic.sigDisableCameraActions.connect(self.disable_camera_toolbuttons)
-        self._camera_logic.sigEnableCameraActions.connect(self.enable_camera_toolbuttons)
+        self._camera_logic.sigDisableCameraActions.connect(self.lock_camera_actions)
+        self._camera_logic.sigEnableCameraActions.connect(self.unlock_camera_actions)
 
 # camera selection (only if several cameras are available) ------------------------------------------------------------
     def _init_camera_combobox(self):
@@ -598,6 +602,8 @@ class BasicImagingGUI(GuiBase):
         @param: (bool) live_on, lasers_on, bf_on: force the state of the live / lasers / brightfield if not None
         @return: (bool) True if the camera can be changed
         """
+        if self._camera_locked:
+            return False
         if live_on is None:
             live_on = self._camera_logic.live_enabled
         if lasers_on is None:
@@ -1224,7 +1230,7 @@ class BasicImagingGUI(GuiBase):
         Handles the state of the start button and emits a signal (connected to logic) to start the live loop.
         """
         if self._camera_logic.live_enabled:  # video already running
-            self._mw.take_image_Action.setDisabled(False)  # snap and live are mutually exclusive
+            self._mw.take_image_Action.setDisabled(self._camera_locked)  # snap and live are mutually exclusive
             self._mw.start_video_Action.setText('Live')
             self._mw.start_video_Action.setToolTip('Start live video')
             self.sigVideoStop.emit()
@@ -1372,6 +1378,8 @@ class BasicImagingGUI(GuiBase):
         """
         if verbose:
             print("*** DEBUGGING *** Executing mouse_area_selected from basic_imaging_gui.py")
+        if self._camera_locked:
+            return
 
         # read the coordinates of the selected region
         hstart, vstart, hend, vend = rect.getCoords()
@@ -1529,8 +1537,13 @@ class BasicImagingGUI(GuiBase):
     @decorator_print_function
     def enable_camera_toolbuttons(self):
         """
-        Enables all toolbuttons of the camera toolbar. Serves also as callback of SigVideoFinished.
+        Enables all toolbuttons of the camera toolbar. Serves also as callback of SigVideoFinished. While the camera
+        actions are locked (task), only the checked states are reset and nothing is enabled.
         """
+        if self._camera_locked:
+            self._mw.abort_video_Action.setChecked(False)
+            self._update_camera_combo_state()
+            return
         if not self._camera_logic.live_enabled:  # do not reset to active state if live mode is on
             self._mw.take_image_Action.setDisabled(False)
         self._mw.start_video_Action.setDisabled(False)
@@ -1541,6 +1554,25 @@ class BasicImagingGUI(GuiBase):
         self._mw.abort_video_Action.setDisabled(True)
         self._mw.abort_video_Action.setChecked(False)
         self._update_camera_combo_state()
+
+    @QtCore.Slot()
+    def lock_camera_actions(self):
+        """ Callback of sigDisableCameraActions (task start): disables the camera controls until
+        sigEnableCameraActions. The end of an acquisition does not re-enable them meanwhile. """
+        self._camera_locked = True
+        self.disable_camera_toolbuttons()
+        self._mw.use_last_sensor_ROI_Action.setDisabled(True)
+        self._mw.camera_settings_Action.setDisabled(True)
+        self._mw.piezo_settings_Action.setDisabled(True)
+
+    @QtCore.Slot()
+    def unlock_camera_actions(self):
+        """ Callback of sigEnableCameraActions (task end): the camera controls get back their normal state. """
+        self._camera_locked = False
+        self.enable_camera_toolbuttons()
+        self._mw.use_last_sensor_ROI_Action.setEnabled(self._last_sensor_roi is not None)
+        self._mw.camera_settings_Action.setDisabled(False)
+        self._mw.piezo_settings_Action.setDisabled(False)
 
 # helper functions -----------------------------------------------------------------------------------------------------
     def _create_metadata_dict(self, n_frames):
@@ -1702,19 +1734,28 @@ class BasicImagingGUI(GuiBase):
 # disable/enable user interface actions --------------------------------------------------------------------------------
     @QtCore.Slot()
     def disable_laser_toolbuttons(self):
-        """ disables all toolbuttons of the laser toolbar"""
+        """ Callback of sigDisableLaserActions (task start): disables the laser toolbar, the laser intensity
+        spinboxes and the brightfield controls until sigEnableLaserActions. """
+        self._laser_locked = True
         self._mw.laser_on_Action.setDisabled(True)
         self._mw.laser_zero_Action.setDisabled(True)
+        for spinbox in self.laser_spinboxes_by_wavelength.values():
+            spinbox.setDisabled(True)
         if self._brightfield_logic:
             self.brightfield_on_Action.setDisabled(True)
+            self.bf_control_DSpinBox.setDisabled(True)
 
     @QtCore.Slot()
     def enable_laser_toolbuttons(self):
-        """ enables all toolbuttons of the camera toolbar"""
+        """ Callback of sigEnableLaserActions (task end): enables the laser toolbar, the spinboxes of the laser lines
+        allowed by the current filter and the brightfield controls. """
+        self._laser_locked = False
         self._mw.laser_on_Action.setDisabled(False)
         self._mw.laser_zero_Action.setDisabled(False)
+        self._disable_laser_control(self._allowed_laser_wavelengths)
         if self._brightfield_logic:
             self.brightfield_on_Action.setDisabled(False)
+            self.bf_control_DSpinBox.setDisabled(False)
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Slots for the filter dockwidget
@@ -1760,8 +1801,10 @@ class BasicImagingGUI(GuiBase):
         :param: allowed_wavelengths (list) indicate the laser wavelengths that are allowed for the selected filter.
         :return: None
         """
+        self._allowed_laser_wavelengths = allowed_wavelengths
         for wavelength, spinbox in self.laser_spinboxes_by_wavelength.items():
-            spinbox.setEnabled(wavelength in allowed_wavelengths)
+            allowed = allowed_wavelengths is None or wavelength in allowed_wavelengths
+            spinbox.setEnabled(allowed and not self._laser_locked)
 
 # disable/enable user interface actions --------------------------------------------------------------------------------
     @QtCore.Slot()
