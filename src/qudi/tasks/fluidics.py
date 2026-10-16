@@ -8,6 +8,9 @@ Structure - one file for all setups:
     attributes, set by the subclasses.
   - FluidicsRAMMTask / FluidicsSDTask: one subclass per setup (data only).
   - FluidicsDummyTask: RAMM layout, for testing with dummy_config.cfg.
+The steps (valve moves, injection, incubation, needle move), the valve layout and timing attributes
+and the reading / validation of the injections file come from FluidicsStepsMixin
+(tasks/common/fluidics_steps.py), shared with the Hi-M task.
 The path of the experiment YAML written by the experiment configurator and the valve outlet of the
 probe needle differ between machines: each microscope's config sets them in the task's entry with
 "options: user_config_path: ... probe_valve_number: ..." (applied by logic/taskrunner_logic.py).
@@ -25,17 +28,12 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-from numbers import Real
-from time import monotonic, sleep
-
-import yaml
-from qtpy import QtCore
-
 from qudi.core.connector import Connector
 from qudi.core.scripting.moduletask import ModuleTask
+from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
 
 
-class FluidicsTaskBase(ModuleTask):
+class FluidicsTaskBase(FluidicsStepsMixin, ModuleTask):
     """Shared fluidics sequence: inject the buffers and probes of the 'hybridization list' of an
     injections file, with incubation steps in between.
 
@@ -70,26 +68,6 @@ class FluidicsTaskBase(ModuleTask):
     # options, set by the config ("options:")
     user_config_path = None
     probe_valve_number = None
-
-    # setup-specific valve positions {address: position}, applied in the given order
-    start_valve_positions = {}         # before the first step
-    needle_move_valve_positions = {}   # before a needle move
-    needle_moved_valve_positions = {}  # after a needle move
-    incubation_valve_positions = {}    # at the start of an incubation
-    incubation_end_valve_positions = {}  # at the end of an incubation
-    cleanup_valve_positions = {}       # at the end of the task (also after an error / interrupt)
-
-    buffer_valve_address = 'a'  # valve selecting the product (buffer outlet)
-
-    volume_poll_interval_s = 1.0
-    robot_timeout_s = 120.0
-    injection_timeout_factor = 3.0
-    injection_timeout_margin_s = 60.0
-    incubation_log_interval_s = 30
-
-    PROBE_NEEDLE_MODES = ('next', 'same')
-    _MAX_WAIT_STEP_S = 0.1  # maximum time between two interrupt checks while waiting
-    _PRESSURE_SETTLE_S = 1.0  # last regulation step after stopping the regulation loop
 
     def _setup(self) -> None:
         # attributes used by _cleanup(): set first, so that _cleanup() also works if fetching a
@@ -203,129 +181,6 @@ class FluidicsTaskBase(ModuleTask):
 
         self.log.info(f'Fluidics task ended after {self._steps_done}/{len(self._steps)} step(s).')
 
-    # ==============================================================================================
-    # Steps
-    # ==============================================================================================
-
-    def _inject(self, number, step, probe_steps) -> None:
-        """Select the product, move the needle if needed, inject the volume at the flowrate."""
-        # a. product
-        self._set_valve(self.buffer_valve_address, step['valve'])
-
-        # b. next tube for a further probe injection
-        if step['probe'] and self._needle_mode == 'next' and step is not probe_steps[0]:
-            self._move_needle(step['tube'])
-        if step['probe'] and step['tube'] not in self._tubes_used:
-            self._tubes_used.append(step['tube'])
-
-        # c. regulation and volume count
-        volume, flowrate = step['volume'], step['flowrate']
-        self._flow.set_pressure(0.0)
-        self._flow.start_pressure_regulation_loop(flowrate)
-        self._flow.start_volume_measurement(volume)
-
-        # d. wait for the volume (volume / flowrate is in minutes)
-        timeout_s = self.injection_timeout_factor * volume / flowrate * 60.0 + self.injection_timeout_margin_s
-        start = monotonic()
-        while not self._flow.target_volume_reached:
-            if monotonic() - start > timeout_s:
-                raise RuntimeError(f'Step {number}: volume not reached - check the line '
-                                   f'({self._flow.total_volume:g} of {volume:g} µl after {timeout_s:.0f} s).')
-            self._interruptible_sleep(self.volume_poll_interval_s)
-
-        # e. stop the regulation, pressure to 0
-        self._flow.stop_pressure_regulation_loop()
-        sleep(self._PRESSURE_SETTLE_S)
-        self._flow.set_pressure(0.0)
-        self.log.info(f'Step {number}: {self._flow.total_volume:g} µl injected '
-                      f'in {monotonic() - start:.0f} s.')
-
-    def _incubate(self, step) -> None:
-        """Wait the incubation time (interruptible), with the incubation valve positions."""
-        # a. incubation positions
-        self._set_valves(self.incubation_valve_positions)
-
-        # b. interruptible wait, progress logged every incubation_log_interval_s
-        duration = step['time']
-        start = monotonic()
-        next_log = self.incubation_log_interval_s
-        while True:
-            elapsed = monotonic() - start
-            if elapsed >= duration:
-                break
-            if elapsed >= next_log:
-                self.log.info(f'Incubation: {elapsed:.0f} / {duration:g} s')
-                next_log += self.incubation_log_interval_s
-            self._interruptible_sleep(min(1.0, duration - elapsed))
-
-        # c. end positions
-        self._set_valves(self.incubation_end_valve_positions)
-
-    def _move_needle(self, tube) -> None:
-        """Move the needle to a tube and wait until it has arrived (interruptible, robot_timeout_s)."""
-        self._set_valves(self.needle_move_valve_positions)
-
-        if self._arrival_slot is None:
-            def arrived(position, target):
-                # runs in the robot logic thread right after the arrival signal, so the lock reaches
-                # the GUI right after the arrival (the GUI re-enables its buttons on arrival)
-                self._needle_arrived_at = target
-                self._robot.disable_positioning_actions()
-            self._arrival_slot = arrived
-            self._robot.sigStageMovedToTarget.connect(arrived, QtCore.Qt.DirectConnection)
-        self._needle_arrived_at = None
-
-        self.log.info(f'Moving the needle to tube {tube}')
-        self._robot.start_move_to_target(tube)
-        if not self._robot.moving and self._needle_arrived_at != tube:
-            raise RuntimeError(f'The robot did not start the move to tube {tube}.')
-
-        start = monotonic()
-        while self._robot.moving:
-            if monotonic() - start > self.robot_timeout_s:
-                raise RuntimeError(f'The needle did not reach tube {tube} within {self.robot_timeout_s:g} s.')
-            self._interruptible_sleep(self._MAX_WAIT_STEP_S)
-        if self._needle_arrived_at != tube:
-            raise RuntimeError(f'The robot stopped before reaching tube {tube}.')
-
-        # the fluidics GUI re-enables its robot buttons at the end of every move
-        self._robot.disable_positioning_actions()
-        self._set_valves(self.needle_moved_valve_positions)
-
-    # ==============================================================================================
-    # Helpers
-    # ==============================================================================================
-
-    def _set_valves(self, positions) -> None:
-        for address, position in positions.items():
-            self._set_valve(address, position)
-
-    def _set_valve(self, address, position) -> None:
-        """Move one valve; raise naming the valve and the position if it does not get there."""
-        try:
-            reached = self._valve.set_valve_position(address, position)
-        except Exception as err:
-            raise RuntimeError(f'Could not set valve {address} to position {position}: {err}') from err
-        if reached is False or reached is None or int(reached) != int(position):
-            raise RuntimeError(f'Valve {address} did not reach position {position} (reported: {reached}).')
-
-    def _interruptible_sleep(self, duration_s) -> None:
-        """Sleep duration_s seconds, checking for an interrupt at least every 0.1 s."""
-        deadline = monotonic() + max(0.0, float(duration_s))
-        while True:
-            self._check_interrupt()
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                return
-            sleep(min(self._MAX_WAIT_STEP_S, remaining))
-
-    def _describe(self, step) -> str:
-        if step['kind'] == 'incubation':
-            return f'incubation {step["time"]:g} s'
-        tube = f', tube {step["tube"]}' if step['probe'] else ''
-        return (f'inject {step["product"]} (valve {step["valve"]}{tube}), {step["volume"]:g} µl '
-                f'at {step["flowrate"]:g} µl/min')
-
     def _log_plan(self, injections_path, probes) -> None:
         self.log.info(f'Fluidics sequence from {injections_path} - needle mode {self._needle_mode!r}, '
                       f'{len(self._steps)} step(s):')
@@ -352,132 +207,12 @@ class FluidicsTaskBase(ModuleTask):
         except (TypeError, ValueError):
             raise RuntimeError(f'probe_valve_number must be an integer, got {self.probe_valve_number!r}.')
 
-    def _read_yaml(self, path, what):
-        try:
-            with open(path, 'r', encoding='utf-8') as stream:
-                content = yaml.safe_load(stream)
-        except Exception as err:
-            raise RuntimeError(f'Could not read the {what} {path}: {err}') from err
-        if not isinstance(content, dict):
-            raise RuntimeError(f'The {what} {path} is empty or not a YAML mapping.')
-        return content
-
     def _read_injections_path(self) -> str:
         config = self._read_yaml(self.user_config_path, 'experiment file')
         injections_path = config.get('injections_path')
         if not injections_path:
             raise RuntimeError(f'No injections_path in the experiment file {self.user_config_path}.')
         return str(injections_path)
-
-    def _read_injections(self, path):
-        """Return ({product name: valve}, {tube: probe name}, hybridization list, needle mode)."""
-        content = self._read_yaml(path, 'injections file')
-        missing = [key for key in ('buffer', 'probes', 'hybridization list') if key not in content]
-        if missing:
-            raise RuntimeError(f'Injections file {path} is incomplete - missing: {", ".join(missing)}.')
-        buffer = content['buffer'] or {}
-        probes = content['probes'] or {}
-        if not isinstance(buffer, dict) or not isinstance(probes, dict):
-            raise RuntimeError(f'Injections file {path}: buffer and probes must be mappings.')
-        buffer_valves = {name: valve for valve, name in buffer.items()}
-        return buffer_valves, probes, content['hybridization list'] or [], content.get('probe_needle_mode', 'next')
-
-    def _validate(self, buffer_valves, probes, hybridization_list, needle_mode, probe_valve) -> list:
-        """Check the sequence and the setup values without any hardware call. Return the steps;
-        raise once listing every problem."""
-        problems = []
-        steps = []
-        valve_dict = self._valve.valve_dict
-
-        if needle_mode not in self.PROBE_NEEDLE_MODES:
-            problems.append(f'probe_needle_mode {needle_mode!r} is not valid (valid: {list(self.PROBE_NEEDLE_MODES)})')
-        if not isinstance(hybridization_list, list) or not hybridization_list:
-            problems.append('the hybridization list is empty')
-            hybridization_list = []
-
-        for number, entry in enumerate(hybridization_list, 1):
-            if not isinstance(entry, dict):
-                problems.append(f'step {number}: not a valid entry ({entry!r})')
-                continue
-            product = entry.get('product')
-            if product is None:
-                duration = entry.get('time')
-                if not _is_number(duration) or duration < 0:
-                    problems.append(f'step {number} (incubation): time must be >= 0 s, got {duration!r}')
-                    continue
-                steps.append({'kind': 'incubation', 'time': float(duration), 'probe': False})
-                continue
-            volume, flowrate = entry.get('volume'), entry.get('flowrate')
-            ok = True
-            if product not in buffer_valves:
-                problems.append(f'step {number}: product {product!r} is not in the buffer list')
-                ok = False
-            if not _is_number(volume) or volume <= 0:
-                problems.append(f'step {number} ({product}): volume must be > 0 µl, got {volume!r}')
-                ok = False
-            if not _is_number(flowrate) or flowrate <= 0:
-                problems.append(f'step {number} ({product}): flowrate must be > 0 µl/min, got {flowrate!r}')
-                ok = False
-            if ok:
-                valve = int(buffer_valves[product])
-                steps.append({'kind': 'injection', 'product': product, 'valve': valve,
-                              'volume': float(volume), 'flowrate': float(flowrate),
-                              'probe': valve == probe_valve, 'tube': None})
-
-        n_probe = sum(1 for s in steps if s['probe'])
-        if n_probe:
-            if not probes:
-                problems.append('the sequence uses the probe valve but the probe list is empty')
-            if self._robot.origin is None:
-                problems.append('the sequence uses the probe valve but the robot origin (position 1) is not defined')
-            if probes and needle_mode == 'next':
-                last_tube = min(probes) + n_probe - 1
-                max_tubes = getattr(self._robot, 'max_num_probes', 0)
-                if max_tubes and last_tube > max_tubes:
-                    problems.append(f'{n_probe} probe injection(s) from tube {min(probes)} need tube {last_tube}, '
-                                    f'the robot has {max_tubes}')
-
-        problems.extend(self._check_valve_positions(valve_dict, buffer_valves, probe_valve))
-
-        if problems:
-            raise RuntimeError(f'Fluidics task not started - {len(problems)} problem(s):\n  - '
-                               + '\n  - '.join(problems))
-        return steps
-
-    def _check_valve_positions(self, valve_dict, buffer_valves, probe_valve) -> list:
-        """Check that every address / position used exists on the valves."""
-        problems = []
-
-        def outputs(address):
-            try:
-                return int(valve_dict[address]['number_outputs'])
-            except (KeyError, TypeError, ValueError):
-                return None
-
-        if outputs(self.buffer_valve_address) is None:
-            problems.append(f'buffer valve {self.buffer_valve_address!r} is not configured on the valve logic')
-        else:
-            n = outputs(self.buffer_valve_address)
-            for name, valve in buffer_valves.items():
-                if not 1 <= int(valve) <= n:
-                    problems.append(f'buffer {name!r}: outlet {valve} outside 1..{n} of valve '
-                                    f'{self.buffer_valve_address}')
-            if not 1 <= probe_valve <= n:
-                problems.append(f'probe_valve_number {probe_valve} outside 1..{n} of valve {self.buffer_valve_address}')
-
-        for attribute in ('start_valve_positions', 'needle_move_valve_positions', 'needle_moved_valve_positions',
-                          'incubation_valve_positions', 'incubation_end_valve_positions', 'cleanup_valve_positions'):
-            for address, position in getattr(self, attribute).items():
-                n = outputs(address)
-                if n is None:
-                    problems.append(f'{attribute}: valve {address!r} is not configured on the valve logic')
-                elif not 1 <= int(position) <= n:
-                    problems.append(f'{attribute}: position {position} outside 1..{n} of valve {address}')
-        return problems
-
-
-def _is_number(value) -> bool:
-    return isinstance(value, Real) and not isinstance(value, bool)
 
 
 class FluidicsRAMMTask(FluidicsTaskBase):
