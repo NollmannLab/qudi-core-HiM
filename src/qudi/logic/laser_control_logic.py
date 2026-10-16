@@ -72,7 +72,6 @@ class LaserControlLogic(LogicBase):
         # instantiate hardware
         self._laser = self.laser()
         self._filter_wheel = self.filter_wheel()
-        self.enabled = False  # attribute to handle the on-off switching of the laser-on button
 
         # get optical path parameters
         self.allowed_wavelengths_nm = self.optical_path['dichroic_allowed_wavelengths_nm']
@@ -365,9 +364,10 @@ class LaserControlLogic(LogicBase):
 
     def stop_laser_output(self):
         """ Allows to stop the laser output programmatically, for example in the preparation steps of a task.
-        Emits a signal to reset the state of the GUI buttons / controls. """
-        if self.enabled:
-            self.voltage_off()
+        Emits a signal to reset the state of the GUI buttons / controls. Does nothing if the lasers are already
+        off. """
+        if self.laser_enabled:
+            self.set_laser_disabled()
             self.sigLaserStopped.emit()
 
     def disable_laser_actions(self):

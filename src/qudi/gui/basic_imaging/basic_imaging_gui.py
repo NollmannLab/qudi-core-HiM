@@ -738,7 +738,7 @@ class BasicImagingGUI(GuiBase):
 
         # toolbar actions
         self._mw.laser_on_Action.setEnabled(True)
-        self._mw.laser_on_Action.setChecked(self._laser_logic.enabled)
+        self._mw.laser_on_Action.setChecked(self._laser_logic.laser_enabled)
         self._mw.laser_on_Action.triggered.connect(self.laser_on_clicked)
 
         self._mw.laser_zero_Action.setEnabled(True)

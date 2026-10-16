@@ -505,6 +505,33 @@ Last updated: 2026-10-14
   validator. The same test on the previous GUI fails 9 checks (lasers left
   on at close, intensity truncated).
 
+### Lasers
+
+#### Fixed
+
+- `LaserControlLogic.stop_laser_output()` (2026-10-16) never switched the
+  lasers off: it tested `self.enabled` (set to `False` in `on_activate()`
+  and never updated; the state is `_enabled`, exposed by `laser_enabled`)
+  and called `self.voltage_off()`, which does not exist. It now calls
+  `set_laser_disabled()` and emits `sigLaserStopped` when `laser_enabled` is
+  `True`, and does nothing when the lasers are already off. The stale
+  `self.enabled` attribute is removed.
+- `BasicImagingGUI`: the laser button state at start-up reads
+  `laser_logic.laser_enabled` (was the stale `enabled`, so the button stayed
+  unchecked when the lasers were already on).
+- Remaining uses, in tasks not migrated yet and left unchanged:
+  `tasks/legacy/HiM_imaging_SD.py` calls `voltage_off()` (line 700);
+  `tasks/legacy/HiM_imaging_RAMM.py`, `HiM_imaging_SD.py` and
+  `ROI_multicolour_imaging_RAMM.py` call `stop_laser_output()` (now working).
+- Verified offscreen with `qudi-core==1.7.0` and 1.8.0 (11/11 checks, real
+  `LaserControlLogic` and `BasicImagingGUI`, fake laser hardware): lasers on
+  -> `stop_laser_output()` -> `laser_enabled` `False`, `disable_all_lines`
+  called once, `sigLaserStopped` emitted once; lasers off -> no hardware
+  call, no signal; the GUI opens with the laser button matching
+  `laser_enabled` (off and on) and resets it on `sigLaserStopped`. The same
+  test on the previous code fails 6 checks. Bright-field GUI test
+  unchanged (43/43).
+
 ### Fluidics
 
 #### Added
