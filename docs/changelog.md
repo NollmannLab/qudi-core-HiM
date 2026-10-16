@@ -1431,6 +1431,26 @@ Last updated: 2026-10-16
     passes on both versions, `Spinning_disk_config.cfg` on 1.8.0 (it
     already failed on 1.7.0 before this change - `trigger_logic`).
 
+#### Fixed
+
+- `tasks/roi_multicolour_scan.py` resume (2026-10-16): after a resume the
+  file names written to `movie_name.txt` were `scan_None_002_ROI` instead of
+  `scan_001_002_ROI` - the folder number (`prefix`) is only set when a new
+  data folder is created. It is now read back from the checkpoint's data folder
+  name (`NNN_Scan_...`). The same bug existed in
+  `tasks/roi_multicolour_scan_sd.py`. Also, a checkpoint whose data folder no
+  longer exists is not resumed (warning, run from scratch) instead of failing
+  after the first ROI is imaged.
+- `tasks/roi_multicolour_scan.py` cleanup (2026-10-16): `_cleanup()` raised
+  an `AttributeError` when `_setup()` stopped while fetching a connector (the
+  attributes it reads were set after the connectors). The attributes are now
+  set first, and the cleanup only restores the hardware once `_run()` has
+  started changing it (`_hardware_touched`, as in the photobleaching task). A
+  run stopped before that (missing `user_config_path`, unreadable experiment
+  file, bad ROI list) no longer moves the stage to the first ROI or touches the
+  lasers / ROI GUI in the cleanup. The same bug existed in
+  `tasks/roi_multicolour_scan_sd.py`.
+
 ### Experiment configurator
 
 #### Added

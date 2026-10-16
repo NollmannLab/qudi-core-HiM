@@ -85,10 +85,11 @@ class RoiScanTaskBase(ModuleTask):
     user_config_path = None  # set by the config: options: user_config_path: ...
 
     def _setup(self) -> None:
-        self._roi_logic = self.roi_logic()
-        self._trigger_logic = self.trigger_logic()
-        self._laser_logic = self.laser_logic()
-
+        # attributes used by _cleanup(): set first, so that _cleanup() also works if fetching a
+        # connector below fails
+        self._roi_logic = None
+        self._trigger_logic = None
+        self._laser_logic = None
         self.sample_name = None
         self.is_dapi = False
         self.is_rna = False
@@ -100,6 +101,11 @@ class RoiScanTaskBase(ModuleTask):
         self._imaged_rois = set()
         self.imaging_sequence = None
         self._prev_stage_velocity = None  # stage velocity read before the scan, restored by _cleanup
+        self._hardware_touched = False  # True once _run() has started changing the hardware state
+
+        self._roi_logic = self.roi_logic()
+        self._trigger_logic = self.trigger_logic()
+        self._laser_logic = self.laser_logic()
 
     # ======================================================================================
     # Imaging hooks - implemented by the imaging mixin of each setup
@@ -138,13 +144,21 @@ class RoiScanTaskBase(ModuleTask):
             and checkpoint.get('sample_name') == self.sample_name
             and checkpoint.get('roi_list_path') == self.roi_list_path
         )
-        if resume_from_roi and not checkpoint_is_usable:
+        data_folder_missing = checkpoint_is_usable and not os.path.isdir(str(checkpoint.get('directory')))
+        if data_folder_missing:
+            self.log.warning(f'The data folder of the checkpoint ({checkpoint.get("directory")}) does not '
+                             f'exist any more - starting from scratch.')
+            checkpoint_is_usable = False
+        elif resume_from_roi and not checkpoint_is_usable:
             self.log.warning('resume=True was requested but no matching, unfinished checkpoint was '
                              'found for this sample/ROI list - starting from scratch.')
 
         if checkpoint_is_usable:
             self._imaged_rois = set(checkpoint.get('imaged_rois', []))
             self.directory = checkpoint['directory']
+            # the file names use the number of the data folder (NNN_Scan_...), normally set by
+            # _create_directory, which is not called when resuming
+            self.prefix = os.path.basename(os.path.normpath(self.directory))[:3]
             self.log.info(f'Resuming previous run in {self.directory}: {len(self._imaged_rois)} of '
                           f'{len(self.roi_names)} ROI(s) already confirmed done by ZEN.')
         else:
@@ -154,6 +168,7 @@ class RoiScanTaskBase(ModuleTask):
         # 3. lasers off, ROI tracking and ROI actions locked, scan stage velocity (restored in
         #    _cleanup)
         self._check_interrupt()
+        self._hardware_touched = True
         self._laser_logic.set_laser_disabled()
         self._roi_logic.disable_tracking_mode()
         self._roi_logic.disable_roi_actions()
@@ -193,6 +208,10 @@ class RoiScanTaskBase(ModuleTask):
         """Return hardware to a safe idle state. Called unconditionally by the ModuleTask base class
         whether _run() finished normally, raised, or was interrupted. Never raises.
         """
+        if not getattr(self, '_hardware_touched', False):
+            self.log.info('cleanup: no hardware was touched, nothing to restore')
+            return
+
         self.log.info('cleanup running - restoring hardware to a safe idle state')
 
         # back to the first ROI
