@@ -34,14 +34,15 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
+import math
 import yaml
 from time import monotonic, sleep
 
-from qudi.core.scripting.moduletask import ModuleTask
 from qudi.core.connector import Connector
+from qudi.tasks.common.progress import ProgressModuleTask
 
 
-class PhotoBleachingBase(ModuleTask):
+class PhotoBleachingBase(ProgressModuleTask):
     """Shared photobleaching code: scan a list of ROIs and illuminate each one for a fixed time.
 
     Not meant to be configured directly - use a setup subclass (PhotoBleachingSDTask,
@@ -58,6 +59,10 @@ class PhotoBleachingBase(ModuleTask):
         roi_list_path: 'pathstem/qudi_roi_lists/roilist_20260101.json'
         imaging_sequence: [[561, 50.0], [640, 80.0]]   # [wavelength (nm), intensity (%)]
         illumination_time: 30.0                        # SECONDS, per ROI
+
+    Progress (Task Runner window), with i the ROI index and N the number of ROIs: "ROI i/N - moving
+    to <roi>", "ROI i/N - illuminating <T> s", then the seconds left of the illumination (at most
+    one update per progress_interval_s), and "Done" after the last ROI.
 
     Interrupt: the illumination wait checks for an interrupt at least every 0.1 s. After an
     interrupt (or any error) the base class runs _cleanup(), which switches the lasers off and puts
@@ -113,12 +118,15 @@ class PhotoBleachingBase(ModuleTask):
         # launch the photobleaching, one ROI at a time
         self.log.info(f'{len(self.roi_names)} ROI(s) to photobleach, '
                       f'{self.illumination_time:g} s each.')
-        for roi_name in self.roi_names:
+        total = len(self.roi_names)
+        for index, roi_name in enumerate(self.roi_names, 1):
+            label = f'{index}/{total}'
             self._check_interrupt()
-            self._move_to_roi(roi_name)
-            self._illuminate_roi()
+            self._move_to_roi(roi_name, label)
+            self._illuminate_roi(label)
             self._photobleached_rois.append(roi_name)
 
+        self._report_progress(f'{total}/{total}', 'Done')
         return {'photobleached_rois': list(self._photobleached_rois)}
 
     def _cleanup(self) -> None:
@@ -163,24 +171,34 @@ class PhotoBleachingBase(ModuleTask):
     # Per-ROI steps
     # ======================================================================================
 
-    def _move_to_roi(self, roi_name: str) -> None:
-        """Move the stage to one ROI and wait until it has arrived."""
+    def _move_to_roi(self, roi_name: str, label: str = '') -> None:
+        """Move the stage to one ROI and wait until it has arrived. label: ROI index 'i/N' for the
+        progress display (the "Moving to <roi>" line is the log of this step)."""
         self.log.info(f'Moving to {roi_name}')
+        self._report_progress(label, f'ROI {label} - moving to {roi_name}', log=False)
         self._roi_logic.set_active_roi(name=roi_name)
         self._roi_logic.go_to_roi_xy()
         self._roi_logic.stage_wait_for_idle()
         self._check_interrupt()
 
-    def _illuminate_roi(self) -> None:
+    def _illuminate_roi(self, label: str = '') -> None:
         """Switch all the laser lines on, wait illumination_time seconds, switch them off. If the
         task is interrupted during the wait, the lasers are switched off by _cleanup().
+        label: ROI index 'i/N' for the progress display (seconds left reported during the wait).
         """
         self._laser_logic.set_laser_enabled()
-        self._interruptible_wait(self.illumination_time)
+        self._report_progress(label, f'ROI {label} - illuminating {self.illumination_time:g} s')
+
+        def time_left(remaining_s):
+            self._report_live(label, f'ROI {label} - {math.ceil(remaining_s)} s left')
+
+        self._interruptible_wait(self.illumination_time, on_wait=time_left)
         self._laser_logic.set_laser_disabled()
 
-    def _interruptible_wait(self, duration_s: float) -> None:
-        """Wait duration_s seconds, checking for an interrupt at least every 0.1 s."""
+    def _interruptible_wait(self, duration_s: float, on_wait=None) -> None:
+        """Wait duration_s seconds, checking for an interrupt at least every 0.1 s.
+        on_wait: optional callable, called with the seconds left before each sleep (e.g. to report
+        the progress); without it the wait only sleeps."""
         step_s = min(float(self.poll_interval_s), self._MAX_WAIT_STEP_S)
         deadline = monotonic() + float(duration_s)
         while True:
@@ -188,6 +206,8 @@ class PhotoBleachingBase(ModuleTask):
             remaining_s = deadline - monotonic()
             if remaining_s <= 0:
                 return
+            if on_wait is not None:
+                on_wait(remaining_s)
             sleep(min(step_s, remaining_s))
 
     # ======================================================================================
