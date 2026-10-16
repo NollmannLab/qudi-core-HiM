@@ -98,9 +98,9 @@ class MS2000(MultiAxisStageInterface, BrightfieldInterface):
                     self.axis_list.append(axis)
                     self.max_velocity_list.append(max_vel)
 
-            # if the z axis is available, define the default speed for this axis
+            # if the z axis is available, set its speed to the configured maximum
             if self._third_axis_label:
-                self.set_velocity({self._third_axis_label: 1900.0})
+                self.set_velocity({self._third_axis_label: self._third_axis_max_velocity})
 
             # if the stage is also controlling the bright-field, initiate the mode to "Internal"
             if self._has_led:
