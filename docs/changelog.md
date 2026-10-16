@@ -1268,37 +1268,6 @@ Last updated: 2026-10-14
 
 #### Changed
 
-- `tasks/photobleaching.py` (2026-10-16): the photobleaching task reports its
-  progress in the Task Runner window, using the mechanism of the fluidics
-  task (`tasks/common/progress.py`). Hardware calls, their order and timing
-  are unchanged.
-  - `PhotoBleachingBase` derives from `ProgressModuleTask` instead of
-    `ModuleTask`; the subclasses (`PhotoBleachingSDTask`,
-    `PhotoBleachingRAMMTask`) are unchanged, including the start / end
-    warnings. `progress_interval_s` (1.0) is a new task-runner option,
-    inherited from `ProgressModuleTask`.
-  - Progress, with N ROIs and i the ROI index (1-based):
-    - `i/N - ROI i/N - moving to <roi>` before the move. Not logged: the
-      existing "Moving to <roi>" line stays the log of this step.
-    - `i/N - ROI i/N - illuminating <T> s` once the lasers are on (logged).
-    - `i/N - ROI i/N - <s> s left` during the illumination: seconds rounded
-      up, at most one update per second.
-    - `N/N - Done` after the last ROI (logged).
-  - `_move_to_roi(roi_name, label='')` and `_illuminate_roi(label='')` take
-    the ROI index label. `_interruptible_wait(duration_s, on_wait=None)` still
-    checks for an interrupt every 0.1 s and, if given, calls `on_wait(seconds
-    left)` before each sleep; without it, it only waits as before.
-  - Test (offscreen, `dummy_config.cfg` entry `photobleaching_sd_dummy`;
-    qudi-core 1.7.0 and 1.8.0): 19/19.
-    - Same hardware calls, arguments, order and illumination times as the
-      previous file, for a normal run (30 calls) and an interrupt during
-      ROI 2 (24 calls).
-    - In the Task Runner window (real `TaskRunnerLogic` and `TaskRunnerGui`,
-      Run button), the line showed the move and the illumination of each
-      ROI, then "ROI i/3 - 4/3/2/1 s left" one second apart.
-    - The line was cleared after the end, an interrupt and an error.
-    - The start confirmation (modal) and the end reminder (non-modal) of
-      the SD task appeared as before.
 - `tasks/psf_stack_opm.py`, `tasks/roi_multicolour_scan_sd.py` (2026-10-14):
   scan stage speed, camera from the experiment configurator, snap check.
   - Stage speed: `scan_stage_velocity` is a class attribute (PSF:
@@ -1322,6 +1291,51 @@ Last updated: 2026-10-14
     "previous image" comparison); a missing frame stops the task.
   - PSF metadata: Acquisition `selected_camera` (template key) and PSF
     `z_scan_velocity_(µm/s)`. Unused `from time import sleep` removed.
+
+- `tasks/roi_multicolour_scan.py` (2026-10-16): **start ROI instead of
+  checkpoint / resume**. The imaging mixins (`SDImagingMixin`, ...) and the
+  rest of the task are unchanged.
+  - `_run(self, start_roi: str = '')` replaces `_run(self, resume_from_roi:
+    bool = False)`; the Task Runner shows a `start_roi` text field.
+    - `''` starts at the first ROI. Otherwise `start_roi` is a ROI name of
+      the loaded list (e.g. `ROI_005`) or a 1-based position (e.g. `5`);
+      spaces are stripped.
+    - It is checked by `_start_index()` right after the ROI list is loaded,
+      before any hardware call. An invalid value raises `ValueError` with
+      the valid range and the first / last ROI names, e.g. "start_roi '99'
+      is not valid: expected a ROI name of the list or a position from 1 to
+      5 (first ROI ROI_000, last ROI ROI_004)".
+    - The scan runs from that ROI to the end of the list, in list order.
+  - Removed: `_checkpoint_path`, `_load_checkpoint`, `_save_checkpoint`,
+    `_imaged_rois`, the `<sample_name>_roi_scan_checkpoint.yaml` file, every
+    resume log message and the resume docstring paragraphs.
+    - Each run creates a new data folder (`_create_directory`).
+    - The summary keeps `imaged_rois`: the ROIs actually scanned, in list
+      order (previously sorted).
+  - Log at the start: "Scanning ROIs <first> to <last> (<n> of <N>)".
+    - `RoiScanSDTask._prepare_imaging()` logs "ZEN: set the number of
+      acquisition loops to <n>" (n = ROIs scanned in this run), then runs
+      `SDImagingMixin._prepare_imaging()` unchanged, which waits for ZEN
+      "ready".
+  - `parameters.yml`: `start_roi` (as given, stripped) and the positions of
+    the ROIs scanned in this run only.
+  - Module / class docstrings updated; the config examples had no resume
+    option.
+  - Test (offscreen; qudi-core 1.7.0 and 1.8.0): 22/22.
+    - `RoiScanDummyTask` from the `dummy_config.cfg` entry, with the real
+      `roi_logic` / `laser_control_logic` and a 5-ROI list:
+      - `''` scans all 5 ROIs.
+      - `'ROI_002'` and `' 3 '` scan the 3rd to the 5th ROI into a new folder,
+        with the start log and metadata as above.
+      - `'0'`, `'99'`, `'ROI_999'`, `'-1'` and `'2.5'` raise before any stage
+        move, folder or hardware call.
+      - An interrupt during ROI 4 (start `'2'`) runs the cleanup: stage back
+        to the first ROI of the list, stage velocity restored.
+    - `RoiScanSDTask` with a fake `TriggerLogic`: the ZEN loop count (3 for
+      `''`, 2 for `'ROI_002'`) is logged before the ZEN-ready wait.
+    - With `start_roi=''`, the roi / laser calls are identical, in the same
+      order, to the previous file with `resume_from_roi=False`: a full run
+      (23 calls) and an interrupt (20 calls).
 
 - `tasks/psf_stack_opm.py` (2026-10-13): **timing instrumentation removed from
   the PSF task** (diagnosis done; the stage wait was fixed in the Tiger

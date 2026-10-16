@@ -4,7 +4,7 @@ qudi-core-HiM task: scan a list of ROIs - move the stage to each ROI in turn and
 
 Structure - one file for all setups:
   - RoiScanTaskBase: everything that does not depend on the microscope (parameters, stage moves,
-    data folder, metadata, checkpoint / resume, cleanup).
+    data folder, metadata, start ROI, cleanup).
   - RoiScanSDTask / RoiScanRAMMTask / RoiScanDummyTask: one subclass per setup. The imaging done at
     each ROI comes from the per-microscope mixins of tasks/common/imaging_steps.py (SDImagingMixin,
     RAMMImagingMixin, DummyImagingMixin), shared with the Hi-M task.
@@ -19,15 +19,14 @@ previous single-setup version of the spinning-disk task.
 Interruption is exception-based (self._check_interrupt() raises ModuleScriptInterrupted); _cleanup()
 is called by the ModuleTask base class whenever _run() finishes, raises or is interrupted.
 
-Resume: progress is checkpointed to a YAML file in save_path after every ROI. A launch with
-resume_from_roi=True skips the ROIs already done in a matching, unfinished previous run and
-continues in the same data folder. A ROI only counts as done once its imaging has finished; a ROI
-interrupted mid-way is redone in full.
+Start ROI: the task's call parameter start_roi (Task Runner) selects the first ROI to scan - a ROI
+name of the list or a 1-based position, empty for the first ROI. The scan runs from there to the end
+of the list, in list order, into a new data folder.
 
 Modified with Claude code (Anthropic)
 
 -----------------------------------------------------------------------------------
-Portions of the docstrings and of the file-path / metadata / checkpoint structure are adapted from
+Portions of the docstrings and of the file-path / metadata structure are adapted from
 tasks/ROI_multicolour_imaging_SD.py (Copyright (c) the Qudi Developers, GNU GPLv3) and from
 qudi-core's qudi.tasks.dummy_fluidics_task (Copyright (c) 2021, the qudi developers, GNU LGPLv3).
 
@@ -66,12 +65,15 @@ class RoiScanTaskBase(ModuleTask):
         roi_list_path: 'pathstem/qudi_roi_lists/roilist_20260101.json'
         imaging_sequence: [[488, 50.0], [561, 80.0]]   # [wavelength (nm), intensity (%)]
 
-    Data: save_path/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA]/ with parameters.yml (sample name and
-    ROI positions) and movie_name.txt (one file name per imaged ROI).
+    Call parameter (Task Runner):
+        start_roi   first ROI to scan: a ROI name of the loaded list (e.g. 'ROI_005') or a 1-based
+                    position in the list (e.g. '5'); empty = first ROI. Checked right after loading
+                    the ROI list, before any hardware call. The scan runs from that ROI to the end
+                    of the list, in list order.
 
-    Resume: run with resume_from_roi=True. If a checkpoint of a matching, unfinished previous run is
-    found (same sample name and ROI list), the ROIs already done are skipped and the run continues
-    in the same data folder; otherwise the run starts from scratch.
+    Data: each run creates save_path/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA]/ with parameters.yml
+    (sample name, start_roi and the positions of the ROIs scanned in this run) and movie_name.txt
+    (one file name per imaged ROI).
 
     During the run the lasers are off (unless the imaging switches them), ROI tracking and ROI
     actions are locked and the stage moves at scan_stage_velocity. _cleanup() moves the stage back
@@ -98,7 +100,9 @@ class RoiScanTaskBase(ModuleTask):
         self.roi_names = []
         self.prefix = None
         self.directory = None
-        self._imaged_rois = set()
+        self.start_roi = ''
+        self._scan_rois = []      # ROIs to scan in this run, in list order
+        self._scanned_rois = []   # ROIs whose imaging has finished, for the summary
         self.imaging_sequence = None
         self._prev_stage_velocity = None  # stage velocity read before the scan, restored by _cleanup
         self._hardware_touched = False  # True once _run() has started changing the hardware state
@@ -124,46 +128,26 @@ class RoiScanTaskBase(ModuleTask):
     # Main entry point
     # ======================================================================================
 
-    def _run(self, resume_from_roi: bool = False) -> dict:
-        """Run the scan. Pass resume_from_roi=True to continue a previous, interrupted run on the
-        same sample and ROI list (see class docstring).
+    def _run(self, start_roi: str = '') -> dict:
+        """Run the scan from start_roi (ROI name or 1-based position, empty = first ROI) to the end
+        of the list (see class docstring).
         """
         # 1. refuse to run, before touching any hardware, if the config gave no YAML path; load the
-        #    user parameters
+        #    user parameters and the ROI list
         if self.user_config_path in (None, '', 'TO FILL'):
             raise RuntimeError(f'user_config_path not set for task {type(self).__name__} — add '
                                f'`options: user_config_path: ...` to this task\'s entry in the '
                                f'config file')
         self._load_user_parameters()
 
-        # 2. checkpoint, in case the program crashed or the run was interrupted
-        checkpoint = self._load_checkpoint() if resume_from_roi else None
-        checkpoint_is_usable = (
-            checkpoint is not None
-            and not checkpoint.get('completed', True)
-            and checkpoint.get('sample_name') == self.sample_name
-            and checkpoint.get('roi_list_path') == self.roi_list_path
-        )
-        data_folder_missing = checkpoint_is_usable and not os.path.isdir(str(checkpoint.get('directory')))
-        if data_folder_missing:
-            self.log.warning(f'The data folder of the checkpoint ({checkpoint.get("directory")}) does not '
-                             f'exist any more - starting from scratch.')
-            checkpoint_is_usable = False
-        elif resume_from_roi and not checkpoint_is_usable:
-            self.log.warning('resume_from_roi=True was requested but no matching, unfinished checkpoint '
-                             'was found for this sample/ROI list - starting from scratch.')
-
-        if checkpoint_is_usable:
-            self._imaged_rois = set(checkpoint.get('imaged_rois', []))
-            self.directory = checkpoint['directory']
-            # the file names use the number of the data folder (NNN_Scan_...), normally set by
-            # _create_directory, which is not called when resuming
-            self.prefix = os.path.basename(os.path.normpath(self.directory))[:3]
-            self.log.info(f'Resuming previous run in {self.directory}: {len(self._imaged_rois)} of '
-                          f'{len(self.roi_names)} ROI(s) already done.')
+        # 2. ROIs of this run, from start_roi to the end of the list - checked before any hardware call
+        self.start_roi = str(start_roi if start_roi is not None else '').strip()
+        self._scan_rois = self.roi_names[self._start_index(self.start_roi):]
+        if self._scan_rois:
+            self.log.info(f'Scanning ROIs {self._scan_rois[0]} to {self._scan_rois[-1]} '
+                          f'({len(self._scan_rois)} of {len(self.roi_names)})')
         else:
-            self._imaged_rois = set()
-            self.directory = None
+            self.log.info('The ROI list is empty - no ROI to scan.')
 
         # 3. lasers off, ROI tracking and ROI actions locked, scan stage velocity (restored in
         #    _cleanup)
@@ -180,29 +164,37 @@ class RoiScanTaskBase(ModuleTask):
         # 4. setup-specific preparation of the imaging
         self._prepare_imaging()
 
-        # 5. data folder, metadata and first checkpoint (new run only) - an interrupt before the
-        #    first ROI is done is then still resumable
-        if self.directory is None:
-            self.directory = self._create_directory(self.save_path)
-            self._save_metadata_file()
-            self._save_checkpoint()
+        # 5. new data folder and metadata
+        self.directory = self._create_directory(self.save_path)
+        self._save_metadata_file()
 
-        remaining = [name for name in self.roi_names if name not in self._imaged_rois]
-        self.log.info(f'{len(remaining)} of {len(self.roi_names)} ROI(s) remaining.')
-
-        # 6. ROI loop: move, image, checkpoint
-        for roi_name in remaining:
+        # 6. ROI loop: move, image
+        for roi_name in self._scan_rois:
             self._check_interrupt()
             self._move_to_roi(roi_name)
             self._image_roi(roi_name, self._file_name(roi_name))
-            self._imaged_rois.add(roi_name)
-            self._save_checkpoint()
+            self._scanned_rois.append(roi_name)
 
-        # 7. final checkpoint and summary
+        # 7. summary
         self.log.info('All ROIs done.')
-        self._save_checkpoint(completed=True)
+        return {'directory': self.directory, 'imaged_rois': list(self._scanned_rois)}
 
-        return {'directory': self.directory, 'imaged_rois': sorted(self._imaged_rois)}
+    def _start_index(self, start_roi: str) -> int:
+        """Index in self.roi_names of the first ROI to scan. start_roi: '' (first ROI), a ROI name of
+        the list or a 1-based position. Raises with the valid range if start_roi matches neither."""
+        if start_roi == '':
+            return 0
+        if start_roi in self.roi_names:
+            return self.roi_names.index(start_roi)
+        if start_roi.isdigit() and 1 <= int(start_roi) <= len(self.roi_names):
+            return int(start_roi) - 1
+        if self.roi_names:
+            valid = (f'a ROI name of the list or a position from 1 to {len(self.roi_names)} '
+                     f'(first ROI {self.roi_names[0]}, last ROI {self.roi_names[-1]})')
+        else:
+            valid = 'nothing - the ROI list is empty; leave start_roi empty'
+        raise ValueError(f'start_roi {start_roi!r} is not valid: expected {valid}. ROI list: '
+                         f'{self.roi_list_path}')
 
     def _cleanup(self) -> None:
         """Return hardware to a safe idle state. Called unconditionally by the ModuleTask base class
@@ -257,43 +249,6 @@ class RoiScanTaskBase(ModuleTask):
         self._roi_logic.go_to_roi_xy()
         self._roi_logic.stage_wait_for_idle()
         self._check_interrupt()
-
-    # ======================================================================================
-    # Checkpoint / resume
-    # ======================================================================================
-
-    def _checkpoint_path(self) -> str:
-        """Stable path (independent of the per-run dated/incrementing output directory) so a
-        resume launch can find it before any new directory is created. A regular, visible file in
-        save_path.
-        """
-        return os.path.join(self.save_path, f'{self.sample_name}_roi_scan_checkpoint.yaml')
-
-    def _load_checkpoint(self):
-        path = self._checkpoint_path()
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path, 'r') as f:
-                return yaml.safe_load(f)
-        except Exception as e:
-            self.log.warning(f'Could not read checkpoint file {path}: {e}')
-            return None
-
-    def _save_checkpoint(self, completed: bool = False) -> None:
-        path = self._checkpoint_path()
-        data = {
-            'sample_name': self.sample_name,
-            'roi_list_path': self.roi_list_path,
-            'directory': self.directory,
-            'imaged_rois': sorted(self._imaged_rois),
-            'completed': completed,
-        }
-        try:
-            with open(path, 'w') as f:
-                yaml.safe_dump(data, f, default_flow_style=False)
-        except Exception as e:
-            self.log.warning(f'Could not write checkpoint file {path}: {e}')
 
     # ======================================================================================
     # User parameters
@@ -367,11 +322,11 @@ class RoiScanTaskBase(ModuleTask):
     # ======================================================================================
 
     def _save_metadata_file(self) -> None:
-        """Write a small sidecar file with the sample name and each ROI's stage position (purely
-        descriptive, not used by the task).
+        """Write a small sidecar file with the sample name, start_roi and the stage position of each
+        ROI scanned in this run (purely descriptive, not used by the task).
         """
-        metadata = {'Sample name': self.sample_name}
-        for roi in self.roi_names:
+        metadata = {'Sample name': self.sample_name, 'start_roi': self.start_roi}
+        for roi in self._scan_rois:
             pos = self._roi_logic.get_roi_position(roi)
             metadata[roi] = f'X = {pos[0]} - Y = {pos[1]}'
 
@@ -384,6 +339,8 @@ class RoiScanTaskBase(ModuleTask):
 class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     """ROI scan on the spinning disk: one ZEN autofocus block and one ZEN acquisition block per ROI,
     synchronized over DAQ triggers (see SDImagingMixin). trigger_logic is required on this setup.
+    Before waiting for ZEN "ready", the log gives the number of acquisition loops to set in ZEN:
+    the number of ROIs scanned in this run (from start_roi to the end of the list).
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -400,6 +357,12 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     """
 
     trigger_logic = Connector(interface='TriggerLogic')
+
+    def _prepare_imaging(self) -> None:
+        """Log the number of ROIs of this run (the number of acquisition loops to set in ZEN), then
+        the SD imaging preparation (SDImagingMixin), which waits for ZEN "ready"."""
+        self.log.info(f'ZEN: set the number of acquisition loops to {len(self._scan_rois)}')
+        super()._prepare_imaging()
 
 
 class RoiScanRAMMTask(RAMMImagingMixin, RoiScanTaskBase):
