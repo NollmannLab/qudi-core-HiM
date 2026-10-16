@@ -761,6 +761,39 @@ Last updated: 2026-10-14
   Missing options, experiment file or injections file, refused valve
   position and injection timeout each stop the task with a clear message.
 
+#### Changed
+
+- Fluidics steps moved to a shared helper (2026-10-16), so that the Hi-M task
+  can use the same code. Pure refactor: the fluidics task behaves as before.
+  - New `tasks/common/fluidics_steps.py` (+ empty `tasks/common/__init__.py`):
+    `FluidicsStepsMixin` with the valve-layout and timing class attributes,
+    the injections-file reading and validation (`_read_yaml`,
+    `_read_injections`, `_validate`, `_check_valve_positions`, `_is_number`)
+    and the step methods (`_inject`, `_incubate`, `_move_needle`,
+    `_set_valves`, `_set_valve`, `_interruptible_sleep`, `_describe`). No
+    connector, no `_setup` / `_run` / `_cleanup`; it uses `self._valve`,
+    `self._flow`, `self._robot` and the step state (`_needle_mode`,
+    `_tubes_used`, `_arrival_slot`, `_needle_arrived_at`) set by the task.
+  - Moved unchanged (identical AST), except: `_read_injections(path,
+    list_key='hybridization list')` and `_validate(...,
+    list_name='hybridization list')` take the list to read / name in the
+    messages, so a caller can also use 'photobleaching list'; the defaults
+    give the previous behaviour and messages.
+  - `fluidics.py`: `FluidicsTaskBase(FluidicsStepsMixin, ModuleTask)` keeps
+    the connectors, the options, `_setup` / `_run` / `_cleanup`, the option
+    checks (`_check_options`, `_read_injections_path`) and `_log_plan`;
+    subclasses unchanged. Task-runner options, attribute values and
+    connectors of the four classes identical before / after.
+- Verified on `qudi-core==1.7.0` and 1.8.0 with the `fluidics_dummy` task
+  built from `dummy_config.cfg` (modes `'next'` and `'same'`, interrupt
+  during the second injection), recorded before and after the change: the
+  logic calls of the task (valve, flow, robot; 50 / 46 / 30), the valve and
+  stage hardware commands (21 / 16 / 12), the task log lines (18 / 17 / 12),
+  results, errors and end states are identical; the only differences are
+  the measured volumes and durations in "µl injected" lines (flow-sensor
+  noise and timing, which also differ between two runs of the same code).
+  The fluidics task test passes 60/60 on both versions.
+
 ### Task runner
 
 #### Added
