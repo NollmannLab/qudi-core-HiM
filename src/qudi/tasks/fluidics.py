@@ -98,6 +98,12 @@ class FluidicsTaskBase(FluidicsStepsMixin, ModuleTask):
         # 2. injections file
         buffer_valves, probes, hybridization_list, needle_mode = self._read_injections(injections_path)
 
+        # needle position (robot origin) needed for the probe injections: warning + message box, task stopped
+        # without any hardware call
+        if self._needle_position_missing(buffer_valves, hybridization_list, probe_valve):
+            self._warn_needle_position()
+            return {'aborted': 'needle position not initialised', 'steps_done': 0}
+
         # 3. validation, no hardware call - all problems in one error
         self._steps = self._validate(buffer_valves, probes, hybridization_list, needle_mode, probe_valve)
         self._needle_mode = needle_mode

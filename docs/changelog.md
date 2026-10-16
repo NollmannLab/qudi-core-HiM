@@ -793,6 +793,29 @@ Last updated: 2026-10-14
   the measured volumes and durations in "µl injected" lines (flow-sensor
   noise and timing, which also differ between two runs of the same code).
   The fluidics task test passes 60/60 on both versions.
+- Needle position not defined (2026-10-16): when the sequence injects from
+  the probe valve and the robot origin (needle position 1) is not set, the
+  task no longer stops with a validation error. It logs a warning and shows a
+  non-modal warning box: "The needle position needs to be initialised first.
+  Please do it in the Fluidics GUI ("Set position 1"). The task is aborted for
+  now." It then ends without an exception and before any hardware call or
+  GUI lock (result `{'aborted': 'needle position not initialised',
+  'steps_done': 0}`).
+  - `fluidics_steps.py`: `_needle_position_missing(buffer_valves, step_list,
+    probe_valve)`, `_warn_needle_position()`, and the private constant
+    `_NEEDLE_POSITION_MESSAGE` (not a task-runner option). The module function
+    `show_warning_popup(title, text)` shows the box in the GUI thread, through
+    a QObject living in the application thread and a queued signal, so it can
+    be called from the task thread. It returns False and shows nothing when
+    there is no QApplication. The box is kept referenced until it is closed.
+  - `fluidics.py` `_run`: the check runs after reading the injections file,
+    before `_validate`. The origin line in `_validate` stays as a fallback.
+    Sequences without a probe injection still run without an origin.
+  - Test (1.7.0 and 1.8.0): fluidics task test 68/68. The former "unknown
+    product + missing origin" case now runs with the origin set (3 problems).
+    New checks cover the warning log, the absence of an error log, no logic
+    call, one non-modal box created in the GUI thread, the GUIs left enabled,
+    and a buffers-only run without origin.
 
 ### Task runner
 
