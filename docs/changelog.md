@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-16
+Last updated: 2026-10-14
 
 ### Documentation
 
@@ -821,6 +821,74 @@ Last updated: 2026-10-16
 
 #### Added
 
+- Task progress in the Task Runner window (2026-10-16): under each running
+  task, a line shows what the task is doing now, e.g. "2/5 - Injecting WB -
+  120/200 µl" or "3/5 - Incubating - 4:30 left". Only tasks deriving from
+  `ProgressModuleTask` report progress; the other tasks behave and display
+  as before.
+  - New `tasks/common/progress.py`: `ProgressModuleTask(ModuleTask)` with
+    `sigProgress(step, text)` and `progress_interval_s = 1.0` (a task-runner
+    option, like any public class attribute).
+    - `_report_progress(step, text, log=True)` emits now and logs
+      "<step> - <text>". Pass `log=False` when the caller already logs the
+      same information.
+    - `_report_live(step, text)` emits at most once every
+      `progress_interval_s` and logs nothing; an update that comes too early
+      is dropped, not queued.
+    - The only value kept is the time of the last emission.
+  - `logic/taskrunner_logic.py`: `sigTaskProgress(name, step, text)`.
+    - A task that has `sigProgress` gets it connected (queued) to a callback
+      that emits `sigTaskProgress`. It is disconnected with `sigFinished` /
+      `sigStateChanged` when the task finishes.
+    - Tasks without `sigProgress` are unchanged.
+  - `gui/task_runner/task_runner_gui.py`:
+    - `sigTaskProgress` is connected (queued) to `TaskMainWindow.task_progress`.
+    - It is disconnected in `on_deactivate` with the other signals.
+  - `gui/task_runner/main_window.py`: `task_progress(name, step, text)`
+    forwards to the task's widget (unknown names ignored).
+  - `gui/task_runner/taskwidget.py`: a progress line under the existing
+    controls.
+    - `_ElidedLabel`: small font (0.85 ×), single line. Long text is elided
+      on the right (`QFontMetrics.elidedText`, re-elided on resize), with the
+      full text as tooltip; the label never widens the window.
+    - Hidden while empty, so idle tasks keep the previous compact layout:
+      the widget size hint is identical to before.
+    - Cleared and hidden in `task_started` and `task_finished`, so also after
+      an interrupt or an error.
+  - Fluidics task: `FluidicsTaskBase(FluidicsStepsMixin, ProgressModuleTask)`
+    reports:
+    - `0/N - Moving the needle to tube t` before the first tube.
+    - At the start of each step, `i/N - Injecting <product>` or
+      `i/N - Incubating <time> s`. Not logged: the existing
+      "Step i/N: ..." line is the step's log line.
+    - Live in the injection wait, `i/N - Injecting <product> - <injected>/<target> µl`
+      (`flow_logic.total_volume`, rounded to 1 µl).
+    - Live in the incubation wait, `i/N - Incubating - m:ss left`.
+    - `i/N - Moving the needle to tube t` for a needle move during the
+      sequence.
+    - `N/N - Done` before the summary.
+  - `FluidicsStepsMixin` (`fluidics_steps.py`):
+    - `_inject(..., label='')`, `_incubate(step, label='')` and
+      `_move_needle(tube, label='')` take the progress label.
+    - The mixin now uses `_report_progress` / `_report_live`.
+    - The needle-move log line "Moving the needle to tube t" is written by
+      `_report_progress` and now starts with the step label ("0/5 - Moving
+      the needle to tube 1").
+  - Test (offscreen, `dummy_config.cfg`; real `TaskRunnerLogic` in its own
+    thread, `TaskRunnerGui`, fluidics modules and fluidics GUI; qudi-core
+    1.7.0 and 1.8.0): 20/20.
+    - The window showed the steps, the live volume and the decreasing
+      countdown; live updates never came less than 1.00 s apart.
+    - The label was cleared and hidden after a normal end, an interrupt and
+      an error (valve failure).
+    - The group box grows by one line only while the task runs, and long
+      text is elided with the full text as tooltip.
+    - The photobleaching SD dummy task runs with no progress, no label and
+      the same height.
+    - Closing and reopening the Task Runner window during a fluidics run
+      gives no error and the next update appears.
+    - Fluidics task test 68/68 on both versions.
+
 - `gui/task_runner/taskwidget.py`, `gui/task_runner/main_window.py`
   (2026-10-08): optional start confirmation and end reminder declared by a
   task. Some tasks need a manual hardware step before and after running
@@ -978,49 +1046,6 @@ Last updated: 2026-10-16
 
 #### Added
 
-- ROI scan task: base class + one subclass per setup (2026-10-16), same
-  structure as the photobleaching and fluidics tasks.
-  - New `tasks/common/imaging_steps.py`: imaging done at one ROI, per
-    microscope, as mixins with three hooks - `_prepare_imaging()` (once, before
-    the first ROI), `_image_roi(roi_name, file_name)` (at one ROI, after the
-    stage has arrived), `_end_imaging()` (in the cleanup, logs errors, never
-    raises) - and the class attribute `scan_stage_velocity`. To be reused by the
-    Hi-M task.
-    - `SDImagingMixin`: moved from `roi_multicolour_scan_sd.py` without
-      changing the ZEN handshakes - laser preparation (external trigger on,
-      line intensities of `imaging_sequence`) and wait for ZEN "ready"; per ROI
-      ZEN autofocus block + `_wait_for_done`, 2 s, `ensure_ready`, ZEN
-      acquisition block + `_wait_for_done`, 2 s, file name appended to
-      `movie_name.txt`; end: lasers off, external trigger off, intensities
-      reset. Options `acquisition_timeout_s`, `poll_interval_s`.
-    - `RAMMImagingMixin`: placeholder - `_prepare_imaging` raises
-      `NotImplementedError` (RAMM imaging not migrated yet: focus logic, FPGA);
-      the docstring lists the legacy RAMM per-ROI steps as the to-do.
-    - `DummyImagingMixin`: interruptible wait `dummy_imaging_time_s` (2 s) per
-      ROI, then the file name appended to `movie_name.txt`.
-  - New `tasks/roi_multicolour_scan.py`: `RoiScanTaskBase` (connectors
-    `roi_logic`, `laser_logic`, `trigger_logic` optional; option
-    `user_config_path`; parameters, checkpoint / resume with `resume_from_roi`,
-    data folder, `parameters.yml`, `movie_name.txt`; stage moves; cleanup) and
-    `RoiScanSDTask` (`trigger_logic` mandatory), `RoiScanRAMMTask`,
-    `RoiScanDummyTask`.
-  - Difference from `roi_multicolour_scan_sd.py` on the spinning disk: the
-    laser preparation (`set_external_trigger(True)` and the line intensities)
-    now runs in `_prepare_imaging`, i.e. after the lasers are disabled, the ROI
-    GUI locked and the scan velocity set, instead of while loading the user
-    parameters. With the lasers disabled first, the intensities are stored
-    (`update_line_intensity`) and no longer applied to lines that may still be
-    on. The cleanup's "Could not disable lasers" message is now logged as an
-    error (was a warning). Stage moves, ZEN triggers, waits, files and the
-    other log lines are identical (offscreen comparison with a fake
-    TriggerLogic: 3-ROI run, interrupt during `_wait_for_done`, done timeout,
-    resume).
-  - Config: `Spinning_disk_config.cfg` ROI scan entry now points to
-    `qudi.tasks.roi_multicolour_scan.RoiScanSDTask` (same connectors and
-    options); `dummy_config.cfg` gets `roi_multicolour_scan_dummy`
-    (`RoiScanDummyTask`); `RAMM_config.cfg` gets a commented-out
-    `RoiScanRAMMTask` entry. `tasks/roi_multicolour_scan_sd.py` is left
-    unchanged (not used by the configs any more).
 - **Superseded same-day**: an earlier version of this entry (and of
   `tasks/roi_multicolour_scan_sd_task.py` itself) ported the legacy ROI task's
   autofocus handshake and per-plane laser/camera loop as well. JB clarified
@@ -1430,31 +1455,6 @@ Last updated: 2026-10-16
     message and no hardware call. Config validation: `dummy_config.cfg`
     passes on both versions, `Spinning_disk_config.cfg` on 1.8.0 (it
     already failed on 1.7.0 before this change - `trigger_logic`).
-
-#### Fixed
-
-- `tasks/roi_multicolour_scan.py` resume (2026-10-16): after a resume the
-  file names written to `movie_name.txt` were `scan_None_002_ROI` instead of
-  `scan_001_002_ROI` - the folder number (`prefix`) is only set when a new
-  data folder is created. It is now read back from the checkpoint's data folder
-  name (`NNN_Scan_...`). The same bug existed in
-  `tasks/roi_multicolour_scan_sd.py`. Also, a checkpoint whose data folder no
-  longer exists is not resumed (warning, run from scratch) instead of failing
-  after the first ROI is imaged.
-- `tasks/roi_multicolour_scan.py` cleanup (2026-10-16): `_cleanup()` raised
-  an `AttributeError` when `_setup()` stopped while fetching a connector (the
-  attributes it reads were set after the connectors). The attributes are now
-  set first, and the cleanup only restores the hardware once `_run()` has
-  started changing it (`_hardware_touched`, as in the photobleaching task). A
-  run stopped before that (missing `user_config_path`, unreadable experiment
-  file, bad ROI list) no longer moves the stage to the first ROI or touches the
-  lasers / ROI GUI in the cleanup. The same bug existed in
-  `tasks/roi_multicolour_scan_sd.py`.
-- `tasks/roi_multicolour_scan.py` resume log messages (2026-10-16): the
-  warning named a `resume=True` argument that does not exist (the call
-  parameter is `resume_from_roi`), and the "Resuming previous run" message
-  said the ROIs were "confirmed done by ZEN" on every setup (dummy, RAMM). Now:
-  `resume_from_roi=True was requested ...` and `... ROI(s) already done.`
 
 ### Experiment configurator
 

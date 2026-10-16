@@ -39,10 +39,39 @@ from qudi.core.scripting.moduletask import ModuleTask
 _log = get_logger(__name__)
 
 
+class _ElidedLabel(QtWidgets.QLabel):
+    """Single-line label: text longer than the available width is elided on the right, the full
+    text is shown as tooltip. Its width never widens the window."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._full_text = ''
+        self.setWordWrap(False)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+
+    def full_text(self) -> str:
+        return self._full_text
+
+    def set_full_text(self, text: str) -> None:
+        self._full_text = text
+        self.setToolTip(text)
+        self._elide()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        metrics = QtGui.QFontMetrics(self.font())
+        self.setText(metrics.elidedText(self._full_text, QtCore.Qt.ElideRight, max(0, self.width())))
+
+
 class TaskWidget(QtWidgets.QWidget):
     """QWidget to control a ModuleTask and display its state.
 
-    Layout: a single horizontal row "[parameters] | [state label] [busy indicator] [run/stop]".
+    Layout: a single horizontal row "[parameters] | [state label] [busy indicator] [run/stop]",
+    and under it a progress line ("<step> - <text>", small font, elided, full text as tooltip) that
+    is only visible while a task reporting progress (sigProgress) is running.
     Parameter label/editor pairs are placed row-major in a grid and wrap onto further lines once a
     line holds the maximum number of pairs; the controls stay right-aligned on the first line.
 
@@ -167,7 +196,20 @@ class TaskWidget(QtWidgets.QWidget):
         else:
             main_layout.addStretch(1)
         main_layout.addWidget(ctrl_widget, 0, QtCore.Qt.AlignTop | QtCore.Qt.AlignRight)
-        self.setLayout(main_layout)
+
+        # Progress line under the controls; hidden while empty so that the layout stays compact
+        self.progress_label = _ElidedLabel()
+        progress_font = self.progress_label.font()
+        if progress_font.pointSizeF() > 0:
+            progress_font.setPointSizeF(progress_font.pointSizeF() * 0.85)
+        self.progress_label.setFont(progress_font)
+        self.progress_label.hide()
+        outer_layout = QtWidgets.QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(2)
+        outer_layout.addLayout(main_layout)
+        outer_layout.addWidget(self.progress_label)
+        self.setLayout(outer_layout)
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
 
         # State flag to indicate current button functionality (start or interrupt)
@@ -270,6 +312,7 @@ class TaskWidget(QtWidgets.QWidget):
         self.run_interrupt_button.setIcon(self._stop_icon)
         self.run_interrupt_button.setEnabled(True)
         self.running_indicator.show()
+        self.clear_progress()
 
     @QtCore.Slot(str)
     def task_state_changed(self, new_state: str) -> None:
@@ -283,6 +326,7 @@ class TaskWidget(QtWidgets.QWidget):
         self.run_interrupt_button.setIcon(self._play_icon)
         self.run_interrupt_button.setEnabled(True)
         self.running_indicator.hide()
+        self.clear_progress()
         self.set_task_result(result, success)
         # End reminder only for a run this widget saw start (not for the initialising call made
         # by TaskRunnerGui.on_activate), whatever the outcome (success, failure, interrupt).
@@ -290,6 +334,20 @@ class TaskWidget(QtWidgets.QWidget):
             self._started_since_reminder = False
             if self._end_warning:
                 self._show_end_reminder()
+
+    @QtCore.Slot(str, str)
+    def task_progress(self, step: str, text: str) -> None:
+        """Show "<step> - <text>" in the progress line (hidden when both are empty)."""
+        line = ' - '.join(part for part in (step, text) if part)
+        if not line:
+            self.clear_progress()
+            return
+        self.progress_label.set_full_text(line)
+        self.progress_label.show()
+
+    def clear_progress(self) -> None:
+        self.progress_label.set_full_text('')
+        self.progress_label.hide()
 
     @QtCore.Slot(object, bool)
     def set_task_result(self, result: Any, success: bool) -> None:

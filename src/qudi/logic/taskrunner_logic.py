@@ -72,6 +72,7 @@ class TaskRunnerLogic(LogicBase):
     sigTaskStarted = QtCore.Signal(str)  # task name
     sigTaskStateChanged = QtCore.Signal(str, str)  # task name, task state
     sigTaskFinished = QtCore.Signal(str, object, bool)  # task name, result, success flag
+    sigTaskProgress = QtCore.Signal(str, str, str)  # task name, step, text (tasks with sigProgress only)
     _sigStartTask = QtCore.Signal(str, dict)  # task name, args, kwargs
 
     def __init__(self, *args, **kwargs):
@@ -208,6 +209,8 @@ class TaskRunnerLogic(LogicBase):
             if task is not None:
                 task.sigFinished.disconnect()
                 task.sigStateChanged.disconnect()
+                if hasattr(task, 'sigProgress'):
+                    task.sigProgress.disconnect()
                 task.disconnect_modules()
                 thread_manager = self._qudi_main.thread_manager
                 thread_manager.quit_thread(task.thread())
@@ -221,6 +224,9 @@ class TaskRunnerLogic(LogicBase):
 
     def _task_state_changed_callback(self, state: str, name: str) -> None:
         self.sigTaskStateChanged.emit(name, state)
+
+    def _task_progress_callback(self, step: str, text: str, name: str) -> None:
+        self.sigTaskProgress.emit(name, step, text)
 
     def __init_task(self, name: str) -> ModuleTask:
         """Create a ModuleTask instance."""
@@ -278,6 +284,10 @@ class TaskRunnerLogic(LogicBase):
         task.sigFinished.connect(partial(self._task_finished_callback, name=name),
                                  QtCore.Qt.QueuedConnection)
         task.sigStateChanged.connect(partial(self._task_state_changed_callback, name=name),
+                                     QtCore.Qt.QueuedConnection)
+        # progress: only tasks that declare sigProgress (e.g. ProgressModuleTask)
+        if hasattr(task, 'sigProgress'):
+            task.sigProgress.connect(partial(self._task_progress_callback, name=name),
                                      QtCore.Qt.QueuedConnection)
 
     def __start_task(self, name: str, task: ModuleTask) -> None:
