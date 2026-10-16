@@ -63,6 +63,7 @@ class TaskRunnerGui(GuiBase):
         taskrunner.sigTaskStateChanged.connect(self._mw.task_state_changed,
                                                QtCore.Qt.QueuedConnection)
         taskrunner.sigTaskFinished.connect(self._mw.task_finished, QtCore.Qt.QueuedConnection)
+        taskrunner.sigTaskProgress.connect(self._mw.task_progress, QtCore.Qt.QueuedConnection)
 
         # Set current task states
         for task_name, task_state in taskrunner.task_states.items():
@@ -102,6 +103,7 @@ class TaskRunnerGui(GuiBase):
         self._safe_disconnect(taskrunner.sigTaskStarted, mw.task_started)
         self._safe_disconnect(taskrunner.sigTaskStateChanged, mw.task_state_changed)
         self._safe_disconnect(taskrunner.sigTaskFinished, mw.task_finished)
+        self._safe_disconnect(taskrunner.sigTaskProgress, mw.task_progress)
         self._save_window_geometry(mw)
         mw.close()
         self._mw = None

@@ -102,6 +102,12 @@ class TaskMainWindow(QtWidgets.QMainWindow):
     def task_finished(self, name: str, result: Any, success: bool) -> None:
         self.task_widgets[name].task_finished(result, success)
 
+    @QtCore.Slot(str, str, str)
+    def task_progress(self, name: str, step: str, text: str) -> None:
+        widget = self.task_widgets.get(name)
+        if widget is not None:
+            widget.task_progress(step, text)
+
     def _initialize_task_widgets(self, tasks: Mapping[str, Type[ModuleTask]]) -> None:
         for ii, (task_name, task_type) in enumerate(tasks.items()):
             groupbox = QtWidgets.QGroupBox(task_name)

@@ -29,11 +29,11 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 from qudi.core.connector import Connector
-from qudi.core.scripting.moduletask import ModuleTask
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
+from qudi.tasks.common.progress import ProgressModuleTask
 
 
-class FluidicsTaskBase(FluidicsStepsMixin, ModuleTask):
+class FluidicsTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     """Shared fluidics sequence: inject the buffers and probes of the 'hybridization list' of an
     injections file, with incubation steps in between.
 
@@ -57,6 +57,8 @@ class FluidicsTaskBase(FluidicsStepsMixin, ModuleTask):
     An injection that has not reached its volume after
     injection_timeout_factor * volume / flowrate + injection_timeout_margin_s stops the task.
     Interrupt: checked at least every 0.1 s while waiting (injection, incubation, needle move).
+    Progress (Task Runner window): the current step, the injected volume and the incubation time
+    left (at most one update per progress_interval_s).
     _cleanup() always sets the pressure to 0, puts the valves in cleanup_valve_positions and
     unlocks the GUIs. A needle move in progress when the task stops is left to finish.
     """
@@ -127,24 +129,30 @@ class FluidicsTaskBase(FluidicsStepsMixin, ModuleTask):
         self._robot.disable_positioning_actions()
 
         # 7. needle in the first tube
+        total = len(self._steps)
         if probe_steps:
-            self._move_needle(probe_steps[0]['tube'])
+            self._move_needle(probe_steps[0]['tube'], f'0/{total}')
 
         # 8. start positions
         self._set_valves(self.start_valve_positions)
 
-        # 9. steps
-        total = len(self._steps)
+        # 9. steps (the "Step i/N: ..." line is the log of the step start; the progress is not logged)
         for number, step in enumerate(self._steps, 1):
-            self.log.info(f'Step {number}/{total}: {self._describe(step)}')
+            label = f'{number}/{total}'
+            self.log.info(f'Step {label}: {self._describe(step)}')
+            if step['kind'] == 'injection':
+                self._report_progress(label, f'Injecting {step["product"]}', log=False)
+            else:
+                self._report_progress(label, f'Incubating {step["time"]:g} s', log=False)
             self._check_interrupt()
             if step['kind'] == 'injection':
-                self._inject(number, step, probe_steps)
+                self._inject(number, step, probe_steps, label)
             else:
-                self._incubate(step)
+                self._incubate(step, label)
             self._steps_done = number
 
         # 10. summary
+        self._report_progress(f'{total}/{total}', 'Done')
         return {'steps_done': self._steps_done,
                 'steps_total': total,
                 'probe_needle_mode': self._needle_mode,

@@ -21,6 +21,7 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 from numbers import Real
+import math
 from time import monotonic, sleep
 
 import yaml
@@ -75,7 +76,9 @@ class FluidicsStepsMixin:
         self._tubes_used = []                  tubes used by the probe injections (filled by _inject)
         self._arrival_slot = None              robot arrival slot (connected by _move_needle; the task
         self._needle_arrived_at = None         disconnects it from sigStageMovedToTarget in _cleanup)
-    and uses self.log and self._check_interrupt() of ModuleTask.
+    and uses self.log and self._check_interrupt() of ModuleTask, and self._report_progress() /
+    self._report_live() of ProgressModuleTask (tasks/common/progress.py).
+    The step methods take a progress label (e.g. '2/5') shown in the Task Runner window.
 
     Injections file (written by the injections configurator):
         buffer: {valve outlet: name}, probes: {tube: name}, 'hybridization list' / 'photobleaching list':
@@ -109,14 +112,15 @@ class FluidicsStepsMixin:
     # Steps
     # ==============================================================================================
 
-    def _inject(self, number, step, probe_steps) -> None:
-        """Select the product, move the needle if needed, inject the volume at the flowrate."""
+    def _inject(self, number, step, probe_steps, label='') -> None:
+        """Select the product, move the needle if needed, inject the volume at the flowrate.
+        label: progress step label (e.g. '2/5'); the injected volume is reported live."""
         # a. product
         self._set_valve(self.buffer_valve_address, step['valve'])
 
         # b. next tube for a further probe injection
         if step['probe'] and self._needle_mode == 'next' and step is not probe_steps[0]:
-            self._move_needle(step['tube'])
+            self._move_needle(step['tube'], label)
         if step['probe'] and step['tube'] not in self._tubes_used:
             self._tubes_used.append(step['tube'])
 
@@ -133,6 +137,7 @@ class FluidicsStepsMixin:
             if monotonic() - start > timeout_s:
                 raise RuntimeError(f'Step {number}: volume not reached - check the line '
                                    f'({self._flow.total_volume:g} of {volume:g} µl after {timeout_s:.0f} s).')
+            self._report_live(label, f'Injecting {step["product"]} - {self._flow.total_volume:.0f}/{volume:g} µl')
             self._interruptible_sleep(self.volume_poll_interval_s)
 
         # e. stop the regulation, pressure to 0
@@ -142,8 +147,9 @@ class FluidicsStepsMixin:
         self.log.info(f'Step {number}: {self._flow.total_volume:g} µl injected '
                       f'in {monotonic() - start:.0f} s.')
 
-    def _incubate(self, step) -> None:
-        """Wait the incubation time (interruptible), with the incubation valve positions."""
+    def _incubate(self, step, label='') -> None:
+        """Wait the incubation time (interruptible), with the incubation valve positions.
+        label: progress step label (e.g. '3/5'); the time left is reported live."""
         # a. incubation positions
         self._set_valves(self.incubation_valve_positions)
 
@@ -158,13 +164,16 @@ class FluidicsStepsMixin:
             if elapsed >= next_log:
                 self.log.info(f'Incubation: {elapsed:.0f} / {duration:g} s')
                 next_log += self.incubation_log_interval_s
+            minutes, seconds = divmod(int(math.ceil(duration - elapsed)), 60)
+            self._report_live(label, f'Incubating - {minutes}:{seconds:02d} left')
             self._interruptible_sleep(min(1.0, duration - elapsed))
 
         # c. end positions
         self._set_valves(self.incubation_end_valve_positions)
 
-    def _move_needle(self, tube) -> None:
-        """Move the needle to a tube and wait until it has arrived (interruptible, robot_timeout_s)."""
+    def _move_needle(self, tube, label='') -> None:
+        """Move the needle to a tube and wait until it has arrived (interruptible, robot_timeout_s).
+        label: progress step label (e.g. '0/5' before the first step)."""
         self._set_valves(self.needle_move_valve_positions)
 
         if self._arrival_slot is None:
@@ -177,7 +186,7 @@ class FluidicsStepsMixin:
             self._robot.sigStageMovedToTarget.connect(arrived, QtCore.Qt.DirectConnection)
         self._needle_arrived_at = None
 
-        self.log.info(f'Moving the needle to tube {tube}')
+        self._report_progress(label, f'Moving the needle to tube {tube}')  # also logged
         self._robot.start_move_to_target(tube)
         if not self._robot.moving and self._needle_arrived_at != tube:
             raise RuntimeError(f'The robot did not start the move to tube {tube}.')
