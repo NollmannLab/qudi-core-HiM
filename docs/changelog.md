@@ -1450,6 +1450,11 @@ Last updated: 2026-10-16
   file, bad ROI list) no longer moves the stage to the first ROI or touches the
   lasers / ROI GUI in the cleanup. The same bug existed in
   `tasks/roi_multicolour_scan_sd.py`.
+- `tasks/roi_multicolour_scan.py` resume log messages (2026-10-16): the
+  warning named a `resume=True` argument that does not exist (the call
+  parameter is `resume_from_roi`), and the "Resuming previous run" message
+  said the ROIs were "confirmed done by ZEN" on every setup (dummy, RAMM). Now:
+  `resume_from_roi=True was requested ...` and `... ROI(s) already done.`
 
 ### Experiment configurator
 

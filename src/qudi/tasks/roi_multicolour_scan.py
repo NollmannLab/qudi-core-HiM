@@ -150,8 +150,8 @@ class RoiScanTaskBase(ModuleTask):
                              f'exist any more - starting from scratch.')
             checkpoint_is_usable = False
         elif resume_from_roi and not checkpoint_is_usable:
-            self.log.warning('resume=True was requested but no matching, unfinished checkpoint was '
-                             'found for this sample/ROI list - starting from scratch.')
+            self.log.warning('resume_from_roi=True was requested but no matching, unfinished checkpoint '
+                             'was found for this sample/ROI list - starting from scratch.')
 
         if checkpoint_is_usable:
             self._imaged_rois = set(checkpoint.get('imaged_rois', []))
@@ -160,7 +160,7 @@ class RoiScanTaskBase(ModuleTask):
             # _create_directory, which is not called when resuming
             self.prefix = os.path.basename(os.path.normpath(self.directory))[:3]
             self.log.info(f'Resuming previous run in {self.directory}: {len(self._imaged_rois)} of '
-                          f'{len(self.roi_names)} ROI(s) already confirmed done by ZEN.')
+                          f'{len(self.roi_names)} ROI(s) already done.')
         else:
             self._imaged_rois = set()
             self.directory = None
