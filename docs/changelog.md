@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-14
+Last updated: 2026-10-16
 
 ### Documentation
 
@@ -978,6 +978,49 @@ Last updated: 2026-10-14
 
 #### Added
 
+- ROI scan task: base class + one subclass per setup (2026-10-16), same
+  structure as the photobleaching and fluidics tasks.
+  - New `tasks/common/imaging_steps.py`: imaging done at one ROI, per
+    microscope, as mixins with three hooks - `_prepare_imaging()` (once, before
+    the first ROI), `_image_roi(roi_name, file_name)` (at one ROI, after the
+    stage has arrived), `_end_imaging()` (in the cleanup, logs errors, never
+    raises) - and the class attribute `scan_stage_velocity`. To be reused by the
+    Hi-M task.
+    - `SDImagingMixin`: moved from `roi_multicolour_scan_sd.py` without
+      changing the ZEN handshakes - laser preparation (external trigger on,
+      line intensities of `imaging_sequence`) and wait for ZEN "ready"; per ROI
+      ZEN autofocus block + `_wait_for_done`, 2 s, `ensure_ready`, ZEN
+      acquisition block + `_wait_for_done`, 2 s, file name appended to
+      `movie_name.txt`; end: lasers off, external trigger off, intensities
+      reset. Options `acquisition_timeout_s`, `poll_interval_s`.
+    - `RAMMImagingMixin`: placeholder - `_prepare_imaging` raises
+      `NotImplementedError` (RAMM imaging not migrated yet: focus logic, FPGA);
+      the docstring lists the legacy RAMM per-ROI steps as the to-do.
+    - `DummyImagingMixin`: interruptible wait `dummy_imaging_time_s` (2 s) per
+      ROI, then the file name appended to `movie_name.txt`.
+  - New `tasks/roi_multicolour_scan.py`: `RoiScanTaskBase` (connectors
+    `roi_logic`, `laser_logic`, `trigger_logic` optional; option
+    `user_config_path`; parameters, checkpoint / resume with `resume_from_roi`,
+    data folder, `parameters.yml`, `movie_name.txt`; stage moves; cleanup) and
+    `RoiScanSDTask` (`trigger_logic` mandatory), `RoiScanRAMMTask`,
+    `RoiScanDummyTask`.
+  - Difference from `roi_multicolour_scan_sd.py` on the spinning disk: the
+    laser preparation (`set_external_trigger(True)` and the line intensities)
+    now runs in `_prepare_imaging`, i.e. after the lasers are disabled, the ROI
+    GUI locked and the scan velocity set, instead of while loading the user
+    parameters. With the lasers disabled first, the intensities are stored
+    (`update_line_intensity`) and no longer applied to lines that may still be
+    on. The cleanup's "Could not disable lasers" message is now logged as an
+    error (was a warning). Stage moves, ZEN triggers, waits, files and the
+    other log lines are identical (offscreen comparison with a fake
+    TriggerLogic: 3-ROI run, interrupt during `_wait_for_done`, done timeout,
+    resume).
+  - Config: `Spinning_disk_config.cfg` ROI scan entry now points to
+    `qudi.tasks.roi_multicolour_scan.RoiScanSDTask` (same connectors and
+    options); `dummy_config.cfg` gets `roi_multicolour_scan_dummy`
+    (`RoiScanDummyTask`); `RAMM_config.cfg` gets a commented-out
+    `RoiScanRAMMTask` entry. `tasks/roi_multicolour_scan_sd.py` is left
+    unchanged (not used by the configs any more).
 - **Superseded same-day**: an earlier version of this entry (and of
   `tasks/roi_multicolour_scan_sd_task.py` itself) ported the legacy ROI task's
   autofocus handshake and per-plane laser/camera loop as well. JB clarified
