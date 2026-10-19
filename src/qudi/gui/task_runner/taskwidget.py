@@ -92,6 +92,9 @@ class TaskWidget(QtWidgets.QWidget):
                              Never shown when the button is used to interrupt a running task.
         end_warning (str): shown in a non-modal reminder when a task that this widget saw start
                            finishes, whether it succeeded, failed or was interrupted.
+        parameter_hints (dict): {call parameter name: short hint}. The hint is the tooltip of the
+                           parameter's label and editor and, for a text field (QLineEdit), its
+                           placeholder text (shown in grey while the field is empty).
     Both are plain class attributes of the ModuleTask (e.g. PhotoBleachingSDTask), because task
     config options are not passed to ModuleTasks. Dialogs are always opened here, in the GUI
     thread, never from the task itself (tasks run in a worker thread).
@@ -220,6 +223,8 @@ class TaskWidget(QtWidgets.QWidget):
         """Helper function to create editor widgets and labels for each ModuleTask call parameter.
         """
         task_parameters = task_type.call_parameters()
+        hints = getattr(task_type, 'parameter_hints', None)
+        hints = hints if isinstance(hints, dict) else {}
         param_widgets = dict()
         for param_name, param in task_parameters.items():
             editor = ParameterWidgetMapper.widget_for_parameter(param)
@@ -231,6 +236,12 @@ class TaskWidget(QtWidgets.QWidget):
                 # ToDo: Set default values here
             label = QtWidgets.QLabel(f'{param_name}:')
             label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
+            hint = hints.get(param_name)
+            if hint:
+                label.setToolTip(str(hint))
+                editor.setToolTip(str(hint))
+                if isinstance(editor, QtWidgets.QLineEdit):
+                    editor.setPlaceholderText(str(hint))
             param_widgets[param_name] = (label, editor)
         return param_widgets
 

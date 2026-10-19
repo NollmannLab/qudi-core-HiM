@@ -821,6 +821,42 @@ Last updated: 2026-10-14
 
 #### Added
 
+- Task parameter hints (2026-10-19): the Task Runner shows what a task's call
+  parameters expect.
+  - A task may declare the class attribute `parameter_hints = {parameter
+    name: short hint}`. Tasks without it are unchanged: same editors, no
+    tooltip, no placeholder, same size.
+  - `gui/task_runner/taskwidget.py`, `__create_parameter_editor_widgets`:
+    for a parameter with a hint, the hint becomes the tooltip of the label
+    and of the editor and, for a text field (`QLineEdit`), its placeholder
+    text, shown in grey while the field is empty. No layout change: same
+    widget size hint as before.
+  - `tasks/roi_multicolour_scan.py`: `RoiScanTaskBase.parameter_hints =
+    {'start_roi': 'ROI name, e.g. ROI_005 (empty = first ROI)'}`.
+  - `start_roi` now accepts only `''` (first ROI) or a ROI name of the
+    loaded list. The 1-based position option is removed.
+    - Any other value, `'5'` included, raises before any hardware call, e.g.
+      "start_roi '5' is not valid: expected a ROI name of the list, from
+      ROI_000 to ROI_005 (6 ROIs), or empty for the first ROI".
+    - Docstrings updated.
+  - `parameter_hints` is a public, non-callable class attribute, so the task
+    runner also accepts it as a task option, like `start_warning` /
+    `end_warning`.
+  - Test (offscreen; qudi-core 1.7.0 and 1.8.0): 29/29.
+    - The `start_roi` field of `RoiScanDummyTask` is a `QLineEdit` showing
+      the grey hint while empty. Its tooltip appears on hover, on the field
+      and on its label. A typed `ROI_005` replaces the hint and is returned
+      as the parameter.
+    - A task without `parameter_hints` (a text and a number parameter) is
+      displayed exactly as with the previous `taskwidget.py`.
+    - With the dummy ROI list (ROI_000 to ROI_005):
+      - `'5'`, `'1'`, `'0'`, `'99'`, `'ROI_999'` and `'roi_005'` raise before
+        any stage move, data folder or hardware call.
+      - `'ROI_005'` scans ROI_005 only, `' ROI_002 '` scans ROI_002 to
+        ROI_005, and `''` scans all 6 ROIs, as before.
+      - Interrupt, spinning-disk ZEN loop count and calls identical to the
+        previous version for `''`: unchanged.
+
 - Task progress in the Task Runner window (2026-10-16): under each running
   task, a line shows what the task is doing now, e.g. "2/5 - Injecting WB -
   120/200 µl" or "3/5 - Incubating - 4:30 left". Only tasks deriving from
@@ -1268,6 +1304,37 @@ Last updated: 2026-10-14
 
 #### Changed
 
+- `tasks/photobleaching.py` (2026-10-16): the photobleaching task reports its
+  progress in the Task Runner window, using the mechanism of the fluidics
+  task (`tasks/common/progress.py`). Hardware calls, their order and timing
+  are unchanged.
+  - `PhotoBleachingBase` derives from `ProgressModuleTask` instead of
+    `ModuleTask`; the subclasses (`PhotoBleachingSDTask`,
+    `PhotoBleachingRAMMTask`) are unchanged, including the start / end
+    warnings. `progress_interval_s` (1.0) is a new task-runner option,
+    inherited from `ProgressModuleTask`.
+  - Progress, with N ROIs and i the ROI index (1-based):
+    - `i/N - ROI i/N - moving to <roi>` before the move. Not logged: the
+      existing "Moving to <roi>" line stays the log of this step.
+    - `i/N - ROI i/N - illuminating <T> s` once the lasers are on (logged).
+    - `i/N - ROI i/N - <s> s left` during the illumination: seconds rounded
+      up, at most one update per second.
+    - `N/N - Done` after the last ROI (logged).
+  - `_move_to_roi(roi_name, label='')` and `_illuminate_roi(label='')` take
+    the ROI index label. `_interruptible_wait(duration_s, on_wait=None)` still
+    checks for an interrupt every 0.1 s and, if given, calls `on_wait(seconds
+    left)` before each sleep; without it, it only waits as before.
+  - Test (offscreen, `dummy_config.cfg` entry `photobleaching_sd_dummy`;
+    qudi-core 1.7.0 and 1.8.0): 19/19.
+    - Same hardware calls, arguments, order and illumination times as the
+      previous file, for a normal run (30 calls) and an interrupt during
+      ROI 2 (24 calls).
+    - In the Task Runner window (real `TaskRunnerLogic` and `TaskRunnerGui`,
+      Run button), the line showed the move and the illumination of each
+      ROI, then "ROI i/3 - 4/3/2/1 s left" one second apart.
+    - The line was cleared after the end, an interrupt and an error.
+    - The start confirmation (modal) and the end reminder (non-modal) of
+      the SD task appeared as before.
 - `tasks/psf_stack_opm.py`, `tasks/roi_multicolour_scan_sd.py` (2026-10-14):
   scan stage speed, camera from the experiment configurator, snap check.
   - Stage speed: `scan_stage_velocity` is a class attribute (PSF:

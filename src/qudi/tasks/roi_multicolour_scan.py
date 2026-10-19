@@ -20,7 +20,7 @@ Interruption is exception-based (self._check_interrupt() raises ModuleScriptInte
 is called by the ModuleTask base class whenever _run() finishes, raises or is interrupted.
 
 Start ROI: the task's call parameter start_roi (Task Runner) selects the first ROI to scan - a ROI
-name of the list or a 1-based position, empty for the first ROI. The scan runs from there to the end
+name of the list, empty for the first ROI. The scan runs from there to the end
 of the list, in list order, into a new data folder.
 
 Modified with Claude code (Anthropic)
@@ -66,8 +66,9 @@ class RoiScanTaskBase(ModuleTask):
         imaging_sequence: [[488, 50.0], [561, 80.0]]   # [wavelength (nm), intensity (%)]
 
     Call parameter (Task Runner):
-        start_roi   first ROI to scan: a ROI name of the loaded list (e.g. 'ROI_005') or a 1-based
-                    position in the list (e.g. '5'); empty = first ROI. Checked right after loading
+        start_roi   first ROI to scan: a ROI name of the loaded list (e.g. 'ROI_005'); empty =
+                    first ROI. The Task Runner shows parameter_hints['start_roi'] in the empty field
+                    and as tooltip. Checked right after loading
                     the ROI list, before any hardware call. The scan runs from that ROI to the end
                     of the list, in list order.
 
@@ -85,6 +86,9 @@ class RoiScanTaskBase(ModuleTask):
     trigger_logic = Connector(interface='TriggerLogic', optional=True)
 
     user_config_path = None  # set by the config: options: user_config_path: ...
+
+    # shown by the Task Runner GUI for the call parameters (placeholder text and tooltip)
+    parameter_hints = {'start_roi': 'ROI name, e.g. ROI_005 (empty = first ROI)'}
 
     def _setup(self) -> None:
         # attributes used by _cleanup(): set first, so that _cleanup() also works if fetching a
@@ -129,7 +133,7 @@ class RoiScanTaskBase(ModuleTask):
     # ======================================================================================
 
     def _run(self, start_roi: str = '') -> dict:
-        """Run the scan from start_roi (ROI name or 1-based position, empty = first ROI) to the end
+        """Run the scan from start_roi (ROI name of the list, empty = first ROI) to the end
         of the list (see class docstring).
         """
         # 1. refuse to run, before touching any hardware, if the config gave no YAML path; load the
@@ -180,17 +184,15 @@ class RoiScanTaskBase(ModuleTask):
         return {'directory': self.directory, 'imaged_rois': list(self._scanned_rois)}
 
     def _start_index(self, start_roi: str) -> int:
-        """Index in self.roi_names of the first ROI to scan. start_roi: '' (first ROI), a ROI name of
-        the list or a 1-based position. Raises with the valid range if start_roi matches neither."""
+        """Index in self.roi_names of the first ROI to scan. start_roi: '' (first ROI) or a ROI name
+        of the list. Raises, with the first and last ROI names, otherwise."""
         if start_roi == '':
             return 0
         if start_roi in self.roi_names:
             return self.roi_names.index(start_roi)
-        if start_roi.isdigit() and 1 <= int(start_roi) <= len(self.roi_names):
-            return int(start_roi) - 1
         if self.roi_names:
-            valid = (f'a ROI name of the list or a position from 1 to {len(self.roi_names)} '
-                     f'(first ROI {self.roi_names[0]}, last ROI {self.roi_names[-1]})')
+            valid = (f'a ROI name of the list, from {self.roi_names[0]} to {self.roi_names[-1]} '
+                     f'({len(self.roi_names)} ROIs), or empty for the first ROI')
         else:
             valid = 'nothing - the ROI list is empty; leave start_roi empty'
         raise ValueError(f'start_roi {start_roi!r} is not valid: expected {valid}. ROI list: '
