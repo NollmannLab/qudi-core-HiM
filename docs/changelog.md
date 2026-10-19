@@ -650,6 +650,58 @@ Last updated: 2026-10-14
 
 #### Fixed
 
+- Pump output limits (2026-10-19): the pump's own `minimum` / `maximum`
+  (hardware config) are the only output limits. Before, the flow logic used
+  its own `pid_output_min` / `pid_output_max`. On the spinning disk these
+  were 0-15 for a 0-3 V pump, so the pressure regulation could ask for 15 V.
+  With the code before the change, `dummy_config` and `pid_output_max: 15`,
+  a 2000 µl/min target asked the DAQ for 14.98 V on the first step.
+  - `hardware/interfuse_hardware/daq_pump_controller.py`, `set_output()`:
+    - The requested voltage is clamped to [minimum, maximum] before it is
+      written to the DAQ; the clamped value is stored and reported by
+      `get_output()`.
+    - Logging: a warning on the transition into "out of range", e.g.
+      "Requested pump output 5 V is outside [0, 3] V - 3 V written. Further
+      out-of-range requests are clamped without a new warning.", and one
+      info line when requests are back in range.
+  - `hardware/interfuse_hardware/fluigent_pump.py`: unchanged. Its
+    `set_output()` already enforces the configured limits: a setpoint
+    outside [minimum, maximum] raises `ValueError` and nothing is sent to
+    the SDK.
+  - `logic/fluidics_flow_logic.py`:
+    - The `pid_output_min` / `pid_output_max` ConfigOptions are removed.
+    - `init_pid()` sets `pid.output_limits` from
+      `fluidics_pump.get_constraints()` (`minimum`, `maximum`).
+    - A config still containing one of the options activates normally, with
+      one warning at activation, e.g. "Config option(s) pid_output_min,
+      pid_output_max ignored: the pressure regulation uses the fluidics pump
+      limits [0, 3] V - remove the option(s) from the config."
+    - Class docstring and config example updated.
+  - Configs:
+    - `pid_output_min` / `pid_output_max` removed from
+      `Spinning_disk_config.cfg`, `RAMM_config.cfg` and `dummy_config.cfg`.
+    - `RAMM_config.cfg`: `fluigent_pump` `maximum: 15.0` (previously 50.0;
+      maximum pressure used for injections, mbar), so the RAMM regulation
+      keeps its 15 mbar cap.
+    - SD and dummy: `fluidics_pump` maximum stays 3.0 V.
+  - Test (offscreen, `dummy_config.cfg` modules; qudi-core 1.7.0 and 1.8.0):
+    15/15.
+    - `init_pid()` limits (0, 3). The regulation toward an unreachable
+      2000 µl/min target saturates at exactly 3 V and never goes above it,
+      with no pump warning.
+    - `set_pressure(5)`: the DAQ is written with 3.0 V, `get_output()`
+      reports 3.0, and there is one warning. 6 / 7.5 / 5 give no new
+      warning, 1 V gives one info line, then -2 / 4 give 0 / 3 V and one new
+      warning.
+    - A config with `pid_output_min` / `pid_output_max` activates with one
+      warning and is still limited to 3 V; a config without them gives no
+      warning.
+    - RAMM-like (`FluigentPump` 0-15 mbar from `RAMM_config.cfg`, fake SDK):
+      PID limits (0, 15) and the regulation saturates at 15.0 mbar.
+  - Not changed: the flow logic keeps the requested value as its pressure
+    setpoint (`sigUpdatePressureSetpoint`), so the Fluidics GUI spin box
+    still shows 5 after `set_pressure(5)` while the pump reports 3.
+
 - Fixed Fluigent channel normalization and configured-channel validation.
 - Fixed hardware connector initialization in the fluidics logic.
 - Fixed cleanup of Fluigent adapter references during deactivation.

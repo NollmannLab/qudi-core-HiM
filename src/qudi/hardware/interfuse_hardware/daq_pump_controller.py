@@ -33,6 +33,12 @@ class DaqPumpController(PumpInterface):
 
     The controller exposes a single logical output channel and maps pump
     setpoints to one analog output task on the configured DAQ backend.
+
+    The configured ``minimum`` / ``maximum`` are the output limits: a requested
+    voltage outside them is clamped before it is written to the DAQ, and the
+    clamped value is the one stored and reported by ``get_output``. A warning is
+    logged when the requests go out of range (not for every request while they
+    stay out of range), and one info line when they are back in range.
     """
 
     daq = Connector(name="daq", interface="DaqInterface")
@@ -45,6 +51,7 @@ class DaqPumpController(PumpInterface):
     # Attributes
     _daq: Optional[DaqInterface] = None
     _set_voltage: float = 0.0
+    _out_of_range: bool = False  # True while the requested voltages are outside [minimum, maximum]
 
     def on_activate(self):
         """Connect to the DAQ backend and reset the pump output.
@@ -67,7 +74,8 @@ class DaqPumpController(PumpInterface):
         Args:
             param_dict: Mapping of ``{channel_id: voltage_setpoint}``. Only a
                 single channel is supported; if multiple channels are supplied,
-                a warning is logged and no output is written.
+                a warning is logged and no output is written. The voltage is
+                clamped to [minimum, maximum] before it is written.
 
         Raises:
             AttributeError: If the DAQ backend has not been activated.
@@ -76,7 +84,8 @@ class DaqPumpController(PumpInterface):
             self.log.warning(f"Multiple channels not supported: {param_dict}")
         elif len(param_dict) == 1:
             (_, voltage), = param_dict.items()
-            self._daq.write_named_ao(self._output_task, float(voltage))
+            voltage = self._clamp(float(voltage))
+            self._daq.write_named_ao(self._output_task, voltage)
             self._set_voltage = voltage
 
     def get_output(self, param_list: Optional[Sequence[int]] = None) -> Dict[int, float]:
@@ -120,5 +129,23 @@ class DaqPumpController(PumpInterface):
         """Drive the pump to its safe minimum output."""
         self.set_output({0: float(self._voltage_minimum)})
         self._set_voltage = self._voltage_minimum
+
+    def _clamp(self, voltage: float) -> float:
+        """Return voltage limited to [minimum, maximum]. Logs a warning when the requests go out of
+        range and an info line when they are back in range (the regulation loop writes ~10 times per
+        second, so nothing is logged while the state does not change)."""
+        low, high = float(self._voltage_minimum), float(self._voltage_maximum)
+        clamped = min(max(voltage, low), high)
+        if clamped != voltage:
+            if not self._out_of_range:
+                self._out_of_range = True
+                self.log.warning(f'Requested pump output {voltage:g} {self._pump_unit} is outside '
+                                 f'[{low:g}, {high:g}] {self._pump_unit} - {clamped:g} '
+                                 f'{self._pump_unit} written. Further out-of-range requests are '
+                                 f'clamped without a new warning.')
+        elif self._out_of_range:
+            self._out_of_range = False
+            self.log.info(f'Pump output requests back within [{low:g}, {high:g}] {self._pump_unit}.')
+        return clamped
 
 

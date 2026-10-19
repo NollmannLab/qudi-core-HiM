@@ -90,6 +90,11 @@ class VolumeCountWorker(QtCore.QRunnable):
 class FluidicsFlowLogic(LogicBase):
     """Logic class for pressure control, flow monitoring, and volume counting.
 
+    The PID output limits (pressure regulation) are the minimum / maximum of the
+    fluidics pump (its get_constraints(), i.e. the pump's hardware config); there is
+    no separate limit in this module. The former options pid_output_min /
+    pid_output_max are ignored (one warning at activation if still configured).
+
     Example config:
 
       fluidics_flow_logic:
@@ -97,8 +102,19 @@ class FluidicsFlowLogic(LogicBase):
         options:
           default_pressure_channel: 0
           default_sensor_channel: 0
+          sampling_interval: 1.0
+          p_gain: 0.005
+          i_gain: 0.01
+          d_gain: 0.0
+          pid_sample_time: 0.1
+          rinsing_valve_positions:
+            b: 1
+          restore_valves_after_rinsing: True
         connect:
-          flowboard: 'fluigent_flowboard'
+          flow_sensor: 'fluigent_flow_sensor'
+          fluidics_pump: 'fluigent_pump'      # its minimum / maximum limit the regulation
+          rinsing_pump: 'rinsing_pump'
+          valve_logic: 'fluidics_valve_logic'
     """
 
     # Connectors to hardware
@@ -112,8 +128,6 @@ class FluidicsFlowLogic(LogicBase):
     i_gain = ConfigOption("i_gain", 0.01, missing="warn")
     d_gain = ConfigOption("d_gain", 0.0, missing="warn")
     pid_sample_time = ConfigOption("pid_sample_time", 0.1, missing="warn")
-    pid_output_min = ConfigOption("pid_output_min", 0.0, missing="warn")
-    pid_output_max = ConfigOption("pid_output_max", 15.0, missing="warn")
     sampling_interval = ConfigOption("sampling_interval", 1.0, missing="warn")
     default_pressure_channel = ConfigOption("default_pressure_channel", 0, missing="warn")
     default_sensor_channel = ConfigOption("default_sensor_channel", 0, missing="warn")
@@ -160,6 +174,16 @@ class FluidicsFlowLogic(LogicBase):
         self._valve_logic = self.valve_logic()
 
         self._threadpool = QtCore.QThreadPool.globalInstance()
+
+        # options removed: the PID output limits are the pump's minimum / maximum
+        obsolete = [name for name in ('pid_output_min', 'pid_output_max')
+                    if name in (self._meta.get('configuration') or {})]
+        if obsolete:
+            constraints = self._fluidics_pump.get_constraints()
+            self.log.warning(f'Config option(s) {", ".join(obsolete)} ignored: the pressure regulation '
+                             f'uses the fluidics pump limits [{constraints["minimum"]:g}, '
+                             f'{constraints["maximum"]:g}] {constraints.get("unit", "")} - remove '
+                             f'the option(s) from the config.')
 
         self._rinsing_previous_valve_positions = {}
         self._validate_rinsing_valve_positions()
@@ -399,7 +423,8 @@ class FluidicsFlowLogic(LogicBase):
     # Pressure regulation loop ----------------------------------------------------------------------------------------------
 
     def init_pid(self, setpoint):
-        """Create and configure the PID controller.
+        """Create and configure the PID controller. Its output limits are the fluidics pump's
+        minimum / maximum (get_constraints()).
 
         Args:
             setpoint (float): Target flow-rate for pressure regulation.
@@ -409,7 +434,8 @@ class FluidicsFlowLogic(LogicBase):
         """
         pid = PID(self.p_gain, self.i_gain, self.d_gain, setpoint=setpoint)
         pid.sample_time = self.pid_sample_time
-        pid.output_limits = (self.pid_output_min, self.pid_output_max)
+        constraints = self._fluidics_pump.get_constraints()
+        pid.output_limits = (float(constraints['minimum']), float(constraints['maximum']))
         return pid
 
     def regulate_pressure_pid(self):
