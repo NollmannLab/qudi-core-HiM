@@ -29,7 +29,7 @@ from qudi.core.configoption import ConfigOption
 from qudi.core.module import LogicBase
 from qudi.core.connector import Connector
 from qudi.core.statusvariable import StatusVar
-from qudi.util.roi_path import optimize_open_path, path_cost
+from qudi.util.roi_path import optimize_closed_tour, tour_cost, longest_move
 
 import os
 import re
@@ -429,6 +429,10 @@ class RoiLogic(LogicBase):
     _active_roi = StatusVar(name='_active_roi', default=None)
     _roi_width = StatusVar(name='_roi_width', default=50)
     _roi_starting_digit = StatusVar(name='_roi_starting_digit', default=0)
+
+    # ROI path optimization: fraction of the best closed-tour total within which the tour with the smallest
+    # longest single move is preferred
+    path_tolerance = 0.02
 
     # Axis-role mapping used by the ROI logic. The connected stage may expose
     # two or three axes, but ROI positions are always represented as (x, y, z).
@@ -857,12 +861,15 @@ class RoiLogic(LogicBase):
     @QtCore.Slot(str)
     def optimize_roi_order(self, path):
         """
-        Reorder the current ROI list along the path of shortest stage-move time (first ROI kept first),
-        rename the ROIs in the new order and save both versions in the folder path:
+        Reorder the current ROI list along a closed tour of short stage-move time (first ROI kept first;
+        the move from the last ROI back to the first one counts, as tasks return to the first ROI after each
+        scan / cycle), rename the ROIs in the new order and save both versions in the folder path:
           1. backup of the list before optimization: <name>_before_optimization_<YYYYMMDD_HHMMSS>.json
              (never overwrites a file; if it cannot be written the list is not modified);
-          2. order from qudi.util.roi_path.optimize_open_path on the x, y positions, with the stage
-             x / y velocities as speeds (equal speeds if they cannot be read);
+          2. order from qudi.util.roi_path.optimize_closed_tour on the x, y positions, with the stage
+             x / y velocities as speeds (equal speeds if they cannot be read) and the tolerance
+             path_tolerance: among the tours within this fraction of the best total, the one with the
+             smallest longest single move is kept;
           3. new names ROI_{N+1}, ROI_{N+2}, ... in the new order (N = highest ROI number of the list);
              positions (x, y, z) and the list metadata are kept;
           4. list renamed <name>_optimized_<YYYYMMDD_HHMMSS>, GUI refreshed (as after loading a list),
@@ -902,9 +909,9 @@ class RoiLogic(LogicBase):
             self.log.info(f'ROI path: stage velocity not available ({e}) - equal x / y speeds used.')
         positions = [self.get_roi_position(roi) for roi in names]
         xy = np.array([[pos[0], pos[1]] for pos in positions], dtype=float)
-        order = optimize_open_path(xy, speeds=speeds, start=0)
-        old_time = path_cost(xy, range(len(names)), speeds)
-        new_time = path_cost(xy, order, speeds)
+        order = optimize_closed_tour(xy, speeds=speeds, start=0, tolerance=self.path_tolerance)
+        old_total, new_total = tour_cost(xy, range(len(names)), speeds), tour_cost(xy, order, speeds)
+        old_longest, new_longest = longest_move(xy, range(len(names)), speeds), longest_move(xy, order, speeds)
 
         # 3. new order and names, positions and list metadata kept (same RegionOfInterest objects)
         numbers = [int(match.group(1)) for match in (re.fullmatch(r'ROI_(\d+)', roi) for roi in names) if match]
@@ -932,7 +939,8 @@ class RoiLogic(LogicBase):
                            f'(backup {backup_file}).')
             return False
 
-        self.log.info(f'ROI path optimized: {old_time:.1f} s -> {new_time:.1f} s estimated move time '
+        self.log.info(f'ROI path optimized: total {old_total:.1f} s -> {new_total:.1f} s, longest move '
+                      f'{old_longest:.1f} s -> {new_longest:.1f} s (incl. return to first ROI) '
                       f'({len(new_names)} ROIs); renamed {new_names[0]}..{new_names[-1]}; backup {backup_file}; '
                       f'saved as {os.path.join(path, optimized_name + ".json")}')
         return True

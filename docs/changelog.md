@@ -352,6 +352,43 @@ Last updated: 2026-10-23
     0.2 s; logic + GUI offscreen with the dummy stage (25 ROIs: 121.6 s ->
     33.0 s estimated, ROI_026..ROI_050, backup identical, no overwrite,
     0/1/2 ROIs untouched), on qudi-core 1.7 and 1.8.
+  - Closed tour (2026-10-23): the optimized order now also avoids long
+    moves, in particular the return from the last ROI to the first one
+    (tasks go back to the first ROI after each scan / Hi-M cycle). Same cost
+    per move.
+    - `util/roi_path.py`: new `optimize_closed_tour(xy, speeds, start,
+      tolerance=0.02, n_restarts, seed)` with helpers `tour_cost` and
+      `longest_move` (both include the closing move).
+      - Objective: total time of the closed tour. Up to 12 points: exact
+        (Held-Karp). Above: nearest-neighbour tour + 2-opt and Or-opt
+        (blocks of 1-3 points moved, either orientation) until no
+        improvement, repeated from `n_restarts` random tours (fixed seed).
+      - Tie-break: among the tours found within `tolerance` of the best
+        total, the one with the smallest longest move is kept.
+      - The order starts at `start`, in the direction whose first move is
+        shorter.
+      - `optimize_open_path` / `path_cost` are unchanged and still tested,
+        but no longer used by the ROI logic.
+    - `logic/roi_logic.py`: `optimize_roi_order` uses `optimize_closed_tour`
+      (start 0, class attribute `path_tolerance = 0.02`). The log line gives
+      the closed total and the longest move before -> after ("total ... s
+      -> ... s, longest move ... s -> ... s (incl. return to first ROI)").
+      Backup, new list, renaming and GUI refresh are unchanged.
+    - Tests:
+      - closed exact = brute force (5-9 points); heuristic within 2 % of
+        exact on 10-12 points (worst 0.00 %);
+      - 30 / 50 random points (10 sets) compared with the open-path order
+        evaluated as a closed tour: total never worse (e.g. 50 points
+        55.6 s -> 50.5 s) and longest move much shorter (8.2 s -> 2.3 s);
+      - tolerance 0 gives the best total found; 0.02 gives a longest move
+        <= that of tolerance 0 (shorter in 5/12 sets, total +1.55 % at
+        most);
+      - the first index is always `start`; 50 points in 0.3 s;
+      - logic / GUI with the dummy stage (25 ROIs: total 124.1 s -> 36.0 s,
+        longest move 8.8 s -> 3.7 s);
+      - end to end with `make_random_roi_list` (30 ROIs: files written,
+        markers ROI_031..ROI_060 in the new order);
+      - all on qudi-core 1.7 and 1.8.
 
 #### Changed
 
