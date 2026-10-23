@@ -39,14 +39,17 @@ fields:
     default: ""
 
   save_network_path:
+    visible: false
     required: false
     default_from: default_network_path
 
   transfer_data:
+    visible: false
     required: false
     default: false
 
   email:
+    visible: false
     required: false
     default: ""
 

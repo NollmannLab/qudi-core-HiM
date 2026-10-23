@@ -48,9 +48,12 @@ class SDImagingMixin:
     _prepare_imaging: external trigger of the laser source on, intensities of the imaging sequence
         loaded, then wait for ZEN "ready" (no timeout: the user selects the experiment block and
         clicks "Start Experiment" in ZEN first).
-    _image_roi: ZEN autofocus block (start trigger + wait for done), 2 s, laser source ready check,
-        ZEN acquisition block (start trigger + wait for done), 2 s, file name appended to
-        movie_name.txt. A ROI only counts as done once ZEN's "done" trigger has been seen for it.
+    _image_roi: ZEN autofocus block (start trigger + wait for done), _check_autofocus(roi_name),
+        2 s, laser source ready check, ZEN acquisition block (start trigger + wait for done), 2 s,
+        file name appended to movie_name.txt. A ROI only counts as done once ZEN's "done" trigger
+        has been seen for it.
+    _check_autofocus: hook between the autofocus block and the acquisition block; does nothing
+        here (overridden by a task that checks the focus, e.g. the Hi-M task).
     _end_imaging: lasers disabled, external trigger off, intensities reset to 0.
     """
 
@@ -80,6 +83,7 @@ class SDImagingMixin:
         self._trigger_logic.send_trigger('trigger_ZEN_start_block')
         self._wait_for_done()
         self.log.info(f'{roi_name}: autofocus confirmed done by ZEN.')
+        self._check_autofocus(roi_name)
 
         sleep(2)
         # confirm the laser source is ready (e.g. wake the Celesta from standby) without enabling
@@ -94,6 +98,11 @@ class SDImagingMixin:
 
         sleep(2)
         self._append_movie_name(file_name)
+
+    def _check_autofocus(self, roi_name: str) -> None:
+        """Check of the focus after the ZEN autofocus block of roi_name, before the acquisition
+        block. Does nothing here."""
+        pass
 
     def _end_imaging(self) -> None:
         if self.imaging_sequence:

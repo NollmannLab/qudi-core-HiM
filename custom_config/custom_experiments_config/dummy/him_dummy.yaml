@@ -1,0 +1,35 @@
+experiment: Hi-M Dummy
+
+description: >
+  Configure a Hi-M experiment on the dummy setup (HiMDummyTask): hybridization,
+  imaging of every ROI (dummy wait), photobleaching and needle rinse for each probe.
+
+output_filename: him_task_dummy.yaml
+
+fields:
+
+  sample_name:
+    required: true
+    default: ""
+
+  imaging_sequence:
+    required: true
+    default: []
+    model: standard
+
+  num_z_planes:
+    required: true
+    default: 1
+    minimum: 1
+
+  roi_list_path:
+    required: true
+    default: ""
+
+  injections_path:
+    required: true
+    default: ""
+
+  save_path:
+    required: true
+    default_from: default_path_imagedata

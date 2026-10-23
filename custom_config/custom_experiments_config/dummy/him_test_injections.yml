@@ -1,0 +1,50 @@
+# Example injections file for the Hi-M task on the dummy setup (HiMDummyTask).
+# Same format as the files written by the injections configurator. The dummy flow sensor gives
+# ~100 µl/min per V, so each 20 µl injection takes about 10 s.
+buffer:
+  1: SSC
+  2: Wash buffer
+  3: Imaging buffer
+  7: Probe
+probes:
+  1: RT1
+  2: RT2
+probe_needle_mode: next
+hybridization list:
+- step_number: 1
+  procedure: Hybridization
+  product: SSC
+  volume: 20
+  flowrate: 200
+  time: null
+- step_number: 2
+  procedure: Hybridization
+  product: Probe
+  volume: 20
+  flowrate: 200
+  time: null
+- step_number: 3
+  procedure: Hybridization
+  product: null
+  volume: null
+  flowrate: null
+  time: 10
+- step_number: 4
+  procedure: Hybridization
+  product: Wash buffer
+  volume: 20
+  flowrate: 200
+  time: null
+photobleaching list:
+- step_number: 1
+  procedure: Photobleaching
+  product: Wash buffer
+  volume: 20
+  flowrate: 200
+  time: null
+- step_number: 2
+  procedure: Photobleaching
+  product: Imaging buffer
+  volume: 20
+  flowrate: 200
+  time: null

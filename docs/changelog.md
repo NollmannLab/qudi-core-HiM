@@ -1134,6 +1134,118 @@ Last updated: 2026-10-14
 
 #### Added
 
+- `tasks/him.py` (2026-10-19): **Hi-M task**. Checks first, then for each
+  probe (RT), sorted by tube: hybridization -> imaging of every ROI ->
+  photobleaching -> needle rinse. Translated from
+  `legacy/HiM_imaging_SD.py` and `legacy/HiM_imaging_RAMM.py`. The fluidics
+  steps (`FluidicsStepsMixin`), the ROI imaging (imaging mixins) and the
+  progress display (`ProgressModuleTask`) are reused unchanged.
+  - `HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask)`:
+    - Connectors: valve, flow, robot, ROI and laser logic, plus
+      `trigger_logic` (optional).
+    - Options: `user_config_path`, `probe_valve_number`; class attribute
+      `needle_rinsing_duration_s = 30`.
+    - Hooks: `_read_microscope_parameters`, `_check_microscope`,
+      `_create_data_folder` (default `save_path/YYYY_MM_DD/NNN_HiM_<sample>`)
+      and `_file_name` (`scan_{prefix}_{RT}_{roi number}_ROI`).
+  - Run:
+    1. Experiment YAML and injections file (hybridization and
+       photobleaching lists, `probe_needle_mode`, missing -> 'next').
+    2. All checks before any hardware call, every problem in one error:
+       - both lists checked with `_validate` (problems prefixed with the
+         list name);
+       - probes not empty;
+       - needle position defined (warning and message box as in the
+         fluidics task);
+       - ROI list loaded and not empty;
+       - with 'next', the extra tubes of a cycle must not be another probe
+         and the last tube must exist on the robot;
+       - setup checks (`_check_microscope`).
+    3. GUIs locked (valves, flow control, robot, ROI tracking / actions,
+       lasers; lasers stopped); scan stage velocity.
+    4. Plan logged.
+    5. `_prepare_imaging()`, data folder, `HiM_parameters.yml`.
+    6. Cycles, with progress "Cycle i/N - RT", "... - Hybridization k/K - ...",
+       "... - ROI j/M", "... - Photobleaching k/K - ...", "... - Rinsing
+       needle - s left":
+       - hybridization: needle to the probe tube, `start_valve_positions`,
+         the steps, `cleanup_valve_positions`;
+       - imaging: each ROI, then back to the first ROI;
+       - photobleaching: buffer valve only, the needle is not moved;
+       - needle rinse: `flow_logic.start_rinsing()`, then wait for the end
+         of the rinse (timeout duration + 30 s).
+    7. "N/N - Done" and a summary.
+  - `_cleanup()`: pressure regulation, volume measurement and rinsing
+    stopped, pressure 0, `cleanup_valve_positions`, `_end_imaging()`, stage
+    back to the first ROI at its previous velocity, GUIs unlocked. Each step
+    is protected on its own.
+  - The rinse is started (and stopped in cleanup) in the flow logic's
+    thread, through a small `_Invoker` object: `start_rinsing()` starts a
+    QTimer of the flow logic. Called from a task QThread, Qt refuses to
+    start that timer ("Timers cannot be started from another thread") and
+    the rinse never ends; checked offscreen.
+  - Setups:
+    - `HiMSDTask(SDImagingMixin, HiMTaskBase)`, valve layout of
+      `FluidicsSDTask`:
+      - reads `zen_saving_path`, `zen_ref_images_path` and
+        `correlation_threshold`; both paths must be existing folders;
+      - logs "ZEN: number of acquisition loops = N x M = ..., C = <laser
+        lines>, Z = <planes>";
+      - SD imaging preparation, then the new ZEN folder (folders after minus
+        before; 10 attempts 1 s apart; none or several raise with the legacy
+        messages);
+      - qudi files go in `<ZEN folder>/metadata`; prefix '' as in the legacy
+        SD task, e.g. `scan__RT1_007_ROI`;
+      - `_check_autofocus` is a PLACEHOLDER: one warning per run, and the
+        to-do from the legacy is in its docstring.
+    - `HiMRAMMTask(RAMMImagingMixin, HiMTaskBase)`: PLACEHOLDER, valve layout
+      of `FluidicsRAMMTask`. `_check_microscope` reports "Hi-M imaging on the
+      RAMM is not migrated yet (focus logic, FPGA) - see
+      legacy/HiM_imaging_RAMM.py", so the task stops before any hardware
+      call. The legacy to-do is in the class docstring.
+    - `HiMDummyTask(DummyImagingMixin, HiMTaskBase)`: RAMM valve layout on
+      the dummy valves, data folder from the experiment YAML `save_path`.
+  - `tasks/common/imaging_steps.py`: `SDImagingMixin._image_roi` calls
+    `self._check_autofocus(roi_name)` after the ZEN autofocus block and before
+    the 2 s wait / acquisition block (legacy order). `_check_autofocus` does
+    nothing in the mixin.
+  - Configs:
+    - `spinning_disk/him_epi.yaml` and `dummy/him_epi_sd.yaml`:
+      `save_network_path`, `transfer_data` and `email` get `visible: false`
+      (kept, `required: false`).
+    - New `dummy/him_dummy.yaml` (Hi-M Dummy, `save_path`, output
+      `him_task_dummy.yaml`), registered in `dummy_config.cfg`.
+    - New `dummy/him_test_injections.yml`: buffers SSC / Wash buffer /
+      Imaging buffer / Probe (7), probes RT1 (tube 1) and RT2 (tube 2), 20 µl
+      steps, one 10 s incubation, two photobleaching steps.
+    - `dummy_config.cfg`: `him_dummy` task entry (`HiMDummyTask`,
+      `probe_valve_number` 7).
+    - `Spinning_disk_config.cfg` (`HiMSDTask`, `probe_valve_number` 3) and
+      `RAMM_config.cfg` (`HiMRAMMTask`): commented-out `him` entries.
+  - Tests (offscreen; qudi-core 1.7.0 and 1.8.0):
+    - ROI scan SD (stand-in logic, fake TriggerLogic), before / after the
+      hook: identical calls with arguments, order, timing to 0.5 s and log
+      lines, for a full run (45 calls) and an interrupt (37 calls).
+    - Hi-M test 35/35 (dummy_config modules: dummy valve, pumps, flow sensor,
+      flow logic, robot, ROI and laser logic):
+      - full 2-probe run: step order checked call by call, needle tubes
+        1 / 2, `movie_name.txt` names (`scan_001_RT1_000_ROI` ...),
+        `HiM_parameters.yml`, progress labels, end state;
+      - interrupt during the hybridization, the imaging and the rinse:
+        cleanup state each time (pressure 0, loops stopped, valves c=1 b=1
+        a=1, stage back to the first ROI at its previous velocity, GUIs
+        unlocked);
+      - errors before any hardware call: unknown product (each list),
+        missing needle position, 'next' tube colliding with a probe, empty
+        ROI list, and all of them at once (4 problems in one error);
+        'same' mode with two probe injections runs;
+      - `HiMSDTask` with a fake TriggerLogic creating the ZEN folder when
+        "ready" is raised: folder found (an older folder and a file
+        ignored), metadata subfolder, ZEN log line, placeholder logged once;
+        no new folder or two new folders -> clear error and cleanup; missing
+        `zen_saving_path` -> error before any hardware call;
+      - `HiMRAMMTask`: stops with the placeholder message, nothing moved.
+
 - **Superseded same-day**: an earlier version of this entry (and of
   `tasks/roi_multicolour_scan_sd_task.py` itself) ported the legacy ROI task's
   autofocus handshake and per-plane laser/camera loop as well. JB clarified
