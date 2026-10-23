@@ -3,7 +3,7 @@ experiment: ROI multicolor scan Dummy
 description: >
   Configure a multicolor Dummy acquisition over a predefined ROI list.
 
-output_filename: ROI_multicolor_scan_task_DUMMY.yaml
+output_filename: ROI_multicolor_scan_task_dummy.yaml
 
 fields:
 

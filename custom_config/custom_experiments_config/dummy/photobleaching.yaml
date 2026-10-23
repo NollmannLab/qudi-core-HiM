@@ -1,10 +1,10 @@
-experiment: photobleaching_SD
+experiment: photobleaching
 
 description: >
-  Configure a photobleaching experiment on the Spining_disk microscope. Dummy copy of the
+  Configure a photobleaching experiment on the Spinning_disk microscope. Dummy copy of the
   spinning-disk definition (spinning_disk/photobleaching.yaml), for testing on the dummy setup.
 
-output_filename: photobleaching_task_sd.yaml
+output_filename: photobleaching_task_dummy.yaml
 
 fields:
 
