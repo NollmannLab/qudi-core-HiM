@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-14
+Last updated: 2026-10-23
 
 ### Documentation
 
@@ -296,6 +296,99 @@ Last updated: 2026-10-14
     `settle_time_s: 0.0`.
 
 ### ROI logic
+
+#### Added
+
+- ROI path optimization (2026-10-23): the "optimize path" action of the ROI
+  GUI reorders the current ROI list along the path of shortest stage-move
+  time, the first ROI staying first.
+  - `util/roi_path.py` (new, pure numpy, no qudi import):
+    `optimize_open_path(xy, speeds, start, n_restarts, seed)` and
+    `path_cost(xy, order, speeds)`. The move time between two points is
+    `max(|dx| / vx, |dy| / vy)` (x and y move together), on an open path (no
+    return). Up to 12 points: exact (Held-Karp). Above: nearest neighbour +
+    2-opt, repeated from `n_restarts` random orders (fixed seed, so the
+    result is deterministic), and the best path is kept.
+  - `logic/roi_logic.py`: `optimize_roi_order(path)` does the following:
+    - saves a backup `<name>_before_optimization_<YYYYMMDD_HHMMSS>` first (if
+      that fails: error, False, list untouched);
+    - reads the x / y speeds from `get_stage_velocity` (equal speeds if
+      unavailable);
+    - reorders the ROIs keeping the full (x, y, z) and the list metadata;
+    - renames them `ROI_{N+1}`... after the highest current number, so a
+      later `add_roi` continues after the new last name;
+    - renames the list `<name>_optimized_<stamp>`, saves it as a new file,
+      sets the first ROI active and refreshes the GUI (same signal as after
+      a load);
+    - logs the estimated move time before / after.
+    Fewer than 3 ROIs: nothing to do, no file.
+  - `save_roi_list(path, filename, overwrite=True)` now returns a bool and
+    with `overwrite=False` refuses to replace an existing file (error,
+    False). Save button behaviour unchanged (overwrites); a failed save is
+    now logged as an error instead of a warning.
+  - `gui/roi_manager/roi_gui.py` / `ui_roi_gui.ui`: `optimize_path_Action`
+    (toolbar, replaces `add_interpolation_Action` there) sends the folder of
+    the save path field to the logic; the action is disabled with the other
+    ROI actions while a task holds the ROI lock; new tooltip.
+  - `util/make_random_roi_list.py` (new, command line, no change to any
+    hardware / logic / GUI module): writes a ROI list file with N random
+    ROIs for testing on a computer without a stage,
+    `python -m qudi.util.make_random_roi_list --n 25 --x-range 0 10000
+    --y-range 0 10000`.
+    - Options: `--z` or `--z-range`, `--seed`, `--name` (default
+      `random_<n>_rois`), `--folder` (default: current folder),
+      `--first-number`, and `--creation-time` (fixed value -> identical
+      file for identical arguments).
+    - The list is built with `RegionOfInterestList` / `to_dict()` of the ROI
+      logic: names `ROI_001`... and origin (0, 0, 0).
+    - An existing file is never overwritten (error, exit code 1); the
+      helper prints the path and the number of ROIs.
+    - Tested: files load in the ROI GUI ("Load list", N markers, also
+      N = 0); same seed -> same ROIs. End to end: 30 generated ROIs ->
+      load -> optimize path -> backup + optimized file, ROI_031..ROI_060 in
+      the new order (146.3 s -> 38.2 s estimated).
+  - Tests: exact = brute force (5-9 points), 2-opt within 2 % of exact
+    (10-12 points, worst 0.00 %), shuffled grid -> serpentine, 40 points in
+    0.2 s; logic + GUI offscreen with the dummy stage (25 ROIs: 121.6 s ->
+    33.0 s estimated, ROI_026..ROI_050, backup identical, no overwrite,
+    0/1/2 ROIs untouched), on qudi-core 1.7 and 1.8.
+  - Closed tour (2026-10-23): the optimized order now also avoids long
+    moves, in particular the return from the last ROI to the first one
+    (tasks go back to the first ROI after each scan / Hi-M cycle). Same cost
+    per move.
+    - `util/roi_path.py`: new `optimize_closed_tour(xy, speeds, start,
+      tolerance=0.02, n_restarts, seed)` with helpers `tour_cost` and
+      `longest_move` (both include the closing move).
+      - Objective: total time of the closed tour. Up to 12 points: exact
+        (Held-Karp). Above: nearest-neighbour tour + 2-opt and Or-opt
+        (blocks of 1-3 points moved, either orientation) until no
+        improvement, repeated from `n_restarts` random tours (fixed seed).
+      - Tie-break: among the tours found within `tolerance` of the best
+        total, the one with the smallest longest move is kept.
+      - The order starts at `start`, in the direction whose first move is
+        shorter.
+      - `optimize_open_path` / `path_cost` are unchanged and still tested,
+        but no longer used by the ROI logic.
+    - `logic/roi_logic.py`: `optimize_roi_order` uses `optimize_closed_tour`
+      (start 0, class attribute `path_tolerance = 0.02`). The log line gives
+      the closed total and the longest move before -> after ("total ... s
+      -> ... s, longest move ... s -> ... s (incl. return to first ROI)").
+      Backup, new list, renaming and GUI refresh are unchanged.
+    - Tests:
+      - closed exact = brute force (5-9 points); heuristic within 2 % of
+        exact on 10-12 points (worst 0.00 %);
+      - 30 / 50 random points (10 sets) compared with the open-path order
+        evaluated as a closed tour: total never worse (e.g. 50 points
+        55.6 s -> 50.5 s) and longest move much shorter (8.2 s -> 2.3 s);
+      - tolerance 0 gives the best total found; 0.02 gives a longest move
+        <= that of tolerance 0 (shorter in 5/12 sets, total +1.55 % at
+        most);
+      - the first index is always `start`; 50 points in 0.3 s;
+      - logic / GUI with the dummy stage (25 ROIs: total 124.1 s -> 36.0 s,
+        longest move 8.8 s -> 3.7 s);
+      - end to end with `make_random_roi_list` (30 ROIs: files written,
+        markers ROI_031..ROI_060 in the new order);
+      - all on qudi-core 1.7 and 1.8.
 
 #### Changed
 
