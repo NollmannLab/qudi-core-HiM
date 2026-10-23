@@ -250,7 +250,7 @@
      <x>0</x>
      <y>0</y>
      <width>1091</width>
-     <height>20</height>
+     <height>22</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuMenu">
@@ -282,7 +282,7 @@
    <addaction name="new_roi_Action"/>
    <addaction name="go_to_roi_Action"/>
    <addaction name="delete_roi_Action"/>
-   <addaction name="add_interpolation_Action"/>
+   <addaction name="optimize_path_Action"/>
   </widget>
   <widget class="QToolBar" name="toolBar_2">
    <property name="windowTitle">
@@ -397,6 +397,14 @@
    </property>
    <property name="toolTip">
     <string>Load template for RNA / DNA ROIs</string>
+   </property>
+  </action>
+  <action name="optimize_path_Action">
+   <property name="text">
+    <string>Optimize_path</string>
+   </property>
+   <property name="toolTip">
+    <string>Save a backup, reorder the ROIs along the shortest stage path (first ROI kept first), renumber them and save the result as a new list</string>
    </property>
   </action>
  </widget>

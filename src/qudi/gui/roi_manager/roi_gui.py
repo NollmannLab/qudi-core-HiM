@@ -335,6 +335,7 @@ class RoiGUI(GuiBase):
     sigStartTracking = QtCore.Signal()
     sigStopTracking = QtCore.Signal()
     sigAddInterpolation = QtCore.Signal(float)
+    sigOptimizePath = QtCore.Signal(str)  # folder where the backup and the optimized list are saved
 
     _mw = None  # QMainWindow handle
     _roi_logic = None
@@ -463,6 +464,7 @@ class RoiGUI(GuiBase):
         self.sigRoiListNameChanged.connect(self._roi_logic.rename_roi_list, QtCore.Qt.QueuedConnection)
         self._mw.active_roi_ComboBox.textActivated.connect(self._roi_logic.set_active_roi, QtCore.Qt.ConnectionType.QueuedConnection)
         self.sigAddInterpolation.connect(self._roi_logic.add_interpolation, QtCore.Qt.QueuedConnection)
+        self.sigOptimizePath.connect(self._roi_logic.optimize_roi_order, QtCore.Qt.QueuedConnection)
         self.sigStartTracking.connect(self._roi_logic.start_tracking)
         self.sigStopTracking.connect(self._roi_logic.stop_tracking)
 
@@ -478,6 +480,7 @@ class RoiGUI(GuiBase):
         self.sigRoiListNameChanged.disconnect()
         self._mw.active_roi_ComboBox.textActivated.disconnect(self._roi_logic.set_active_roi)
         self.sigAddInterpolation.disconnect()
+        self.sigOptimizePath.disconnect()
         self.sigStartTracking.disconnect()
         self.sigStopTracking.disconnect()
 
@@ -487,6 +490,7 @@ class RoiGUI(GuiBase):
     def __connect_internal_signals(self):
         """ Connect signals with slots within this module (internal signals). """
         self._mw.add_interpolation_Action.triggered.connect(self.add_interpolation_clicked, QtCore.Qt.QueuedConnection)
+        self._mw.optimize_path_Action.triggered.connect(self.optimize_path_clicked, QtCore.Qt.QueuedConnection)
         self._mw.discard_all_roi_Action.triggered.connect(self.delete_all_roi_clicked, QtCore.Qt.QueuedConnection)
 
         # just emit one signal when finished and not at each modification of the value (valueChanged)
@@ -509,6 +513,7 @@ class RoiGUI(GuiBase):
     def __disconnect_internal_signals(self):
         """ Disconnect signals from slots within this module (internal signal). """
         self._mw.add_interpolation_Action.triggered.disconnect()
+        self._mw.optimize_path_Action.triggered.disconnect()
         self._mw.discard_all_roi_Action.triggered.disconnect()
         self._mw.roi_width_doubleSpinBox.editingFinished.disconnect()
         self._mw.save_list_Action.triggered.disconnect()
@@ -657,6 +662,15 @@ class RoiGUI(GuiBase):
         """
         roi_distance = self._mw.roi_width_doubleSpinBox.value()
         self.sigAddInterpolation.emit(roi_distance)
+
+    @QtCore.Slot()
+    def optimize_path_clicked(self):
+        """ This method is called when the optimize path toolbutton is clicked.
+        Sends the folder of the save path field to the logic module, which saves a backup of the list,
+        reorders the ROIs along the shortest stage path (first ROI kept first), renames them and saves
+        the result as a new list in this folder.
+        """
+        self.sigOptimizePath.emit(self._mw.save_path_LineEdit.text())
 
     @QtCore.Slot()
     def delete_all_roi_clicked(self):
@@ -988,6 +1002,7 @@ class RoiGUI(GuiBase):
         self._mw.go_to_roi_Action.setDisabled(True)
         self._mw.delete_roi_Action.setDisabled(True)
         self._mw.add_interpolation_Action.setDisabled(True)
+        self._mw.optimize_path_Action.setDisabled(True)
 
         self._mw.new_list_Action.setDisabled(True)
         self._mw.save_list_Action.setDisabled(True)
@@ -1005,6 +1020,7 @@ class RoiGUI(GuiBase):
         self._mw.go_to_roi_Action.setDisabled(False)
         self._mw.delete_roi_Action.setDisabled(False)
         self._mw.add_interpolation_Action.setDisabled(False)
+        self._mw.optimize_path_Action.setDisabled(False)
 
         self._mw.new_list_Action.setDisabled(False)
         self._mw.save_list_Action.setDisabled(False)

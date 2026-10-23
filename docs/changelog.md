@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-14
+Last updated: 2026-10-23
 
 ### Documentation
 
@@ -296,6 +296,45 @@ Last updated: 2026-10-14
     `settle_time_s: 0.0`.
 
 ### ROI logic
+
+#### Added
+
+- ROI path optimization (2026-10-23): the "optimize path" action of the ROI
+  GUI reorders the current ROI list along the path of shortest stage-move
+  time, the first ROI staying first.
+  - `util/roi_path.py` (new, pure numpy, no qudi import):
+    `optimize_open_path(xy, speeds, start, n_restarts, seed)` and
+    `path_cost(xy, order, speeds)`. The move time between two points is
+    `max(|dx| / vx, |dy| / vy)` (x and y move together), on an open path (no
+    return). Up to 12 points: exact (Held-Karp). Above: nearest neighbour +
+    2-opt, repeated from `n_restarts` random orders (fixed seed, so the
+    result is deterministic), and the best path is kept.
+  - `logic/roi_logic.py`: `optimize_roi_order(path)` does the following:
+    - saves a backup `<name>_before_optimization_<YYYYMMDD_HHMMSS>` first (if
+      that fails: error, False, list untouched);
+    - reads the x / y speeds from `get_stage_velocity` (equal speeds if
+      unavailable);
+    - reorders the ROIs keeping the full (x, y, z) and the list metadata;
+    - renames them `ROI_{N+1}`... after the highest current number, so a
+      later `add_roi` continues after the new last name;
+    - renames the list `<name>_optimized_<stamp>`, saves it as a new file,
+      sets the first ROI active and refreshes the GUI (same signal as after
+      a load);
+    - logs the estimated move time before / after.
+    Fewer than 3 ROIs: nothing to do, no file.
+  - `save_roi_list(path, filename, overwrite=True)` now returns a bool and
+    with `overwrite=False` refuses to replace an existing file (error,
+    False). Save button behaviour unchanged (overwrites); a failed save is
+    now logged as an error instead of a warning.
+  - `gui/roi_manager/roi_gui.py` / `ui_roi_gui.ui`: `optimize_path_Action`
+    (toolbar, replaces `add_interpolation_Action` there) sends the folder of
+    the save path field to the logic; the action is disabled with the other
+    ROI actions while a task holds the ROI lock; new tooltip.
+  - Tests: exact = brute force (5-9 points), 2-opt within 2 % of exact
+    (10-12 points, worst 0.00 %), shuffled grid -> serpentine, 40 points in
+    0.2 s; logic + GUI offscreen with the dummy stage (25 ROIs: 121.6 s ->
+    33.0 s estimated, ROI_026..ROI_050, backup identical, no overwrite,
+    0/1/2 ROIs untouched), on qudi-core 1.7 and 1.8.
 
 #### Changed
 

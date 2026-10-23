@@ -29,8 +29,10 @@ from qudi.core.configoption import ConfigOption
 from qudi.core.module import LogicBase
 from qudi.core.connector import Connector
 from qudi.core.statusvariable import StatusVar
+from qudi.util.roi_path import optimize_open_path, path_cost
 
 import os
+import re
 import json
 import numpy as np
 from time import sleep
@@ -791,12 +793,14 @@ class RoiLogic(LogicBase):
                                      })
         self.set_active_roi(None)
 
-    def save_roi_list(self, path, filename):
+    def save_roi_list(self, path, filename, overwrite=True):
         """
         Save the current roi_list to a file. A dictionary format is used.
         @param: str path: path to the folder where the ROI list will be saved
         @param: str filename: name of the file containing the dictionary with the ROI list information.
-                                json format is used
+                                json format is used (<path>/<filename>.json)
+        @param: bool overwrite: if False, an existing file is not replaced (error logged, False returned)
+        @return: bool: True if the file was written, False otherwise (error logged)
         """
         # convert the roi_list to a dictionary
         roi_list_dict = self.roi_list_to_dict(self._roi_list)
@@ -805,16 +809,23 @@ class RoiLogic(LogicBase):
             try:
                 os.makedirs(path)  # recursive creation of all directories on the path
             except Exception as e:
-                self.log.error('Error {0}'.format(e))
+                self.log.error('ROI list not saved - could not create the folder {0}: {1}'.format(path, e))
+                return False
 
         p = os.path.join(path, filename)
+
+        if not overwrite and os.path.exists(p + '.json'):
+            self.log.error('ROI list not saved: the file {}.json already exists.'.format(p))
+            return False
 
         try:
             with open(p + '.json', 'w') as file:
                 json.dump(roi_list_dict, file)
             self.log.info('ROI list saved to file {}.json'.format(p))
+            return True
         except Exception as e:
-            self.log.warning('ROI list not saved: {}'.format(e))
+            self.log.error('ROI list not saved: {}'.format(e))
+            return False
 
     def load_roi_list(self, complete_path=None):
         """
@@ -842,6 +853,89 @@ class RoiLogic(LogicBase):
             self.log.info('Loaded ROI list from {}'.format(complete_path))
         except Exception as e:
             self.log.warning('ROI list not loaded: {}'.format(e))
+
+    @QtCore.Slot(str)
+    def optimize_roi_order(self, path):
+        """
+        Reorder the current ROI list along the path of shortest stage-move time (first ROI kept first),
+        rename the ROIs in the new order and save both versions in the folder path:
+          1. backup of the list before optimization: <name>_before_optimization_<YYYYMMDD_HHMMSS>.json
+             (never overwrites a file; if it cannot be written the list is not modified);
+          2. order from qudi.util.roi_path.optimize_open_path on the x, y positions, with the stage
+             x / y velocities as speeds (equal speeds if they cannot be read);
+          3. new names ROI_{N+1}, ROI_{N+2}, ... in the new order (N = highest ROI number of the list);
+             positions (x, y, z) and the list metadata are kept;
+          4. list renamed <name>_optimized_<YYYYMMDD_HHMMSS>, GUI refreshed (as after loading a list),
+             first ROI active, list saved under its new name (never overwrites a file).
+        Fewer than 3 ROIs: nothing to optimize, nothing written.
+
+        @param: str path: folder where the backup and the optimized list are saved
+        @return: bool: True if done (or nothing to optimize), False otherwise (error logged)
+        """
+        names = self.roi_names
+        if len(names) < 3:
+            self.log.info(f'ROI path: {len(names)} ROI(s) - nothing to optimize.')
+            return True
+        if not path:
+            self.log.error('ROI path not optimized: no folder to save the backup and the optimized list.')
+            return False
+
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        name = self.roi_list_name
+
+        # 1. backup of the list as it is
+        backup_name = f'{name}_before_optimization_{stamp}'
+        if not self.save_roi_list(path, backup_name, overwrite=False):
+            self.log.error('ROI path not optimized: the backup of the list could not be saved - list unchanged.')
+            return False
+
+        # 2. order of shortest move time (x and y move simultaneously)
+        speeds = (1.0, 1.0)
+        try:
+            velocity = self.get_stage_velocity([self._x_axis_label, self._y_axis_label])
+            vx, vy = float(velocity[self._x_axis_label]), float(velocity[self._y_axis_label])
+            if vx > 0 and vy > 0:
+                speeds = (vx, vy)
+            else:
+                self.log.info(f'ROI path: stage velocity {velocity} not usable - equal x / y speeds used.')
+        except Exception as e:
+            self.log.info(f'ROI path: stage velocity not available ({e}) - equal x / y speeds used.')
+        positions = [self.get_roi_position(roi) for roi in names]
+        xy = np.array([[pos[0], pos[1]] for pos in positions], dtype=float)
+        order = optimize_open_path(xy, speeds=speeds, start=0)
+        old_time = path_cost(xy, range(len(names)), speeds)
+        new_time = path_cost(xy, order, speeds)
+
+        # 3. new order and names, positions and list metadata kept (same RegionOfInterest objects)
+        numbers = [int(match.group(1)) for match in (re.fullmatch(r'ROI_(\d+)', roi) for roi in names) if match]
+        highest = max(numbers) if numbers else len(names)
+        reordered = {}
+        for count, index in enumerate(order, 1):
+            roi = self._roi_list._rois[names[index]]
+            roi.name = 'ROI_' + str(highest + count).zfill(3)
+            reordered[roi.name] = roi
+        self._roi_list._rois = reordered
+        new_names = self.roi_names
+
+        # 4. new list name, GUI refresh (as after loading a list), first ROI active, save
+        optimized_name = f'{name}_optimized_{stamp}'
+        self.rename_roi_list(optimized_name)
+        self.sigRoiListUpdated.emit({'name': self.roi_list_name,
+                                     'rois': self.roi_positions,
+                                     'cam_image': self.roi_list_cam_image,
+                                     'cam_image_extent': self.roi_list_cam_image_extent
+                                     })
+        self.set_active_roi(new_names[0])
+        backup_file = os.path.join(path, backup_name + '.json')
+        if not self.save_roi_list(path, optimized_name, overwrite=False):
+            self.log.error(f'ROI path optimized but the optimized list could not be saved - it is only in memory '
+                           f'(backup {backup_file}).')
+            return False
+
+        self.log.info(f'ROI path optimized: {old_time:.1f} s -> {new_time:.1f} s estimated move time '
+                      f'({len(new_names)} ROIs); renamed {new_names[0]}..{new_names[-1]}; backup {backup_file}; '
+                      f'saved as {os.path.join(path, optimized_name + ".json")}')
+        return True
 
     @QtCore.Slot()
     def delete_all_roi(self):
