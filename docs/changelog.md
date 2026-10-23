@@ -330,6 +330,23 @@ Last updated: 2026-10-23
     (toolbar, replaces `add_interpolation_Action` there) sends the folder of
     the save path field to the logic; the action is disabled with the other
     ROI actions while a task holds the ROI lock; new tooltip.
+  - `util/make_random_roi_list.py` (new, command line, no change to any
+    hardware / logic / GUI module): writes a ROI list file with N random
+    ROIs for testing on a computer without a stage,
+    `python -m qudi.util.make_random_roi_list --n 25 --x-range 0 10000
+    --y-range 0 10000`.
+    - Options: `--z` or `--z-range`, `--seed`, `--name` (default
+      `random_<n>_rois`), `--folder` (default: current folder),
+      `--first-number`, and `--creation-time` (fixed value -> identical
+      file for identical arguments).
+    - The list is built with `RegionOfInterestList` / `to_dict()` of the ROI
+      logic: names `ROI_001`... and origin (0, 0, 0).
+    - An existing file is never overwritten (error, exit code 1); the
+      helper prints the path and the number of ROIs.
+    - Tested: files load in the ROI GUI ("Load list", N markers, also
+      N = 0); same seed -> same ROIs. End to end: 30 generated ROIs ->
+      load -> optimize path -> backup + optimized file, ROI_031..ROI_060 in
+      the new order (146.3 s -> 38.2 s estimated).
   - Tests: exact = brute force (5-9 points), 2-opt within 2 % of exact
     (10-12 points, worst 0.00 %), shuffled grid -> serpentine, 40 points in
     0.2 s; logic + GUI offscreen with the dummy stage (25 ROIs: 121.6 s ->
