@@ -44,12 +44,12 @@ import os
 import yaml
 from datetime import datetime
 
-from qudi.core.scripting.moduletask import ModuleTask
 from qudi.core.connector import Connector
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
+from qudi.tasks.common.progress import ProgressModuleTask
 
 
-class RoiScanTaskBase(ModuleTask):
+class RoiScanTaskBase(ProgressModuleTask):
     """Shared ROI scan: for each ROI of the list, move the stage, wait until it is idle and image the
     ROI with the setup's imaging mixin (_prepare_imaging / _image_roi / _end_imaging, see
     tasks/common/imaging_steps.py).
@@ -75,6 +75,10 @@ class RoiScanTaskBase(ModuleTask):
     Data: each run creates save_path/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA]/ with parameters.yml
     (sample name, start_roi and the positions of the ROIs scanned in this run) and movie_name.txt
     (one file name per imaged ROI).
+
+    Progress (Task Runner window), with M the number of ROIs scanned in this run and j the index in
+    this run: '0/M - Preparing imaging' (SD: then 'Waiting for ZEN "ready"'), 'j/M - ROI j/M - <roi>'
+    before each move, 'M/M - Done' after the last ROI.
 
     During the run the lasers are off (unless the imaging switches them), ROI tracking and ROI
     actions are locked and the stage moves at scan_stage_velocity. _cleanup() moves the stage back
@@ -166,20 +170,24 @@ class RoiScanTaskBase(ModuleTask):
                                f'see the log.')
 
         # 4. setup-specific preparation of the imaging
+        total = len(self._scan_rois)
+        self._report_progress(f'0/{total}', 'Preparing imaging')
         self._prepare_imaging()
 
         # 5. new data folder and metadata
         self.directory = self._create_directory(self.save_path)
         self._save_metadata_file()
 
-        # 6. ROI loop: move, image
-        for roi_name in self._scan_rois:
+        # 6. ROI loop: move, image (progress 'ROI j/M - <name>'; the "Moving to" line is the log)
+        for number, roi_name in enumerate(self._scan_rois, 1):
             self._check_interrupt()
+            self._report_progress(f'{number}/{total}', f'ROI {number}/{total} - {roi_name}', log=False)
             self._move_to_roi(roi_name)
             self._image_roi(roi_name, self._file_name(roi_name))
             self._scanned_rois.append(roi_name)
 
-        # 7. summary
+        # 7. summary ("All ROIs done." is the log line of the progress 'Done')
+        self._report_progress(f'{total}/{total}', 'Done', log=False)
         self.log.info('All ROIs done.')
         return {'directory': self.directory, 'imaged_rois': list(self._scanned_rois)}
 
@@ -361,9 +369,11 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     trigger_logic = Connector(interface='TriggerLogic')
 
     def _prepare_imaging(self) -> None:
-        """Log the number of ROIs of this run (the number of acquisition loops to set in ZEN), then
-        the SD imaging preparation (SDImagingMixin), which waits for ZEN "ready"."""
+        """Log the number of ROIs of this run (the number of acquisition loops to set in ZEN), show
+        'Waiting for ZEN "ready"' in the progress line, then the SD imaging preparation
+        (SDImagingMixin), which waits for ZEN "ready" (and logs it)."""
         self.log.info(f'ZEN: set the number of acquisition loops to {len(self._scan_rois)}')
+        self._report_progress(f'0/{len(self._scan_rois)}', 'Waiting for ZEN "ready"', log=False)
         super()._prepare_imaging()
 
 
