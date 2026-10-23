@@ -105,7 +105,9 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     ...); with 'same' the needle stays in the probe tube. The photobleaching list uses the buffer
     valve only (the needle is not moved).
 
-    Everything is checked before any hardware call; all problems are reported in one error. During
+    If the needle position (robot origin) is not defined, the task logs a warning, shows a message box
+    and ends without an exception, before any hardware call (as the fluidics task). Everything else
+    is checked before any hardware call; all problems are reported in one error. During
     the run the GUIs of the valves, flow control, robot, ROIs and lasers are locked and the stage
     moves at scan_stage_velocity. _cleanup() always stops the pressure regulation, volume
     measurement and rinsing, sets the pressure to 0, puts the valves in cleanup_valve_positions,
@@ -195,6 +197,12 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
             except RuntimeError as err:
                 problems.append(str(err))
 
+        # needle position (robot origin) needed for every cycle: warning + message box, task stopped
+        # without any hardware call (as the fluidics task)
+        if self._robot.origin is None:
+            self._warn_needle_position()
+            return {'aborted': 'needle position not initialised', 'cycles_done': 0}
+
         # 2. checks, all problems in one error before any hardware call
         hyb_steps, pb_steps, probes = [], [], {}
         if injections is not None:
@@ -211,11 +219,6 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
             else:
                 problems.extend(self._check_probe_tubes(probes, self._count_probe_injections(
                     hyb_list, buffer_valves, probe_valve), needle_mode))
-
-        if self._robot.origin is None:
-            self._warn_needle_position()
-            problems.append('the needle position (robot origin) is not defined - set it in the Fluidics GUI '
-                            '("Set position 1")')
 
         if self.roi_list_path:
             try:

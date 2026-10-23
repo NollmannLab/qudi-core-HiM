@@ -1468,6 +1468,29 @@ Last updated: 2026-10-14
 
 #### Changed
 
+- `tasks/him.py` (2026-10-23): needle position not defined -> the Hi-M task
+  ends as finished, as the fluidics task does. Before, it showed the warning
+  pop-up but also added a problem to the check list and raised
+  `RuntimeError`, so the Task Runner reported a failed task.
+  - `HiMTaskBase._run`: the robot origin is checked right after reading the
+    experiment file and the injections file, before the other checks. If it
+    is not defined: `_warn_needle_position()` (warning + non-modal message
+    box) and return `{'aborted': 'needle position not initialised',
+    'cycles_done': 0}`. There is no logic call before this point (no ROI
+    list load, no valve / robot / stage / pressure call, no GUI lock), so
+    `_cleanup()` restores and unlocks nothing.
+  - The "needle position (robot origin) is not defined" entry is removed
+    from the problem list; class docstring updated.
+  - Test (offscreen, `dummy_config.cfg` modules; qudi-core 1.7.0 and 1.8.0):
+    - With the origin not set, alone or together with an unknown product,
+      the task ends as finished with the result above.
+    - The warning is logged with no error log, and one non-modal pop-up is
+      created in the GUI thread.
+    - No logic call is recorded and no GUI lock is set.
+    - With the origin set, the full 2-probe run, the interrupts, the other
+      errors (now 3 problems "at once"), the SD task with a fake ZEN and
+      the RAMM placeholder are unchanged.
+
 - `tasks/photobleaching.py` (2026-10-16): the photobleaching task reports its
   progress in the Task Runner window, using the mechanism of the fluidics
   task (`tasks/common/progress.py`). Hardware calls, their order and timing
