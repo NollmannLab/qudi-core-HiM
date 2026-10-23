@@ -1468,6 +1468,43 @@ Last updated: 2026-10-14
 
 #### Changed
 
+- `tasks/roi_multicolour_scan.py` (2026-10-23): the ROI scan reports its
+  progress in the Task Runner window, using the mechanism of the fluidics,
+  photobleaching and Hi-M tasks (`tasks/common/progress.py`). Hardware calls,
+  their order and timing, and the data files are unchanged;
+  `tasks/common/imaging_steps.py` is not touched.
+  - `RoiScanTaskBase` derives from `ProgressModuleTask` instead of
+    `ModuleTask`; the subclasses are unchanged. `progress_interval_s` (1.0)
+    becomes a task-runner option, as for the other progress tasks.
+  - Progress, with M the number of ROIs scanned in this run (from
+    `start_roi`) and j the index in this run:
+    - `0/M - Preparing imaging` before `_prepare_imaging()` (logged).
+    - `RoiScanSDTask._prepare_imaging` then shows `0/M - Waiting for ZEN
+      "ready"` before calling the SD mixin. Not logged: the mixin's "Waiting
+      for ZEN to signal it is ready..." line stays the log.
+    - `j/M - ROI j/M - <roi>` before each move. Not logged: the "Moving to
+      <roi>" line stays the log.
+    - `M/M - Done` after the last ROI. Not logged: "All ROIs done." stays the
+      log.
+  - Class docstring: progress paragraph.
+  - Tests (offscreen; qudi-core 1.7.0 and 1.8.0):
+    - Task Runner window (real `TaskRunnerLogic` and `TaskRunnerGui`, Run
+      button, real `roi_logic` / `laser_control_logic` of `dummy_config.cfg`,
+      `RoiScanDummyTask` from its entry), 11/11:
+      - with `start_roi` empty, the label shows `ROI 1/3 - ROI_000` ...
+        `ROI 3/3 - ROI_002`, then `Done`;
+      - with `start_roi` `ROI_001`, it shows `ROI 1/2 - ROI_001` and `ROI 2/2 -
+        ROI_002`;
+      - the label is cleared and hidden after the end, after an interrupt
+        during ROI 2 and after an error at the move to ROI 2;
+      - `RoiScanSDTask` with a fake TriggerLogic shows `Preparing imaging`,
+        `Waiting for ZEN "ready"`, the three ROIs, then `Done`.
+    - `RoiScanSDTask` before / after (stand-in logic, fake TriggerLogic):
+      identical trigger / stage / laser calls with arguments and order,
+      timing to 0.5 s and result, for a full run (45 calls) and an interrupt
+      (37 calls). The only log difference is the new line "0/3 - Preparing
+      imaging".
+
 - `tasks/him.py` (2026-10-23): needle position not defined -> the Hi-M task
   ends as finished, as the fluidics task does. Before, it showed the warning
   pop-up but also added a problem to the check list and raised
