@@ -181,7 +181,7 @@ class RoiScanTaskBase(ProgressModuleTask):
         # 6. ROI loop: move, image (progress 'ROI j/M - <name>'; the "Moving to" line is the log)
         for number, roi_name in enumerate(self._scan_rois, 1):
             self._check_interrupt()
-            self._report_progress(f'ROI {number}/{total} - {roi_name}', log=False)
+            self._report_progress(f'{number}/{total}', f'{roi_name}', log=False)
             self._move_to_roi(roi_name)
             self._image_roi(roi_name, self._file_name(roi_name))
             self._scanned_rois.append(roi_name)
