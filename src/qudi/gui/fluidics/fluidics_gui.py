@@ -679,8 +679,8 @@ class FluidicsGUI(GuiBase):
         :param float pressure: current pressure value retrieved from hardware
         :param float flowrate: current flowrate retrieved from hardware
         """
-        self._mw.pressure_LineEdit.setText('{:.2f}'.format(pressure[0]))
-        self._mw.flowrate_LineEdit.setText('{:.2f}'.format(flowrate[0]))
+        self._mw.pressure_LineEdit.setText('{:.1f}'.format(pressure[0]))
+        self._mw.flowrate_LineEdit.setText('{:.1f}'.format(flowrate[0]))
         self.update_pressure_and_flowrate_timetrace(pressure[0], flowrate[0])
 
     def update_pressure_and_flowrate_timetrace(self, pressure, flowrate):
@@ -728,10 +728,10 @@ class FluidicsGUI(GuiBase):
         :param: int total_volume: summed up volume already injected, rounded to integer format
         :param: int time: total time in seconds since start of the volume count
         """
-        self._mw.volume_LineEdit.setText(str(total_volume))
+        self._mw.volume_LineEdit.setText('{:.1f}'.format(total_volume))
         self._mw.time_since_start_LineEdit.setText(str(time))  # change formatting: maybe in min:sec when > 60 s ??
-        self._mw.flowrate_LineEdit.setText(str(flow_rate))
-        self._mw.pressure_LineEdit.setText(str(pressure))
+        self._mw.flowrate_LineEdit.setText('{:.1f}'.format(flow_rate))
+        self._mw.pressure_LineEdit.setText('{:.1f}'.format(pressure))
 
     @QtCore.Slot()
     def reset_volume_measurement_button(self):
