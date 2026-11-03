@@ -27,6 +27,8 @@ from time import monotonic, sleep
 import yaml
 from qtpy import QtCore, QtWidgets
 
+from qudi.logic.injections_configurator_logic import PROBE_BUFFER_NAME
+
 
 class _WarningPopup(QtCore.QObject):
     """Shows non-modal warning message boxes in the GUI thread; show() may be called from a task thread."""
@@ -84,6 +86,10 @@ class FluidicsStepsMixin:
         buffer: {valve outlet: name}, probes: {tube: name}, 'hybridization list' / 'photobleaching list':
         [steps], probe_needle_mode: 'next' | 'same' (missing -> 'next'). An injection step has a product,
         a volume (µl) and a flowrate (µl/min); an incubation step has no product and a time (s).
+    Probe valve: the outlet of the buffer entry named PROBE_BUFFER_NAME ('Probe', written by the
+    injections configurator from its option probe_valve_outlet) - the injections file is the only
+    source (_probe_valve_of). Without that entry no probe injection is possible: a step with the product
+    'Probe' is then not in the buffer list (validation error), every other step is a buffer step.
     """
 
     # setup-specific valve positions {address: position}, applied in the given order
@@ -241,10 +247,49 @@ class FluidicsStepsMixin:
     # Injections file and validation
     # ==============================================================================================
 
+    def _probe_valve_of(self, buffer_valves):
+        """Probe valve of an injections file: outlet (int) of its buffer entry PROBE_BUFFER_NAME, or None if
+        the file has no such entry (no probe injection possible). Raise if the outlet is not an integer."""
+        if PROBE_BUFFER_NAME not in buffer_valves:
+            return None
+        outlet = buffer_valves[PROBE_BUFFER_NAME]
+        try:
+            return int(outlet)
+        except (TypeError, ValueError):
+            raise RuntimeError(f'Injections file: the outlet of the buffer entry {PROBE_BUFFER_NAME!r} must be an '
+                               f'integer, got {outlet!r}.')
+
+    @staticmethod
+    def _probe_plan_line(probe_valve, injections_path, n_probe) -> str:
+        """Plan line on the probe valve: valve, injections file and number of probe injections of the
+        hybridization list, or buffer injections only (no 'Probe' entry)."""
+        if probe_valve is None:
+            return f'No {PROBE_BUFFER_NAME} entry in the injections file - buffer injections only'
+        return (f'Probe valve: {probe_valve} (from {injections_path}) - {n_probe} probe injection(s) in the '
+                f'hybridization list')
+
+    def _warn_ignored_probe_option(self, probe_valve, file_read=True) -> None:
+        """One warning if the config still sets the obsolete task option probe_valve_number: it is ignored,
+        the probe valve is the one of the injections file (probe_valve, None if it has no 'Probe' entry;
+        file_read False: the injections file could not be read)."""
+        value = getattr(self, 'probe_valve_number', None)
+        if value in (None, ''):
+            return
+        if not file_read:
+            used = 'not known (injections file not read)'
+        elif probe_valve is None:
+            used = f'none (no {PROBE_BUFFER_NAME} entry - buffer injections only)'
+        else:
+            used = f'{probe_valve} ({PROBE_BUFFER_NAME} entry)'
+        self.log.warning(f'Task option probe_valve_number ({value!r}) is ignored - the probe valve is read from the '
+                         f'injections file. Probe valve used: {used}. Remove probe_valve_number from the task '
+                         f'options of the config.')
+
     def _needle_position_missing(self, buffer_valves, step_list, probe_valve) -> bool:
         """True if a step of step_list injects from the probe valve while the robot origin (needle position 1)
-        is not defined. Malformed entries are ignored here (reported by _validate)."""
-        if self._robot.origin is not None or not isinstance(step_list, list):
+        is not defined. Malformed entries are ignored here (reported by _validate). probe_valve None (no
+        'Probe' entry in the injections file): no probe injection, so no needle position needed."""
+        if probe_valve is None or self._robot.origin is not None or not isinstance(step_list, list):
             return False
         for entry in step_list:
             if not isinstance(entry, dict) or entry.get('product') is None:
@@ -288,7 +333,8 @@ class FluidicsStepsMixin:
     def _validate(self, buffer_valves, probes, hybridization_list, needle_mode, probe_valve,
                   list_name='hybridization list') -> list:
         """Check the sequence and the setup values without any hardware call. Return the steps;
-        raise once listing every problem. list_name names the step list in the messages."""
+        raise once listing every problem. list_name names the step list in the messages.
+        probe_valve: from _probe_valve_of (None: every injection is a buffer injection)."""
         problems = []
         steps = []
         valve_dict = self._valve.valve_dict
@@ -326,7 +372,7 @@ class FluidicsStepsMixin:
                 valve = int(buffer_valves[product])
                 steps.append({'kind': 'injection', 'product': product, 'valve': valve,
                               'volume': float(volume), 'flowrate': float(flowrate),
-                              'probe': valve == probe_valve, 'tube': None})
+                              'probe': probe_valve is not None and valve == probe_valve, 'tube': None})
 
         n_probe = sum(1 for s in steps if s['probe'])
         if n_probe:
@@ -366,8 +412,10 @@ class FluidicsStepsMixin:
                 if not 1 <= int(valve) <= n:
                     problems.append(f'buffer {name!r}: outlet {valve} outside 1..{n} of valve '
                                     f'{self.buffer_valve_address}')
-            if not 1 <= probe_valve <= n:
-                problems.append(f'probe_valve_number {probe_valve} outside 1..{n} of valve {self.buffer_valve_address}')
+            # the probe valve is normally the outlet of a buffer entry, already checked above
+            known = {int(valve) for valve in buffer_valves.values()}
+            if probe_valve is not None and probe_valve not in known and not 1 <= probe_valve <= n:
+                problems.append(f'probe valve {probe_valve} outside 1..{n} of valve {self.buffer_valve_address}')
 
         for attribute in ('start_valve_positions', 'needle_move_valve_positions', 'needle_moved_valve_positions',
                           'incubation_valve_positions', 'incubation_end_valve_positions', 'cleanup_valve_positions'):

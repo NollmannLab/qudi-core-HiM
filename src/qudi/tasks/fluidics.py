@@ -11,9 +11,10 @@ Structure - one file for all setups:
 The steps (valve moves, injection, incubation, needle move), the valve layout and timing attributes
 and the reading / validation of the injections file come from FluidicsStepsMixin
 (tasks/common/fluidics_steps.py), shared with the Hi-M task.
-The path of the experiment YAML written by the experiment configurator and the valve outlet of the
-probe needle differ between machines: each microscope's config sets them in the task's entry with
-"options: user_config_path: ... probe_valve_number: ..." (applied by logic/taskrunner_logic.py).
+The path of the experiment YAML written by the experiment configurator differs between machines:
+each microscope's config sets it in the task's entry with "options: user_config_path: ..." (applied
+by logic/taskrunner_logic.py). The valve outlet of the probe needle is read from the injections file
+(its 'Probe' buffer entry, written by the injections configurator from its option probe_valve_outlet).
 
 Modified with Claude code (Anthropic)
 
@@ -40,13 +41,16 @@ class FluidicsTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     Not meant to be configured directly - use a setup subclass. Options (config "options:"):
         user_config_path    experiment YAML written by the experiment configurator; its key
                             'injections_path' points to the injections file (required)
-        probe_valve_number  outlet of the buffer valve connected to the probe needle (required, int)
+    The obsolete option probe_valve_number is accepted but ignored (one warning at the start of the
+    task): the probe valve is the outlet of the 'Probe' buffer entry of the injections file.
 
     Injections file (written by the injections configurator):
         buffer: {valve outlet: name}, probes: {tube: name}, hybridization list: [steps],
         probe_needle_mode: 'next' | 'same' (missing -> 'next').
         An injection step has a product, a volume (µl) and a flowrate (µl/min); an incubation step
         has no product and a time (s). Only the hybridization list is used.
+        Probe valve = outlet of the buffer entry 'Probe'. Without a 'Probe' entry every injection is a
+        buffer injection: no needle move and no needle position (robot origin) needed.
 
     Needle: the first probe injection uses the lowest probe tube. With 'next', every further
     injection from the probe valve moves the needle to the next tube (tube + 1); with 'same' the
@@ -69,6 +73,8 @@ class FluidicsTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     # options, set by the config ("options:")
     user_config_path = None
+    # obsolete option: accepted so that a config still setting it loads, ignored (warning in _run) - the
+    # probe valve is read from the injections file
     probe_valve_number = None
 
     def _setup(self) -> None:
@@ -92,13 +98,15 @@ class FluidicsTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # ==============================================================================================
 
     def _run(self) -> dict:
-        probe_valve = self._check_options()
+        self._check_options()
 
         # 1. experiment YAML -> path of the injections file
         injections_path = self._read_injections_path()
 
-        # 2. injections file
+        # 2. injections file; the probe valve is its 'Probe' buffer entry (None: no probe injection)
         buffer_valves, probes, hybridization_list, needle_mode = self._read_injections(injections_path)
+        probe_valve = self._probe_valve_of(buffer_valves)
+        self._warn_ignored_probe_option(probe_valve)
 
         # needle position (robot origin) needed for the probe injections: warning + message box, task stopped
         # without any hardware call
@@ -117,8 +125,8 @@ class FluidicsTaskBase(FluidicsStepsMixin, ProgressModuleTask):
             for count, step in enumerate(probe_steps):
                 step['tube'] = first_tube + count if needle_mode == 'next' else first_tube
 
-        # 5. plan
-        self._log_plan(injections_path, probes)
+        # 5. plan (before any hardware call)
+        self._log_plan(injections_path, probes, probe_valve)
         self._check_interrupt()
 
         # 6. lock the GUIs
@@ -195,11 +203,16 @@ class FluidicsTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
         self.log.info(f'Fluidics task ended after {self._steps_done}/{len(self._steps)} step(s).')
 
-    def _log_plan(self, injections_path, probes) -> None:
+    def _log_plan(self, injections_path, probes, probe_valve) -> None:
+        """Plan, logged before any hardware call: probe valve line, then one line per step (probe steps
+        with valve and tube)."""
+        total = len(self._steps)
         self.log.info(f'Fluidics sequence from {injections_path} - needle mode {self._needle_mode!r}, '
-                      f'{len(self._steps)} step(s):')
+                      f'{total} step(s):')
+        self.log.info(self._probe_plan_line(probe_valve, injections_path,
+                                            sum(1 for step in self._steps if step['probe'])))
         for number, step in enumerate(self._steps, 1):
-            self.log.info(f'  {number}. {self._describe(step)}')
+            self.log.info(f'  step {number}/{total}: {self._describe(step)}')
         for tube in sorted({step['tube'] for step in self._steps if step['probe']}):
             if tube not in probes:
                 self.log.warning(f'Tube {tube} is used but not listed in the probes of the injections file.')
@@ -208,18 +221,11 @@ class FluidicsTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # Options, files and validation
     # ==============================================================================================
 
-    def _check_options(self) -> int:
-        """Return probe_valve_number as an int; raise if an option is not set."""
+    def _check_options(self) -> None:
+        """Raise if user_config_path is not set."""
         if self.user_config_path in (None, ''):
             raise RuntimeError(f'user_config_path not set for task {type(self).__name__} - add '
                                f'`options: user_config_path: ...` to this task\'s entry in the config file')
-        if self.probe_valve_number in (None, ''):
-            raise RuntimeError(f'probe_valve_number not set for task {type(self).__name__} - add '
-                               f'`options: probe_valve_number: ...` to this task\'s entry in the config file')
-        try:
-            return int(self.probe_valve_number)
-        except (TypeError, ValueError):
-            raise RuntimeError(f'probe_valve_number must be an integer, got {self.probe_valve_number!r}.')
 
     def _read_injections_path(self) -> str:
         config = self._read_yaml(self.user_config_path, 'experiment file')
@@ -244,7 +250,6 @@ class FluidicsRAMMTask(FluidicsTaskBase):
             robot_logic: pipetting_robot_logic
           options:
             user_config_path: '/path/to/qudi_task_config_files/fluidics_task_ramm.yaml'
-            probe_valve_number: 7
     """
     start_valve_positions = {'b': 2, 'c': 2}
     needle_move_valve_positions = {'c': 1}
@@ -268,7 +273,6 @@ class FluidicsSDTask(FluidicsTaskBase):
             robot_logic: pipetting_robot_logic
           options:
             user_config_path: '/path/to/qudi_task_config_files/fluidics_task_sd.yaml'
-            probe_valve_number: 3
     """
     start_valve_positions = {'b': 1}
     needle_move_valve_positions = {}
@@ -291,5 +295,4 @@ class FluidicsDummyTask(FluidicsRAMMTask):
             robot_logic: pipetting_robot_logic
           options:
             user_config_path: '/home/jb/qudi/qudi_task_config_files/fluidics_task.yaml'
-            probe_valve_number: 7
     """

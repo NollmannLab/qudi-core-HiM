@@ -4,7 +4,7 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-10-23
+Last updated: 2026-11-02
 
 ### Documentation
 
@@ -961,6 +961,79 @@ Last updated: 2026-10-23
     New checks cover the warning log, the absence of an error log, no logic
     call, one non-modal box created in the GUI thread, the GUIs left enabled,
     and a buffers-only run without origin.
+
+#### Fixed
+
+- Probe valve read from the injections file only (2026-11-02), fluidics and
+  Hi-M tasks. The probe valve used to be set in two places that could
+  disagree: the injections configurator option `probe_valve_outlet` (written
+  into every injections file as the buffer entry 'Probe' -> outlet) and the
+  task option `probe_valve_number`. With 7 in the configurator and 3 in the
+  task, 'Probe' was injected from valve 7 but not recognised as a probe
+  injection, and the needle was never moved.
+  - `logic/injections_configurator_logic.py`: module constant
+    `PROBE_BUFFER_NAME = 'Probe'` (used for the default buffer entry and the
+    product list). Docstring of `probe_valve_outlet`: the outlet of the
+    buffer valve connected to the probe needle on this setup; the tasks read
+    it from the injections files written with it. The class config example
+    now uses the option name `probe_valve_outlet`.
+  - `tasks/common/fluidics_steps.py`: `_probe_valve_of(buffer_valves)`
+    returns the outlet of the `PROBE_BUFFER_NAME` entry, or None without
+    such an entry. That value is what goes to `_needle_position_missing`,
+    `_validate` and `_check_valve_positions`. None means no probe injection:
+    every step is a buffer step, there is no needle move and no robot origin
+    is needed.
+  - `fluidics.py` / `him.py`:
+    - option `probe_valve_number` and its check removed; `_check_options`
+      only checks `user_config_path`;
+    - the class attribute is kept, so a config still setting it loads; it is
+      ignored, with one warning at the start of the task giving the value
+      used ("Task option probe_valve_number (3) is ignored - the probe valve
+      is read from the injections file. Probe valve used: 7 (Probe
+      entry). ...");
+    - config examples in the docstrings updated.
+  - Plan logged before any hardware call:
+    - "Probe valve: <v> (from <injections file>) - <n> probe injection(s)
+      in the hybridization list", or "No Probe entry in the injections
+      file - buffer injections only";
+    - one line per step, e.g. "step 2/6: inject Probe (valve 7, tube 1),
+      ...".
+    - Hi-M: the hybridization steps of the first cycle in full, one line per
+      further cycle with its tubes, then "photobleaching: <n> step(s),
+      buffer valve only". The Hi-M plan used to be logged after the GUI
+      lock / stage velocity change; it now comes before them.
+  - Hi-M: the needle is moved, and the robot origin required, only when the
+    hybridization list has probe injections (as in the fluidics task). If the
+    injections file cannot be read, the task stops with that error instead
+    of the needle-position warning.
+  - Configs:
+    - `probe_valve_number` removed from the task entries (commented or not)
+      of `Spinning_disk_config.cfg`, `RAMM_config.cfg` and
+      `dummy_config.cfg`;
+    - `Spinning_disk_config.cfg`: injections configurator
+      `probe_valve_outlet: 3` (was 7).
+  - Tests (dummy setup, qudi-core 1.7.0 and 1.8.0). Fluidics task: new test
+    27/27, with injections files written by the injections configurator
+    logic:
+    - Probe on 7: plan with valve 7 and tubes 1, 2, 3; needle moves 1, 2, 3
+      ('next'); 'Probe' steps on valve a = 7.
+    - The same sequence re-saved with Probe on 3: valve 3, same needle moves.
+    - 'same' mode: one tube.
+    - No Probe entry, buffers only, no robot origin: runs, plan "buffer
+      injections only", no needle move.
+    - Option still set (3, file on 7): one warning, runs on valve 7 with the
+      needle moves.
+  - Tests, Hi-M dummy task: new test 20/20 with the same behaviour:
+    - per cycle tubes 1, 2 then 4, 5 ('next'), 1 then 4 ('same');
+    - valve 7 / 3 from the file;
+    - buffers only without origin: no needle move;
+    - one warning when the option is set;
+    - plan before the first hardware call;
+    - cleanup end state.
+  - Regression: the existing fluidics task and Hi-M tests also pass,
+    adapted only where they checked the removed option or the old
+    plan-line format: fluidics task test 66/66 (the "missing
+    probe_valve_number" case removed), Hi-M test 40/40.
 
 ### Task runner
 

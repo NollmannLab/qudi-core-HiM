@@ -12,9 +12,10 @@ Structure - one file for all setups:
     from the per-microscope mixins of tasks/common/imaging_steps.py (SDImagingMixin,
     RAMMImagingMixin, DummyImagingMixin), shared with the ROI scan task; the valve layout is the
     one of the fluidics task of the same setup.
-The path of the experiment YAML written by the experiment configurator and the valve outlet of the
-probe needle differ between machines: each microscope's config sets them in the task's entry with
-"options: user_config_path: ... probe_valve_number: ..." (applied by logic/taskrunner_logic.py).
+The path of the experiment YAML written by the experiment configurator differs between machines:
+each microscope's config sets it in the task's entry with "options: user_config_path: ..." (applied
+by logic/taskrunner_logic.py). The valve outlet of the probe needle is read from the injections file
+(its 'Probe' buffer entry, written by the injections configurator from its option probe_valve_outlet).
 
 Translated from the legacy qudi tasks tasks/legacy/HiM_imaging_SD.py and
 tasks/legacy/HiM_imaging_RAMM.py. Not in this version: email alert, task log file, data transfer
@@ -92,7 +93,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     Not meant to be configured directly - use a setup subclass. Options (config "options:"):
         user_config_path    experiment YAML written by the experiment configurator (required)
-        probe_valve_number  outlet of the buffer valve connected to the probe needle (required, int)
+    The obsolete option probe_valve_number is accepted but ignored (one warning at the start of the
+    task): the probe valve is the outlet of the 'Probe' buffer entry of the injections file.
 
     Experiment YAML (user_config_path): sample_name, roi_list_path, injections_path,
     imaging_sequence ([[wavelength, intensity %], ...]), num_z_planes, and the keys read by the
@@ -103,10 +105,13 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     Needle: each cycle starts with the needle in the tube of its probe. With 'next', every further
     injection from the probe valve in the hybridization list goes to the next tube (tube + 1, + 2,
     ...); with 'same' the needle stays in the probe tube. The photobleaching list uses the buffer
-    valve only (the needle is not moved).
+    valve only (the needle is not moved). Probe valve = outlet of the buffer entry 'Probe' of the
+    injections file; without a 'Probe' entry (or without probe step) only buffers are injected and the
+    needle is not moved.
 
-    If the needle position (robot origin) is not defined, the task logs a warning, shows a message box
-    and ends without an exception, before any hardware call (as the fluidics task). Everything else
+    If the hybridization list has probe injections and the needle position (robot origin) is not
+    defined, the task logs a warning, shows a message box and ends without an exception, before any
+    hardware call (as the fluidics task). The plan is logged before any hardware call. Everything else
     is checked before any hardware call; all problems are reported in one error. During
     the run the GUIs of the valves, flow control, robot, ROIs and lasers are locked and the stage
     moves at scan_stage_velocity. _cleanup() always stops the pressure regulation, volume
@@ -132,6 +137,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     # options, set by the config ("options:")
     user_config_path = None
+    # obsolete option: accepted so that a config still setting it loads, ignored (warning in _run) - the
+    # probe valve is read from the injections file
     probe_valve_number = None
 
     needle_rinsing_duration_s = 30  # rinsing of the needle after each cycle (s)
@@ -175,7 +182,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # ==============================================================================================
 
     def _run(self) -> dict:
-        probe_valve = self._check_options()
+        self._check_options()
 
         # 1. parameters: experiment YAML and injections file, no hardware call
         params = self._read_yaml(self.user_config_path, 'experiment file')
@@ -188,18 +195,23 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.num_z_planes = params.get('num_z_planes')
         self._read_microscope_parameters(params)
 
+        # injections file; the probe valve is its 'Probe' buffer entry (None: no probe injection)
         injections = None
+        probe_valve = None
         if self.injections_path:
             try:
                 buffer_valves, probes, hyb_list, needle_mode = self._read_injections(self.injections_path)
                 _, _, pb_list, _ = self._read_injections(self.injections_path, 'photobleaching list')
+                probe_valve = self._probe_valve_of(buffer_valves)
                 injections = (buffer_valves, probes, hyb_list, pb_list, needle_mode)
             except RuntimeError as err:
                 problems.append(str(err))
+        self._warn_ignored_probe_option(probe_valve, file_read=injections is not None)
 
-        # needle position (robot origin) needed for every cycle: warning + message box, task stopped
-        # without any hardware call (as the fluidics task)
-        if self._robot.origin is None:
+        # needle position (robot origin) needed when the hybridization list has probe injections: warning +
+        # message box, task stopped without any hardware call (as the fluidics task). Without a 'Probe' entry
+        # (or without probe step) only buffers are injected: no needle move, no origin needed.
+        if injections is not None and self._needle_position_missing(injections[0], injections[2], probe_valve):
             self._warn_needle_position()
             return {'aborted': 'needle position not initialised', 'cycles_done': 0}
 
@@ -240,7 +252,11 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         for step in pb_steps:
             step['probe'] = False  # photobleaching: buffer valve only, the needle is not moved
 
-        # 3. lock the GUIs, lasers off, scan stage velocity (restored in _cleanup)
+        # 3. plan (before any hardware call)
+        self._log_plan(hyb_steps, pb_steps, probe_valve)
+        self._check_interrupt()
+
+        # 4. lock the GUIs, lasers off, scan stage velocity (restored in _cleanup)
         self._check_interrupt()
         self._hardware_touched = True
         self._gui_locked = True
@@ -254,10 +270,6 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self._prev_stage_velocity = dict(self._roi_logic.get_stage_velocity(list(self.scan_stage_velocity)))
         if not self._roi_logic.set_stage_velocity(self.scan_stage_velocity):
             raise RuntimeError(f'Could not set the scan stage velocity {self.scan_stage_velocity} - see the log.')
-
-        # 4. plan
-        self._log_plan(hyb_steps, pb_steps)
-        self._check_interrupt()
 
         # 5. imaging preparation, data folder, parameters file
         self._prepare_imaging()
@@ -356,14 +368,22 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # Cycle steps
     # ==============================================================================================
 
-    def _hybridization(self, label, rt, tube, hyb_steps) -> None:
-        """Needle in the probe tube, start valve positions, hybridization steps, cleanup positions."""
+    def _cycle_hybridization_steps(self, hyb_steps, tube) -> list:
+        """Hybridization steps of the cycle of the probe in tube: copies, with the tube of each probe
+        injection (tube, tube + 1, ... with 'next'; tube with 'same')."""
         steps = copy.deepcopy(hyb_steps)
-        probe_steps = [step for step in steps if step['probe']]
-        for count, step in enumerate(probe_steps):
+        for count, step in enumerate(step for step in steps if step['probe']):
             step['tube'] = tube + count if self._needle_mode == 'next' else tube
+        return steps
 
-        self._move_needle(tube, label)
+    def _hybridization(self, label, rt, tube, hyb_steps) -> None:
+        """Needle in the probe tube (only if the list has probe injections), start valve positions,
+        hybridization steps, cleanup positions."""
+        steps = self._cycle_hybridization_steps(hyb_steps, tube)
+        probe_steps = [step for step in steps if step['probe']]
+
+        if probe_steps:
+            self._move_needle(tube, label)
         self._set_valves(self.start_valve_positions)
         n = len(steps)
         for number, step in enumerate(steps, 1):
@@ -433,18 +453,11 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # Checks, options, files
     # ==============================================================================================
 
-    def _check_options(self) -> int:
-        """Return probe_valve_number as an int; raise if an option is not set."""
+    def _check_options(self) -> None:
+        """Raise if user_config_path is not set."""
         if self.user_config_path in (None, '', 'TO FILL'):
             raise RuntimeError(f'user_config_path not set for task {type(self).__name__} - add '
                                f'`options: user_config_path: ...` to this task\'s entry in the config file')
-        if self.probe_valve_number in (None, ''):
-            raise RuntimeError(f'probe_valve_number not set for task {type(self).__name__} - add '
-                               f'`options: probe_valve_number: ...` to this task\'s entry in the config file')
-        try:
-            return int(self.probe_valve_number)
-        except (TypeError, ValueError):
-            raise RuntimeError(f'probe_valve_number must be an integer, got {self.probe_valve_number!r}.')
 
     def _validated(self, problems, list_name, buffer_valves, probes, step_list, needle_mode, probe_valve) -> list:
         """Steps of step_list checked by FluidicsStepsMixin._validate. Its problems are added to problems
@@ -492,16 +505,32 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
                 problems.append(f'probe {rt} (tube {tube}): needs tube {last}, the robot has {max_tubes} tubes')
         return problems
 
-    def _log_plan(self, hyb_steps, pb_steps) -> None:
-        self.log.info(f'Hi-M experiment {self.sample_name}: {len(self._cycles)} probe(s), {len(self.roi_names)} '
+    def _log_plan(self, hyb_steps, pb_steps, probe_valve) -> None:
+        """Plan, logged before any hardware call: probe valve line; the hybridization steps of the first
+        cycle in full (probe steps with valve and tube), then one line per further cycle with its tubes;
+        the photobleaching steps (buffer valve only)."""
+        total = len(self._cycles)
+        n_probe = sum(1 for step in hyb_steps if step['probe'])
+        self.log.info(f'Hi-M experiment {self.sample_name}: {total} probe(s), {len(self.roi_names)} '
                       f'ROI(s), needle mode {self._needle_mode!r}.')
         self.log.info('  probes: ' + ', '.join(f'{rt} (tube {tube})' for tube, rt in self._cycles))
-        self.log.info(f'  hybridization: {len(hyb_steps)} step(s)')
-        for number, step in enumerate(hyb_steps, 1):
-            self.log.info(f'    {number}. {self._describe(step)}')
-        self.log.info(f'  photobleaching: {len(pb_steps)} step(s)')
+        self.log.info(self._probe_plan_line(probe_valve, self.injections_path, n_probe))
+        n = len(hyb_steps)
+        for number, (tube, rt) in enumerate(self._cycles, 1):
+            steps = self._cycle_hybridization_steps(hyb_steps, tube)
+            tubes = sorted({step['tube'] for step in steps if step['probe']})
+            if number == 1:
+                self.log.info(f'  cycle {number}/{total} - {rt}: hybridization {n} step(s)')
+                for k, step in enumerate(steps, 1):
+                    self.log.info(f'    step {k}/{n}: {self._describe(step)}')
+            elif tubes:
+                self.log.info(f'  cycle {number}/{total} - {rt}: same hybridization steps, probe injection(s) from '
+                              f'tube(s) {", ".join(str(t) for t in tubes)}')
+            else:
+                self.log.info(f'  cycle {number}/{total} - {rt}: same hybridization steps (buffer injections only)')
+        self.log.info(f'  photobleaching: {len(pb_steps)} step(s), buffer valve only')
         for number, step in enumerate(pb_steps, 1):
-            self.log.info(f'    {number}. {self._describe(step)}')
+            self.log.info(f'    step {number}/{len(pb_steps)}: {self._describe(step)}')
 
     def _save_parameters(self, params, injections) -> None:
         """Write HiM_parameters.yml in self.directory: experiment parameters, probes, hybridization and
@@ -599,7 +628,6 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             trigger_logic: trigger_logic
           options:
             user_config_path: '/path/to/qudi_task_config_files/him_task_sd_epi.yaml'
-            probe_valve_number: 3
     """
 
     trigger_logic = Connector(interface='TriggerLogic')
@@ -713,7 +741,6 @@ class HiMRAMMTask(RAMMImagingMixin, HiMTaskBase):
         #     laser_logic: laser_control_logic
         #   options:
         #     user_config_path: 'TO FILL'
-        #     probe_valve_number: 7
     """
 
     start_valve_positions = FluidicsRAMMTask.start_valve_positions
@@ -744,7 +771,6 @@ class HiMDummyTask(DummyImagingMixin, HiMTaskBase):
             laser_logic: laser_control_logic
           options:
             user_config_path: '/home/jb/qudi/qudi_task_config_files/him_task_dummy.yaml'
-            probe_valve_number: 7
     """
 
     start_valve_positions = FluidicsRAMMTask.start_valve_positions

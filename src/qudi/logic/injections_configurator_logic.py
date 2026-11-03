@@ -24,6 +24,9 @@ from qudi.core.configoption import ConfigOption
 from qudi.core.connector import Connector
 from scipy.optimize import _root
 
+# Name of the buffer entry written for the probe needle in every injections file. The tasks read the probe valve
+# from the outlet of this entry (tasks/common/fluidics_steps.py).
+PROBE_BUFFER_NAME = 'Probe'
 
 # ======================================================================================================================
 # Child classes of QAbstractListModel for the List Views
@@ -98,14 +101,19 @@ class InjectionsLogic(LogicBase):
 
     injections_logic:
         module.Class: 'injections_logic.InjectionsLogic'
-        probe_valve_number: 7
+        probe_valve_outlet: 7
         number_of_valve_positions: 8
         number_of_probes: 100
+
+    probe_valve_outlet: outlet of the buffer valve connected to the probe needle on this setup. It is written
+    into every injections file as the buffer entry PROBE_BUFFER_NAME ('Probe') -> outlet; the fluidics and Hi-M
+    tasks read the probe valve from the injections files written with it (no separate task option).
     """
     # define connectors to logic modules
     valve = Connector(name='valve_logic', interface='FluidicsValveLogic')
     robot = Connector(name='robot_logic', interface='FluidicsRobotLogic')
 
+    # outlet of the buffer valve connected to the probe needle on this setup (see the class docstring)
     probe_valve_number = ConfigOption('probe_valve_outlet', missing='error', converter=int)
     buffer_valve_address = ConfigOption('buffer_valve_address', missing='error')
 
@@ -123,7 +131,7 @@ class InjectionsLogic(LogicBase):
     num_valve_positions = 0
     num_probes = 0
     procedures = ['Hybridization', 'Photobleaching']
-    products = ['Probe']
+    products = [PROBE_BUFFER_NAME]
 
     # needle behaviour when the probe valve is used several times in one sequence:
     # 'next' -> move to the next tube (tube + 1) for each new probe injection, 'same' -> stay in the same tube
@@ -154,7 +162,7 @@ class InjectionsLogic(LogicBase):
         self.photobleaching_injection_sequence_model = InjectionSequenceModel()
 
         # add the probe entry as default into the bufferlist
-        self.add_buffer('Probe', self.probe_valve_number)
+        self.add_buffer(PROBE_BUFFER_NAME, self.probe_valve_number)
 
         self._probe_needle_mode = self.DEFAULT_PROBE_NEEDLE_MODE
 
@@ -223,7 +231,7 @@ class InjectionsLogic(LogicBase):
         self.buffer_dict = {}
         self.buffer_list_model.items = []
         # add the default entry Probe
-        self.add_buffer('Probe', self.probe_valve_number)
+        self.add_buffer(PROBE_BUFFER_NAME, self.probe_valve_number)
         self.sigBufferListChanged.emit()
 
     def add_probe(self, probename, probe_position):
