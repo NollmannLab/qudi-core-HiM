@@ -19,23 +19,15 @@ from time import monotonic
 TESTS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(TESTS)
 
-# pure logic first (rule 5 of docs/TESTING.md), then the module / task suites
+# pure logic first (rule 5 of docs/TESTING.md), then the module / task suites (one per component)
 SUITES = [
     'test_roi_path.py',
-    'test_roi_tour.py',
-    'test_roi_optimize.py',
-    'test_random_roi_list.py',
-    'test_data_folders.py',
-    'test_param_hints.py',
-    'test_task_progress.py',
-    'test_photobleaching_progress.py',
-    'test_roi_scan_progress.py',
-    'test_roi_scan_zen_checklist.py',
-    'test_roi_scan_zen_folder.py',
-    'test_fluidics_task.py',
-    'test_probe_valve.py',
+    'test_logic_helpers.py',
+    'test_task_runner.py',
+    'test_photobleaching.py',
+    'test_roi_scan.py',
+    'test_fluidics.py',
     'test_him.py',
-    'test_probe_valve_him.py',
 ]
 
 

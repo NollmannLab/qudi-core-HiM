@@ -1,10 +1,14 @@
 """Hi-M task (qudi.tasks.him) on the dummy setup, the SD task with a fake ZEN, the RAMM placeholder.
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_him.py [<repo_root>] [quick]
-Short settings and test data: tests/_short.py, tests/data/ (him_injections.yml, rois_2.json), docs/TESTING.md.
 Real modules of dummy_config.cfg: fluidics (dummy valve, DaqPumpController pumps, DummyFlowSensor,
 FluidicsFlowLogic, pipetting robot on the dummy stage), roi_logic and laser_control_logic. The task
 runs in its own thread, the modules in the main thread (event loop). Logic calls are recorded.
+Sections:
+  - Hi-M cycles: full run, progress, interrupt, errors, needle position, needle modes, SD (fake ZEN),
+    RAMM placeholder;
+  - probe valve read from the injections file (plan, needle, valve, obsolete option).
+Short settings and test data: tests/_short.py, tests/data/ (him_injections.yml, rois_2.json), docs/TESTING.md.
 """
 import sys, os, re, weakref, logging, importlib, tempfile, threading, copy, glob, shutil
 from time import monotonic, sleep
@@ -217,6 +221,7 @@ def end_state_ok(label, t0):
           (state, unlocked, last_roi, [m for t, lvl, m in LOGS if t >= t0 and 'Cleanup' in m]))
 
 
+# --- Hi-M cycles: run, progress, interrupt, errors, needle, SD, RAMM ---
 QUICK = 'quick' in sys.argv[1:]
 
 # ------------------------------------------------------------------ (1) full 2-probe run (example injections file)
@@ -485,6 +490,150 @@ if not QUICK:
           err is not None and 'Hi-M imaging on the RAMM is not migrated yet (focus logic, FPGA) - see '
           'legacy/HiM_imaging_RAMM.py' in str(err) and '1 problem(s)' in str(err)
           and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+
+
+# --- probe valve read from the injections file ---
+from qudi.tasks.common import fluidics_steps  # noqa: E402
+from qudi.logic.taskrunner_logic import TaskRunnerLogic  # noqa: E402
+NEEDLE_MSG = fluidics_steps.FluidicsStepsMixin._NEEDLE_POSITION_MESSAGE
+
+
+def step(product, volume=_short.INJECTION_UL):
+    return {'step_number': 0, 'procedure': 'Hybridization', 'product': product, 'volume': volume, 'flowrate': _short.HIM_FLOWRATE,
+            'time': None}
+
+
+def injections(probe_outlet, mode='next', with_probe=True):
+    buffer = {1: 'SSC', 2: 'Wash'}
+    if probe_outlet is not None:
+        buffer[probe_outlet] = 'Probe'
+    hyb = [step('SSC'), step('Probe'), {'step_number': 0, 'procedure': 'Hybridization', 'product': None,
+                                         'volume': None, 'flowrate': None, 'time': _short.INCUBATION_S}, step('Probe'),
+           step('Wash')]
+    if not with_probe:
+        hyb = [s for s in hyb if s['product'] != 'Probe']
+    pb = [dict(step('Wash'), procedure='Photobleaching'), dict(step('SSC'), procedure='Photobleaching')]
+    for lst in (hyb, pb):
+        for k, s in enumerate(lst, 1):
+            s['step_number'] = k
+    return {'buffer': buffer, 'probes': {1: 'RT1', 4: 'RT2'}, 'hybridization list': hyb,
+            'photobleaching list': pb, 'probe_needle_mode': mode}
+
+
+def run_case(inj, name, **attrs):
+    task = make_task(user_config_path=files(inj, name), **attrs)
+    CALLS.clear()
+    t0 = monotonic()
+    result, err, _, _ = run(task)
+    logs = [(t, lvl, m) for t, lvl, m in LOGS if t >= t0]
+    a_moves = [a[1] for n, a in calls(t0, 'valve.set_valve_position') if a[0] == 'a']
+    needle = [a[0] for n, a in calls(t0, 'robot.start_move_to_target')]
+    hw = [c[0] for c in CALLS if c[0] >= t0 and c[1] in HARDWARE]
+    plan_t = [t for t, lvl, m in logs if m.startswith(('Probe valve:', 'No Probe entry'))]
+    return task, result, err, [(lvl, m) for _, lvl, m in logs], a_moves, needle, (plan_t[0] if plan_t else None,
+                                                                                  hw[0] if hw else 1e18), t0
+
+
+def plan_of(logs, label):
+    first = [k for k, (_, m) in enumerate(logs) if m.startswith('Hi-M experiment')]
+    last = [k for k, (_, m) in enumerate(logs) if m.startswith('    step') or m.startswith('  photobleaching')]
+    lines = [m for _, m in logs[first[0]:last[-1] + 1]] if first and last else []
+    print(f'    plan ({label}):')
+    for m in lines:
+        print('      ' + m)
+    return lines
+
+
+def warnings_of(logs, text):
+    return [m for lvl, m in logs if lvl == logging.WARNING and text in m]
+
+
+accepted = True
+try:
+    TaskRunnerLogic._validate_task_options(TaskRunnerLogic.__new__(TaskRunnerLogic), 'him', him.HiMDummyTask,
+                                           {'user_config_path': 'x', 'probe_valve_number': 3})
+except Exception:
+    accepted = False
+check('a config still setting probe_valve_number is accepted by the task runner (HiMDummyTask)', accepted)
+
+# per cycle, valve a during the hybridization (1 SSC, P, P, 2 Wash), cleanup a=1, photobleaching (2 Wash, 1 SSC),
+# cleanup a=1, needle rinse (rinsing_valve_positions of the flow logic: a=3, restored to 1); end cleanup a=1
+
+
+def expected_a(p, with_probe=True):
+    hyb = [1, p, p, 2] if with_probe else [1, 2]
+    return (hyb + [1] + [2, 1] + [1] + [3, 1]) * 2 + [1]
+
+
+# (1) Probe on 7, 'next'
+task, result, err, logs, a7, needle7, (t_plan, t_hw), t0 = run_case(injections(7), 'p7')
+plan = plan_of(logs, 'Probe on 7')
+inj7 = os.path.join(TMP, 'p7_injections.yml')
+check('(Probe on 7) 2 cycles done; valve a: per cycle SSC 1, Probe 7, Probe 7, Wash 2 | PB Wash 2, SSC 1',
+      err is None and result and result['cycles_done'] == 2 and a7 == expected_a(7), (err, result, a7))
+check(f"(Probe on 7) plan line 'Probe valve: 7 (from {os.path.basename(inj7)}) - 2 probe injection(s) in the "
+      "hybridization list'", f'Probe valve: 7 (from {inj7}) - 2 probe injection(s) in the hybridization list' in plan)
+check("(Probe on 7) plan: first cycle in full ('step 2/5: inject Probe (valve 7, tube 1)', 4/5 tube 2), "
+      "cycle 2 with its tubes 4, 5; photobleaching 2 steps, buffer valve only",
+      any(m.startswith('    step 2/5: inject Probe (valve 7, tube 1)') for m in plan)
+      and any(m.startswith('    step 4/5: inject Probe (valve 7, tube 2)') for m in plan)
+      and sum(1 for m in plan if m.startswith('    step ')) == 5 + 2
+      and '  cycle 2/2 - RT2: same hybridization steps, probe injection(s) from tube(s) 4, 5' in plan
+      and '  photobleaching: 2 step(s), buffer valve only' in plan, plan)
+check('(Probe on 7) plan logged before any hardware call (moved before the GUI lock / stage velocity)',
+      t_plan is not None and t_plan < t_hw, (t_plan, t_hw))
+check("(Probe on 7, 'next') needle: cycle 1 tubes 1 then 2, cycle 2 tubes 4 then 5; tubes used [1, 2, 4, 5]",
+      needle7 == [1, 2, 4, 5] and result['tubes_used'] == [1, 2, 4, 5], (needle7, result))
+check('(Probe on 7) no probe_valve_number warning', not warnings_of(logs, 'probe_valve_number'))
+end_state_ok('Probe on 7', t0)
+
+# (2) same sequence re-saved with Probe on 3
+task, result, err, logs, a3, needle3, (t_plan, t_hw), t0 = run_case(injections(3), 'p3')
+plan = plan_of(logs, 'Probe on 3')
+check('(Probe on 3) 2 cycles; valve 3 for the Probe steps', err is None and result['cycles_done'] == 2
+      and a3 == expected_a(3), (err, a3))
+check('(Probe on 3) plan: probe valve 3, steps with valve 3', any(m.startswith('Probe valve: 3 (from ') for m in plan)
+      and any(m.startswith('    step 4/5: inject Probe (valve 3, tube 2)') for m in plan) and t_plan < t_hw)
+check('(Probe on 3) same needle behaviour (1, 2, 4, 5)', needle3 == needle7 == [1, 2, 4, 5], (needle3, needle7))
+
+# (3) 'same' mode
+task, result, err, logs, a, needle, _, t0 = run_case(injections(3, mode='same'), 'p3_same')
+plan = plan_of(logs, "Probe on 3, 'same'")
+check("('same' mode) one tube per cycle: needle 1, 4; plan cycle 2 'tube(s) 4'",
+      err is None and result['cycles_done'] == 2 and needle == [1, 4] and result['tubes_used'] == [1, 4]
+      and '  cycle 2/2 - RT2: same hybridization steps, probe injection(s) from tube(s) 4' in plan
+      and sum(1 for m in plan if 'inject Probe (valve 3, tube 1)' in m) == 2, (err, needle, result))
+
+# (4) config still sets probe_valve_number: 3, file Probe on 7
+task, result, err, logs, a, needle, _, t0 = run_case(injections(7), 'legacy', probe_valve_number=3)
+w = warnings_of(logs, 'probe_valve_number')
+print('    warning:', w)
+check('(option probe_valve_number: 3 still set, file Probe on 7) exactly one warning (ignored, value used 7); '
+      'runs with valve 7 and the needle moves', len(w) == 1 and 'ignored' in w[0] and 'Probe valve used: 7' in w[0]
+      and err is None and result['cycles_done'] == 2 and a == expected_a(7) and needle == [1, 2, 4, 5], (w, err))
+
+# (5) no Probe entry, buffer steps only, no robot origin
+robot.origin = None
+task, result, err, logs, a, needle, (t_plan, t_hw), t0 = run_case(injections(None, with_probe=False), 'noprobe')
+plan = plan_of(logs, 'no Probe entry')
+check('(no Probe entry, buffers only, no robot origin) runs: 2 cycles, valve a buffers only',
+      err is None and result and result['cycles_done'] == 2 and a == expected_a(None, with_probe=False), (err, result, a))
+check("(same) plan 'No Probe entry in the injections file - buffer injections only', cycle 2 buffer injections "
+      "only, before any hardware call", 'No Probe entry in the injections file - buffer injections only' in plan
+      and '  cycle 2/2 - RT2: same hybridization steps (buffer injections only)' in plan and t_plan < t_hw, plan)
+check('(same) no needle move, no needle-position warning, no origin required',
+      needle == [] and NEEDLE_MSG not in [m for _, m in logs] and result['tubes_used'] == [], (needle, result))
+end_state_ok('no Probe entry', t0)
+
+# (6) Probe used and no origin: needle-position abort as before
+task, result, err, logs, a, needle, _, t0 = run_case(injections(3), 'p3_noorigin')
+check('(Probe on 3 used, no robot origin) needle-position warning, aborted before any hardware call',
+      err is None and result == {'aborted': 'needle position not initialised', 'cycles_done': 0}
+      and not [n for n, _ in calls(t0) if n in HARDWARE] and NEEDLE_MSG in [m for _, m in logs], (err, result))
+for w_ in [w_ for w_ in app.topLevelWidgets() if isinstance(w_, QtWidgets.QMessageBox)]:
+    w_.close()
+robot.set_origin(ORIGIN)
+app.processEvents()
 
 check('no Qt warning (timers started from another thread, ...)', not QT_MESSAGES, QT_MESSAGES)
 print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)

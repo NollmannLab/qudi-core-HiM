@@ -37,8 +37,34 @@ These rules apply by default to every task in this repository, unless a prompt s
   - Hi-M test injections at 1000 µl/min, which shortens the dummy regulation ramp.
 - Exceptions, where a check needs more:
   - a 3 s incubation for the runs that check the live countdown (`COUNTDOWN_INCUBATION_S`);
-  - 5 ROIs in `test_param_hints.py`, whose checks start at the 3rd ROI and interrupt during the
-    4th.
+  - 5 ROIs in the start ROI section of `test_roi_scan.py`, whose checks start at the 3rd ROI and
+    interrupt during the 4th.
 - Each suite runs on its own: `python tests/test_<name>.py` (repository root by default). A few
   suites also compare with a former version of a module (a copy of that file given after the
   repository root); without it those comparisons are reported as `[SKIP]`.
+
+## Organisation
+
+One suite per component in `tests/`, one section per feature inside a suite (a
+`# --- <feature> ---` header, also printed when the suite runs):
+
+- `test_roi_path.py` - ROI path optimization: open path and closed tour (`qudi.util.roi_path`),
+  the "optimize path" action of the ROI logic / GUI.
+- `test_logic_helpers.py` - data folders defined in the logic modules (ROI lists, injections
+  files) and the random ROI list command-line helper.
+- `test_task_runner.py` - Task Runner logic / GUI / task widget: progress display, parameter
+  hints (placeholder, tooltip), start / end warning dialogs.
+- `test_photobleaching.py` - photobleaching task: hardware calls, progress display, dialogs.
+- `test_roi_scan.py` - ROI scan task: progress display, start ROI, ZEN settings pop-up and ZEN
+  data folder of the spinning disk.
+- `test_fluidics.py` - fluidics task: options, sequence, interrupt, validation and hardware
+  errors, needle position, probe valve read from the injections file.
+- `test_him.py` - Hi-M task: cycles, progress, interrupt, errors, needle modes, SD (fake ZEN),
+  RAMM placeholder, probe valve read from the injections file.
+
+Rule: a change adds or adapts cases in the existing suite of the component it touches; a new file
+only for a new component; quick checks made during development are not committed unless they
+guard against a bug that could come back.
+
+The checks done on the microscopes with the real hardware are listed in `docs/test_plan.md`
+(hardware checklist).

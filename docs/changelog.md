@@ -8,6 +8,28 @@ Last updated: 2026-11-03
 
 ### Documentation
 
+#### Changed
+
+- Test suites organised by component instead of by change (2026-11-03). What they check is unchanged.
+  - Seven suites in `tests/`, one section per feature (`# --- <feature> ---`, also printed at run time):
+    - `test_roi_path.py` (open path, closed tour, optimize action);
+    - `test_logic_helpers.py` (data folders in the logic, random ROI list helper);
+    - `test_task_runner.py` (progress display, parameter hints, start / end warning dialogs);
+    - `test_photobleaching.py`;
+    - `test_roi_scan.py` (progress display, start ROI, ZEN settings pop-up, ZEN data folder);
+    - `test_fluidics.py` (fluidics task, probe valve from the injections file);
+    - `test_him.py` (Hi-M task, probe valve from the injections file).
+  - The 13 per-change files they replace were removed.
+  - Checks present twice are kept once:
+    - dummy_config entry of `roi_multicolour_scan_dummy`;
+    - dummy modules activate (fluidics);
+    - dummy_config entry of `him_dummy`;
+    - "no Qt warning" (Hi-M).
+  - The fluidics needle warning check of the former ZEN checklist suite is merged into the fluidics
+    needle check, which now also checks the box title.
+  - `tests/run_suites.py` lists the new suites; `docs/TESTING.md` gets an "Organisation" section
+    (suites, rule for adding cases, pointer to `docs/test_plan.md`).
+
 #### Added
 
 - Testing rules and test suites in the repository (2026-11-03).
