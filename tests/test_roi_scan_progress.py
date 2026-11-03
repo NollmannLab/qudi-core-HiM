@@ -198,31 +198,31 @@ DUMMY = 'roi_multicolour_scan_dummy'
 # (1) dummy, start_roi ''
 t0, seen, emits = run(DUMMY)
 shown = [x for _, x, v in seen if v]
-exp = [f'0/{N} - Preparing imaging'] + [f'{j}/{N} - ROI {j}/{N} - {n}' for j, n in enumerate(NAMES, 1)] + [f'{N}/{N} - Done']
+exp = [f'0/{N} - Preparing imaging'] + [f'{j}/{N} - {n}' for j, n in enumerate(NAMES, 1)] + [f'{N}/{N} - Done']
 print('    emitted:', emits)
-check(f"(dummy, start_roi '') progress: 'Preparing imaging', 'ROI j/{N} - <name>' for each ROI, 'Done'", emits == exp, emits)
-check(f"(dummy, start_roi '') the window label showed 'ROI j/{N} - ROI_xxx' for every ROI",
-      all(f'{j}/{N} - ROI {j}/{N} - {n}' in shown for j, n in enumerate(NAMES, 1)), shown)
+check(f"(dummy, start_roi '') progress: 'Preparing imaging', 'j/{N} - <name>' for each ROI, 'Done'", emits == exp, emits)
+check(f"(dummy, start_roi '') the window label showed 'j/{N} - ROI_xxx' for every ROI",
+      all(f'{j}/{N} - {n}' in shown for j, n in enumerate(NAMES, 1)), shown)
 check("(dummy, start_roi '') label cleared and hidden at the end; task succeeded",
       seen[-1][1:] == ('', False) and FINISHED[-1] == (DUMMY, True), (seen[-2:], FINISHED[-1:]))
 logs = [m for t, lvl, m in LOGS if t >= t0]
 check(f'(dummy) log: "Moving to <roi>" once per ROI, no duplicate ROI / Done line; "0/{N} - Preparing imaging" '
       'logged; "All ROIs done." kept',
       [m for m in logs if m.startswith('Moving to')] == [f'Moving to {n}' for n in NAMES]
-      and not any(re.match(r'\d/\d - ROI', m) or m.endswith('- Done') for m in logs)
+      and not any(re.fullmatch(r'\d+/\d+ - .+', m) and not m.endswith('Preparing imaging') for m in logs)
       and f'0/{N} - Preparing imaging' in logs and 'All ROIs done.' in logs, logs)
 
 # (2) dummy, start_roi = second ROI
 t0, seen, emits = run(DUMMY, start_roi=NAMES[1])
 M = N - 1
-exp = [f'0/{M} - Preparing imaging'] + [f'{j}/{M} - ROI {j}/{M} - {n}' for j, n in enumerate(NAMES[1:], 1)] + [f'{M}/{M} - Done']
+exp = [f'0/{M} - Preparing imaging'] + [f'{j}/{M} - {n}' for j, n in enumerate(NAMES[1:], 1)] + [f'{M}/{M} - Done']
 check(f"(dummy, start_roi {NAMES[1]!r}) progress counts the ROIs of this run: "
-      + ', '.join(f"'ROI {j}/{M} - {n}'" for j, n in enumerate(NAMES[1:], 1)), emits == exp and seen[-1][1:] == ('', False), emits)
+      + ', '.join(f"'{j}/{M} - {n}'" for j, n in enumerate(NAMES[1:], 1)), emits == exp and seen[-1][1:] == ('', False), emits)
 
 # (3) interrupt during the 2nd ROI
-t0, seen, emits = run(DUMMY, interrupt_when=lambda: any(e[2].startswith(f'2/{N} - ROI') for e in EMITS))
-check(f'(dummy, interrupt during ROI 2/{N}) label showed ROI 2/{N}, cleared and hidden after the interrupt; task not successful',
-      any(x.startswith(f'2/{N} - ROI 2/{N}') for _, x, v in seen if v) and seen[-1][1:] == ('', False)
+t0, seen, emits = run(DUMMY, interrupt_when=lambda: any(e[2] == f'2/{N} - {NAMES[1]}' for e in EMITS))
+check(f'(dummy, interrupt during ROI 2/{N}) label showed 2/{N}, cleared and hidden after the interrupt; task not successful',
+      any(x == f'2/{N} - {NAMES[1]}' for _, x, v in seen if v) and seen[-1][1:] == ('', False)
       and FINISHED[-1] == (DUMMY, False), (seen[-3:], FINISHED[-1:]))
 
 # (4) error: the stage refuses the move to the 2nd ROI
@@ -240,8 +240,8 @@ def failing_move(*a, **k):
 roi.go_to_roi_xy = failing_move
 t0, seen, emits = run(DUMMY)
 roi.go_to_roi_xy = orig
-check(f'(dummy, error at the move to ROI 2/{N}) label showed ROI 2/{N}, cleared and hidden after the error; task failed',
-      any(x.startswith(f'2/{N} - ROI 2/{N}') for _, x, v in seen if v) and seen[-1][1:] == ('', False)
+check(f'(dummy, error at the move to ROI 2/{N}) label showed 2/{N}, cleared and hidden after the error; task failed',
+      any(x == f'2/{N} - {NAMES[1]}' for _, x, v in seen if v) and seen[-1][1:] == ('', False)
       and FINISHED[-1] == (DUMMY, False)
       and any('stage move refused (test)' in m or 'Exception during main run method' in m
               for t, lvl, m in LOGS if t >= t0), (seen[-3:], FINISHED[-1:]))
@@ -250,9 +250,9 @@ check(f'(dummy, error at the move to ROI 2/{N}) label showed ROI 2/{N}, cleared 
 TRIGGER.sent.clear()
 t0, seen, emits = run('roi_scan_sd')
 exp = [f'0/{N} - Preparing imaging', f'0/{N} - Waiting for ZEN "ready"'] + \
-      [f'{j}/{N} - ROI {j}/{N} - {n}' for j, n in enumerate(NAMES, 1)] + [f'{N}/{N} - Done']
+      [f'{j}/{N} - {n}' for j, n in enumerate(NAMES, 1)] + [f'{N}/{N} - Done']
 print('    SD emitted:', emits)
-check(f'(SD) progress: Preparing imaging, Waiting for ZEN "ready", ROI j/{N} - <name>, Done; label cleared at the end',
+check(f'(SD) progress: Preparing imaging, Waiting for ZEN "ready", j/{N} - <name>, Done; label cleared at the end',
       emits == exp and seen[-1][1:] == ('', False) and FINISHED[-1] == ('roi_scan_sd', True)
       and TRIGGER.sent.count('trigger_ZEN_start_block') == 2 * N, (emits, seen[-2:]))
 logs = [m for t, lvl, m in LOGS if t >= t0]

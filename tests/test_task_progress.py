@@ -259,10 +259,10 @@ else:
               (new_w.sizeHint(), old_w.sizeHint()))
 groupbox_h = {n: w.parent().height() for n, w in mw.task_widgets.items()}
 check('(idle) progress lines hidden in the window', all(not label_state(n)[1] for n in mw.task_widgets))
-check('ProgressModuleTask: FluidicsTaskBase bases (FluidicsStepsMixin first), photobleaching unchanged',
+check('ProgressModuleTask: FluidicsTaskBase bases (FluidicsStepsMixin first); photobleaching also a ProgressModuleTask',
       fluidics.FluidicsTaskBase.__bases__[0].__name__ == 'FluidicsStepsMixin'
       and issubclass(fluidics.FluidicsDummyTask, ProgressModuleTask)
-      and not hasattr(photobleaching.PhotoBleachingSDTask, 'sigProgress'))
+      and issubclass(photobleaching.PhotoBleachingSDTask, ProgressModuleTask))
 
 # ------------------------------------------------------------------ (1) normal fluidics run
 EMITS.clear()
@@ -336,17 +336,21 @@ check('(error) task failed, label cleared and hidden after the error',
       any('Valve a did not reach position 7' in p for p in PROBLEMS) and any('2/5' in s[1] for s in seen)
       and seen[-1][1:] == ('', False), (seen[-3:], PROBLEMS[-2:]))
 
-# ------------------------------------------------------------------ (4) photobleaching: as before
+# ------------------------------------------------------------------ (4) photobleaching: progress per ROI
 PROBLEMS.clear()
 EMITS.clear()
 PB_CALLS.clear()
 h_before = widget('photobleaching_sd_dummy').parent().height()
 n_wait = len(WAIT_SELF)
 t0, seen = run('photobleaching_sd_dummy')
-check('(photobleaching) runs (lasers driven), no progress emitted, label never shown, same height',
-      'set_laser_enabled' in PB_CALLS and not EMITS and all(not s[2] for s in seen)
+pb_texts = [f'{s} - {t}' for _, n, s, t in EMITS if n == 'photobleaching_sd_dummy']
+check('(photobleaching) runs (lasers driven); progress "1/2 - ROI 1/2 - moving to ROI_001" ... "2/2 - Done" '
+      'shown in the label during the run; label cleared and hidden, same height at the end',
+      'set_laser_enabled' in PB_CALLS and '1/2 - ROI 1/2 - moving to ROI_001' in pb_texts
+      and '2/2 - ROI 2/2 - moving to ROI_002' in pb_texts and pb_texts[-1] == '2/2 - Done'
+      and any(s[2] for s in seen) and seen[-1][1:] == ('', False)
       and widget('photobleaching_sd_dummy').parent().height() == h_before,
-      (PB_CALLS[:5], EMITS, seen, PROBLEMS))
+      (PB_CALLS[:5], pb_texts, seen[-3:], PROBLEMS))
 check('(photobleaching) no warning / error', not PROBLEMS, PROBLEMS)
 print(f'    "QThread::wait: Thread tried to wait on itself": {len(WAIT_SELF) - n_wait} for the photobleaching run, '
       f'{n_wait} for the 3 fluidics runs before')

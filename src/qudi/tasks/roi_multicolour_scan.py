@@ -77,8 +77,8 @@ class RoiScanTaskBase(ProgressModuleTask):
     (one file name per imaged ROI).
 
     Progress (Task Runner window), with M the number of ROIs scanned in this run and j the index in
-    this run: '0/M - Preparing imaging' (SD: then 'Waiting for ZEN "ready"'), 'j/M - ROI j/M - <roi>'
-    before each move, 'M/M - Done' after the last ROI.
+    this run: '0/M - Preparing imaging' (SD: then 'Waiting for ZEN "ready"'), 'j/M - <roi>' before
+    each move, 'M/M - Done' after the last ROI.
 
     During the run the lasers are off (unless the imaging switches them), ROI tracking and ROI
     actions are locked and the stage moves at scan_stage_velocity. _cleanup() moves the stage back
@@ -178,7 +178,7 @@ class RoiScanTaskBase(ProgressModuleTask):
         self.directory = self._create_directory(self.save_path)
         self._save_metadata_file()
 
-        # 6. ROI loop: move, image (progress 'ROI j/M - <name>'; the "Moving to" line is the log)
+        # 6. ROI loop: move, image (progress 'j/M - <name>'; the "Moving to" line is the log)
         for number, roi_name in enumerate(self._scan_rois, 1):
             self._check_interrupt()
             self._report_progress(f'{number}/{total}', f'{roi_name}', log=False)

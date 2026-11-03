@@ -40,11 +40,12 @@ Last updated: 2026-11-03
     param_hints 65 -> 35, task_progress 239 -> 53, photobleaching_progress 51 -> 26,
     roi_scan_progress 53 -> 22, fluidics_task 359 -> 56, probe_valve 424 -> 78, him 630 -> 123,
     probe_valve_him 999 -> 181; total about 48 min -> 10 min.
-  - Known failures on `main` (expectations older than the code, left as they are):
-    - `test_roi_scan_progress.py`, 6 checks: the ROI scan emits 'j/M - <roi>', while the suite and
-      the docstring of `RoiScanTaskBase` say 'j/M - ROI j/M - <roi>';
-    - `test_task_progress.py`, 2 checks: they expect no progress from the photobleaching task,
-      which reports progress since the photobleaching progress change.
+  - Checks older than the code, updated to the current code (all suites pass):
+    - `test_roi_scan_progress.py`: the ROI scan progress is 'j/M - <roi>' (was expected as
+      'j/M - ROI j/M - <roi>'); the docstring of `RoiScanTaskBase` and the loop comment in
+      `tasks/roi_multicolour_scan.py` corrected to the same text (comments only);
+    - `test_task_progress.py`: the photobleaching task is a `ProgressModuleTask` and shows its
+      progress per ROI in the Task Runner window (was expected without progress).
 
 #### Changed
 
