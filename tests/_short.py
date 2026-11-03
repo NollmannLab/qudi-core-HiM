@@ -128,6 +128,23 @@ class AutoAnswer:
         self._timer.stop()
 
 
+class ZenFolders:
+    """Fake ZEN data folders for the spinning-disk tasks: `root` is the zen_saving_path of the test; each
+    call of ready() (from a fake TriggerLogic when "trigger_ZEN_ready" is polled, i.e. when ZEN starts the
+    experiment) creates a new folder there."""
+
+    def __init__(self, root):
+        self.root = root
+        self.created = []
+        os.makedirs(root, exist_ok=True)
+
+    def ready(self):
+        path = os.path.join(self.root, f'zen_experiment_{len(self.created) + 1:03d}')
+        os.makedirs(path)
+        self.created.append(path)
+        return path
+
+
 def load(path):
     """Fresh copy of a YAML / JSON test file (tests/data/<name> or a full path)."""
     path = path if os.path.isabs(path) else os.path.join(DATA, path)

@@ -126,7 +126,12 @@ class TriggerLogic:  # stand-in; qudi-core connectors check _meta['mro']
         self.sent.append(name)
 
     def is_triggered(self, name):
+        if name == 'trigger_ZEN_ready':
+            ZEN.ready()  # ZEN starts the experiment: new data folder
         return True
+
+
+ZEN = _short.ZenFolders(os.path.join(TMP, 'zen'))  # zen_saving_path of the SD run
 
 
 TRIGGER = TriggerLogic()
@@ -142,7 +147,8 @@ tasks_cfg = {'roi_multicolour_scan_dummy': entry,
              'roi_scan_sd': {'module.Class': 'qudi.tasks.roi_multicolour_scan.RoiScanSDTask',
                              'connect': {'roi_logic': 'roi_logic', 'laser_logic': 'laser_control_logic',
                                          'trigger_logic': 'trigger_logic'},
-                             'options': {'user_config_path': user_cfg}}}
+                             'options': {'user_config_path': _short.experiment(
+                                 TMP, 'roi_scan_experiment.yaml', 'roi_scan_sd', zen_saving_path=ZEN.root)}}}
 check('RoiScanTaskBase derives from ProgressModuleTask; subclasses unchanged',
       rs.RoiScanTaskBase.__bases__ == (ProgressModuleTask,)
       and rs.RoiScanSDTask.__bases__ == (rs.SDImagingMixin, rs.RoiScanTaskBase)

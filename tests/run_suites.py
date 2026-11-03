@@ -31,6 +31,7 @@ SUITES = [
     'test_photobleaching_progress.py',
     'test_roi_scan_progress.py',
     'test_roi_scan_zen_checklist.py',
+    'test_roi_scan_zen_folder.py',
     'test_fluidics_task.py',
     'test_probe_valve.py',
     'test_him.py',

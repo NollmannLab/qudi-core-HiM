@@ -1339,6 +1339,58 @@ Last updated: 2026-11-03
 
 #### Added
 
+- ROI scan on the spinning disk: data files in the folder created by ZEN (2026-11-03).
+  - `tasks/common/imaging_steps.py`, `SDImagingMixin`: the detection of the
+    ZEN data folder moved here from `HiMSDTask`, behaviour unchanged.
+    - `_zen_folders()` lists the folders of `self.zen_saving_path` (set by the
+      task).
+    - `_find_new_zen_folder(folders_before)`: 10 attempts, 1 s apart, same
+      errors for no new folder / several new folders; its 1 s wait is the
+      mixin's own interruptible wait (`_zen_wait`).
+    - `_create_zen_metadata_folder(zen_directory)` creates
+      `<ZEN folder>/metadata`.
+    - `HiMSDTask` uses them; its own copies were removed. Hi-M behaviour and
+      file names are unchanged (prefix '').
+  - `tasks/roi_multicolour_scan.py`:
+    - `RoiScanTaskBase`: hooks `_read_data_location(params)` (default:
+      `save_path`, required) and `_create_data_folder()` (default:
+      `_create_directory(save_path)`, which sets `self.prefix`) replace the
+      direct use of `save_path`. Dummy and RAMM unchanged.
+    - `RoiScanSDTask` reads `zen_saving_path` instead of `save_path`, checked
+      before any hardware call: missing or not an existing folder gives an
+      error.
+    - `_prepare_imaging` lists the folders of `zen_saving_path`, runs the SD
+      preparation ('Waiting for ZEN "ready"' progress, laser source, wait for
+      ZEN ready), then finds the new ZEN folder.
+    - `_create_data_folder` creates `<ZEN folder>/metadata` for
+      `parameters.yml` and `movie_name.txt`. `self.prefix` = folders in
+      `zen_saving_path` before ZEN started + 1, on 3 digits.
+    - Movie names: `scan_<prefix>_<roi number>_ROI`, with `_DAPI` / `_RNA`
+      (these flags now only affect the movie names, ZEN names the folder).
+      The ZEN settings box stays first.
+  - Experiment definition
+    `custom_experiments_config/spinning_disk/roi_multicolour_scan.yaml`:
+    `zen_saving_path` (required) added; `save_path` hidden and not required
+    (kept in the file).
+    - The experiment configurator shows the ZEN saving folder field
+      (`Zen_saving_folder_lineEdit`) for this experiment; checked offscreen.
+    - `dummy/roi_multicolour_scan_sd.yaml` does not exist (the dummy setup
+      has no SD ROI scan task), so it is not added.
+  - Tests (qudi-core 1.8, `tests/test_roi_scan_zen_folder.py`, 10/10, 34 s,
+    `zen_saving_path` with 2 existing folders, ZEN folder created by the fake
+    TriggerLogic at "ready"):
+    - ROI scan SD with 2 ROIs: files in `<new folder>/metadata`, prefix 003,
+      `scan_003_000_ROI`; with dapi, `scan_003_DAPI_000_ROI`.
+    - No new folder / two new folders: clear error, cleanup as usual.
+    - `zen_saving_path` missing or not a folder: error before any hardware
+      call.
+    - Hi-M SD with 1 probe and 2 ROIs: files in `<new folder>/metadata`,
+      names `scan__RT1_000_ROI`.
+    - ROI scan dummy: own folder under `save_path`, names unchanged.
+  - SD runs of `test_param_hints.py`, `test_roi_scan_progress.py` and
+    `test_roi_scan_zen_checklist.py` updated: `zen_saving_path` plus a fake
+    ZEN folder (`_short.ZenFolders`). All three pass.
+
 - ROI scan on the spinning disk: ZEN settings box before the scan (2026-11-03).
   - New `gui/task_runner/dialogs.py`:
     - `build_confirmation_box(parent, title, text, ok_text)` returns

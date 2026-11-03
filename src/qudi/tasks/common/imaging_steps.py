@@ -33,6 +33,8 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
+import os
+from glob import glob
 from time import monotonic, sleep
 
 
@@ -55,7 +57,16 @@ class SDImagingMixin:
     _check_autofocus: hook between the autofocus block and the acquisition block; does nothing
         here (overridden by a task that checks the focus, e.g. the Hi-M task).
     _end_imaging: lasers disabled, external trigger off, intensities reset to 0.
+
+    Data folder created by ZEN: when the experiment starts, ZEN creates a new folder in
+    self.zen_saving_path (set by the task from its experiment file). _zen_folders() lists the folders
+    there before ZEN starts; _find_new_zen_folder(folders_before) then returns the single new one
+    (checked _ZEN_FOLDER_ATTEMPTS times, 1 s apart; error if there is none or several);
+    _create_zen_metadata_folder(zen_directory) creates <ZEN folder>/metadata, where qudi writes its
+    files.
     """
+
+    _ZEN_FOLDER_ATTEMPTS = 10  # attempts to find the new ZEN folder, 1 s apart
 
     acquisition_timeout_s = 120.0  # max time to wait for ZEN's "done" trigger on one block
     poll_interval_s = 0.1
@@ -103,6 +114,46 @@ class SDImagingMixin:
         """Check of the focus after the ZEN autofocus block of roi_name, before the acquisition
         block. Does nothing here."""
         pass
+
+    # ----------------------------------------------------------------------------------------------
+    # Data folder created by ZEN
+    # ----------------------------------------------------------------------------------------------
+
+    def _zen_folders(self) -> set:
+        """Folders of zen_saving_path (full paths)."""
+        return {path for path in glob(os.path.join(self.zen_saving_path, '*')) if os.path.isdir(path)}
+
+    def _find_new_zen_folder(self, folders_before) -> str:
+        """The single folder of zen_saving_path that was not there before ZEN started; checked up to
+        _ZEN_FOLDER_ATTEMPTS times, 1 s apart."""
+        for attempt in range(self._ZEN_FOLDER_ATTEMPTS):
+            new = sorted(self._zen_folders() - folders_before)
+            if len(new) == 1:
+                self.log.info(f'ZEN will save the data in the following folder : {new[0]}')
+                return new[0]
+            if len(new) > 1:
+                raise RuntimeError(f'More than one folder were found ({", ".join(new)}). The acquisition is aborted.')
+            if attempt < self._ZEN_FOLDER_ATTEMPTS - 1:
+                self._zen_wait(1.0)
+        raise RuntimeError(f'No new file was created by ZEN in {self.zen_saving_path} - check if the reference '
+                           f'folder indicated in the parameters is correct. The acquisition is aborted.')
+
+    @staticmethod
+    def _create_zen_metadata_folder(zen_directory) -> str:
+        """<ZEN folder>/metadata (created)."""
+        path = os.path.join(zen_directory, 'metadata')
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _zen_wait(self, duration_s) -> None:
+        """Wait duration_s seconds, checking for an interrupt at least every 0.1 s."""
+        deadline = monotonic() + float(duration_s)
+        while True:
+            self._check_interrupt()
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return
+            sleep(min(0.1, remaining))
 
     def _end_imaging(self) -> None:
         if self.imaging_sequence:

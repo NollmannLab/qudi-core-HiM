@@ -24,10 +24,17 @@ fields:
     default: []
     model: standard
 
+  # data folder created by ZEN in zen_saving_path when the experiment starts; qudi writes its files in
+  # its "metadata" subfolder (save_path is not used by the SD ROI scan)
   save_path:
-    required: true
+    visible: false
+    required: false
     default_from: default_path_imagedata
 
   roi_list_path:
+    required: true
+    default: ""
+
+  zen_saving_path:
     required: true
     default: ""

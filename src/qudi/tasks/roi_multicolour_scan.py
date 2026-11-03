@@ -73,9 +73,11 @@ class RoiScanTaskBase(ProgressModuleTask):
                     the ROI list, before any hardware call. The scan runs from that ROI to the end
                     of the list, in list order.
 
-    Data: each run creates save_path/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA]/ with parameters.yml
-    (sample name, start_roi and the positions of the ROIs scanned in this run) and movie_name.txt
-    (one file name per imaged ROI).
+    Data: the data folder comes from the hook _create_data_folder(); by default each run creates
+    save_path/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA]/ (NNN: self.prefix). qudi writes there
+    parameters.yml (sample name, start_roi and the positions of the ROIs scanned in this run) and
+    movie_name.txt (one file name per imaged ROI). The data location keys of the experiment file are
+    read and checked by the hook _read_data_location(params) (default: save_path, required).
 
     Progress (Task Runner window), with M the number of ROIs scanned in this run and j the index in
     this run: '0/M - Preparing imaging' (SD: then 'Waiting for ZEN "ready"'), 'j/M - <roi>' before
@@ -142,6 +144,17 @@ class RoiScanTaskBase(ProgressModuleTask):
         scan. Default: True (no question)."""
         return True
 
+    def _read_data_location(self, params) -> None:
+        """Read and check the data location keys of the experiment file, before any hardware call.
+        Default: save_path (required)."""
+        if not self.save_path:
+            raise RuntimeError(f"Experiment file {self.user_config_path}: 'save_path' missing.")
+
+    def _create_data_folder(self) -> str:
+        """Data folder of this run, created after _prepare_imaging(); sets self.prefix. Default:
+        save_path/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA] (_create_directory)."""
+        return self._create_directory(self.save_path)
+
     # ======================================================================================
     # Main entry point
     # ======================================================================================
@@ -190,8 +203,8 @@ class RoiScanTaskBase(ProgressModuleTask):
         self._report_progress(f'0/{total}', 'Preparing imaging')
         self._prepare_imaging()
 
-        # 6. new data folder and metadata
-        self.directory = self._create_directory(self.save_path)
+        # 6. new data folder (hook) and metadata
+        self.directory = self._create_data_folder()
         self._save_metadata_file()
 
         # 7. ROI loop: move, image (progress 'j/M - <name>'; the "Moving to" line is the log)
@@ -292,9 +305,10 @@ class RoiScanTaskBase(ProgressModuleTask):
         self.sample_name = user_param_dict['sample_name']
         self.is_dapi = user_param_dict.get('dapi', False)
         self.is_rna = user_param_dict.get('rna', False)
-        self.save_path = user_param_dict['save_path']
+        self.save_path = user_param_dict.get('save_path')
         self.roi_list_path = user_param_dict['roi_list_path']
         self.imaging_sequence = user_param_dict['imaging_sequence']
+        self._read_data_location(user_param_dict)
 
         self._roi_logic.load_roi_list(self.roi_list_path)
         self.roi_names = list(self._roi_logic.roi_names)
@@ -366,12 +380,24 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     """ROI scan on the spinning disk: one ZEN autofocus block and one ZEN acquisition block per ROI,
     synchronized over DAQ triggers (see SDImagingMixin). trigger_logic is required on this setup.
 
+    Experiment file: zen_saving_path (required) instead of save_path - the folder where ZEN creates the
+    folder of the experiment when it starts; it must be an existing folder (checked before any hardware
+    call). save_path is not used.
+
     ZEN settings check: before any hardware call, a modal box 'ZEN settings' (ask_confirmation,
     tasks/common/popups.py) lists the ZEN settings to check in block 7 - the channels to select (the
     wavelengths of the imaging sequence, in order) and the number of loops for blocks 4>9 (the number
     of ROIs scanned in this run, from start_roi to the end of the list) - and waits for the answer:
     'Done - continue' starts the scan, Cancel ends the task without touching the hardware. Both values
     are also logged. Then the progress shows 'Waiting for ZEN "ready"' until ZEN is ready.
+
+    Data folder: the folders of zen_saving_path are listed before waiting for ZEN "ready"; once ZEN is
+    ready, the single new folder is the folder ZEN created for this experiment (SDImagingMixin, shared
+    with the Hi-M task; error if there is none or several, then the cleanup runs as usual). qudi writes
+    parameters.yml and movie_name.txt in <ZEN folder>/metadata. self.prefix is the number of folders
+    that were in zen_saving_path before ZEN started + 1, on 3 digits, and the movie names are
+    scan_<prefix>_<roi number>_ROI (scan_<prefix>_DAPI_... / scan_<prefix>_RNA_... with dapi / rna,
+    which only affect these names: ZEN names the folder).
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -401,11 +427,30 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
                 f'2- the number of loops for blocks 4>9 should be {loops}')
         return ask_confirmation(self, 'ZEN settings', text)
 
+    def _read_data_location(self, params) -> None:
+        """zen_saving_path (required, an existing folder) instead of save_path."""
+        self.zen_saving_path = params.get('zen_saving_path')
+        self._zen_directory = None
+        self._zen_folders_before = set()
+        if not self.zen_saving_path:
+            raise RuntimeError(f"Experiment file {self.user_config_path}: 'zen_saving_path' missing.")
+        if not os.path.isdir(self.zen_saving_path):
+            raise RuntimeError(f'zen_saving_path {self.zen_saving_path} is not an existing folder.')
+
     def _prepare_imaging(self) -> None:
-        """Show 'Waiting for ZEN "ready"' in the progress line, then the SD imaging preparation
-        (SDImagingMixin), which waits for ZEN "ready" (and logs it)."""
+        """List the folders of zen_saving_path, show 'Waiting for ZEN "ready"' in the progress line, run
+        the SD imaging preparation (SDImagingMixin: laser source, wait for ZEN "ready"), then find the new
+        folder created by ZEN."""
+        self._zen_folders_before = self._zen_folders()
         self._report_progress(f'0/{len(self._scan_rois)}', 'Waiting for ZEN "ready"', log=False)
         super()._prepare_imaging()
+        self._zen_directory = self._find_new_zen_folder(self._zen_folders_before)
+
+    def _create_data_folder(self) -> str:
+        """<ZEN folder>/metadata (created); self.prefix = folders in zen_saving_path before ZEN started + 1,
+        on 3 digits."""
+        self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
+        return self._create_zen_metadata_folder(self._zen_directory)
 
 
 class RoiScanRAMMTask(RAMMImagingMixin, RoiScanTaskBase):

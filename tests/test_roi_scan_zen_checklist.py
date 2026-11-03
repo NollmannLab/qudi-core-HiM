@@ -86,10 +86,13 @@ class TriggerLogic(_Stand):
 
     def is_triggered(self, name):
         self._rec.rec('is_triggered', name)
+        if name == 'trigger_ZEN_ready':
+            ZEN.ready()  # ZEN starts the experiment: new data folder
         return True
 
 
 KEEP = []
+ZEN = _short.ZenFolders(os.path.join(TMP, 'zen'))  # zen_saving_path of the SD runs
 ROIS_2 = _short.roi_names()                          # shared 2-ROI list names
 ROIS_20 = [f'ROI_{k:03d}' for k in range(1, 21)]     # 20 ROIs for the start_roi case
 
@@ -97,7 +100,8 @@ ROIS_20 = [f'ROI_{k:03d}' for k in range(1, 21)]     # 20 ROIs for the start_roi
 def sd_yaml(name, sequence):
     path = os.path.join(TMP, f'{name}.yaml')
     yaml.safe_dump({'sample_name': 'SDsample', 'save_path': os.path.join(TMP, f'data_{name}'),
-                    'roi_list_path': '/fake/rois.json', 'imaging_sequence': sequence}, open(path, 'w'))
+                    'roi_list_path': '/fake/rois.json', 'imaging_sequence': sequence,
+                    'zen_saving_path': ZEN.root}, open(path, 'w'))
     return path
 
 

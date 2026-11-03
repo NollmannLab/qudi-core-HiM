@@ -38,7 +38,6 @@ import copy
 import math
 import os
 from datetime import datetime
-from glob import glob
 from time import monotonic
 
 import yaml
@@ -610,9 +609,10 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     experiment), zen_ref_images_path (reference images of the autofocus), correlation_threshold.
     Before waiting for ZEN "ready", the log gives the ZEN settings: number of acquisition loops
     (probes x ROIs), C (laser lines) and Z (planes). The new folder created by ZEN in
-    zen_saving_path when the experiment starts is found by comparing the folders before and after;
-    qudi writes its files (HiM_parameters.yml, movie_name.txt) in its "metadata" subfolder. As no
-    data folder is created by qudi, self.prefix stays '' and the file names are
+    zen_saving_path when the experiment starts is found by comparing the folders before and after
+    (SDImagingMixin, shared with the ROI scan); qudi writes its files (HiM_parameters.yml,
+    movie_name.txt) in its "metadata" subfolder. As no data folder is created by qudi, self.prefix
+    stays '' and the file names are
     scan__<RT>_<roi number>_ROI.
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
@@ -638,8 +638,6 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     incubation_valve_positions = FluidicsSDTask.incubation_valve_positions
     incubation_end_valve_positions = FluidicsSDTask.incubation_end_valve_positions
     cleanup_valve_positions = FluidicsSDTask.cleanup_valve_positions
-
-    _ZEN_FOLDER_ATTEMPTS = 10  # attempts to find the new ZEN folder, 1 s apart
 
     def _read_microscope_parameters(self, params) -> None:
         self.zen_saving_path = params.get('zen_saving_path')
@@ -668,29 +666,9 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         super()._prepare_imaging()
         self._zen_directory = self._find_new_zen_folder(folders_before)
 
-    def _zen_folders(self) -> set:
-        return {path for path in glob(os.path.join(self.zen_saving_path, '*')) if os.path.isdir(path)}
-
-    def _find_new_zen_folder(self, folders_before) -> str:
-        """The single folder of zen_saving_path that was not there before ZEN started; checked up to
-        _ZEN_FOLDER_ATTEMPTS times, 1 s apart."""
-        for attempt in range(self._ZEN_FOLDER_ATTEMPTS):
-            new = sorted(self._zen_folders() - folders_before)
-            if len(new) == 1:
-                self.log.info(f'ZEN will save the data in the following folder : {new[0]}')
-                return new[0]
-            if len(new) > 1:
-                raise RuntimeError(f'More than one folder were found ({", ".join(new)}). The acquisition is aborted.')
-            if attempt < self._ZEN_FOLDER_ATTEMPTS - 1:
-                self._interruptible_sleep(1.0)
-        raise RuntimeError(f'No new file was created by ZEN in {self.zen_saving_path} - check if the reference '
-                           f'folder indicated in the parameters is correct. The acquisition is aborted.')
-
     def _create_data_folder(self) -> str:
-        """<new ZEN folder>/metadata (created)."""
-        path = os.path.join(self._zen_directory, 'metadata')
-        os.makedirs(path, exist_ok=True)
-        return path
+        """<new ZEN folder>/metadata (created, SDImagingMixin)."""
+        return self._create_zen_metadata_folder(self._zen_directory)
 
     def _check_autofocus(self, roi_name: str) -> None:
         """PLACEHOLDER - logs once per run that the check is not implemented.

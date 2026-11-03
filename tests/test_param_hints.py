@@ -259,10 +259,13 @@ class TriggerLogic(_Stand):
 
     def is_triggered(self, name):
         self._rec.rec('is_triggered', name)
+        if name == 'trigger_ZEN_ready':
+            ZEN.ready()  # ZEN starts the experiment: new data folder
         return True
 
 
 KEEP = []
+ZEN = _short.ZenFolders(os.path.join(TMP, 'zen'))  # zen_saving_path of the SD runs
 
 
 def sd_task(cls, rec, path):
@@ -278,7 +281,7 @@ def sd_task(cls, rec, path):
 # the ZEN settings box of RoiScanSDTask is answered 'Done - continue' (tests/_short.py AutoAnswer)
 ZEN_BOX = _short.AutoAnswer('ZEN settings')
 sd_cfg = os.path.join(TMP, 'roi_scan_sd.yaml')
-yaml.safe_dump({'sample_name': 'SDsample', 'save_path': os.path.join(TMP, 'sd_data'), 'roi_list_path': '/fake/rois.json',
+yaml.safe_dump({'sample_name': 'SDsample', 'zen_saving_path': ZEN.root, 'roi_list_path': '/fake/rois.json',
                 'imaging_sequence': [[488, 50.0]]}, open(sd_cfg, 'w'))
 for start, n in (('', 3), ('ROI_002', 2)):
     LOGS.clear()
