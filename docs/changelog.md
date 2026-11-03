@@ -4,9 +4,47 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-11-02
+Last updated: 2026-11-03
 
 ### Documentation
+
+#### Added
+
+- Testing rules and test suites in the repository (2026-11-03).
+  - `docs/TESTING.md`: standing testing rules (qudi-core 1.8 only; short dummy settings; prompt cases
+    first, then the regression suites; check the order and synchronization of the hardware calls,
+    not durations; pure logic tested directly with stand-ins) and where the test files are.
+  - `tests/`: the regression suites, moved from the development scratch space, plus
+    `tests/run_suites.py` (runs them and prints pass / fail and the run time of each).
+    - Suites: ROI path / tour / optimize, random ROI list, parameter hints, task progress,
+      photobleaching progress, ROI scan progress, fluidics task, probe valve (fluidics, Hi-M), Hi-M.
+    - Shared short settings in `tests/_short.py` and shared data in `tests/data/` (fluidics and Hi-M
+      injections, experiment templates, 2-ROI list): 5 µl injections, 1 s incubations, 1 s rinse,
+      0.2 s dummy imaging, 2 ROIs / 2 probes.
+    - Durations are shortened only in the modules and task instances built by the tests
+      (task attributes, module poll intervals, the dummy valve wait), never in the classes or in
+      `dummy_config.cfg`.
+  - What the suites check is unchanged. They were adapted only to the shorter data:
+    - counts derived from the number of ROIs;
+    - live-update counts and minimum gaps relative to the shortened progress interval;
+    - a 3 s incubation where a live countdown is checked.
+  - Comparisons with a former copy of a module (same calls as before a change, same widget size)
+    now run only when that file is given on the command line; otherwise they print `[SKIP]`.
+    `test_task_progress.py`: `photobleaching_ramm_dummy` is popped only if present (no longer in
+    `dummy_config.cfg`).
+  - Not shipped: `test_roi_scan_start.py`, superseded by `test_param_hints.py` (`start_roi` takes ROI
+    names only since the parameter hints change; its index cases fail by design). No part existed
+    only for qudi-core 1.7: the stand-in modules keep both the class name and `_meta['mro']`.
+  - Run time on qudi-core 1.8, before -> after (s):
+    roi_path 6 -> 2, roi_tour 9 -> 9, roi_optimize 17 -> 3, random_roi_list 9 -> 9,
+    param_hints 65 -> 35, task_progress 239 -> 53, photobleaching_progress 51 -> 26,
+    roi_scan_progress 53 -> 22, fluidics_task 359 -> 56, probe_valve 424 -> 78, him 630 -> 123,
+    probe_valve_him 999 -> 181; total about 48 min -> 10 min.
+  - Known failures on `main` (expectations older than the code, left as they are):
+    - `test_roi_scan_progress.py`, 6 checks: the ROI scan emits 'j/M - <roi>', while the suite and
+      the docstring of `RoiScanTaskBase` say 'j/M - ROI j/M - <roi>';
+    - `test_task_progress.py`, 2 checks: they expect no progress from the photobleaching task,
+      which reports progress since the photobleaching progress change.
 
 #### Changed
 

@@ -1,0 +1,1 @@
+{"name": "test_rois_2", "creation_time": "2026-11-03 10:00:00.000000", "cam_image": null, "cam_image_extent": null, "rois": [{"name": "ROI_000", "position": [0.0, 0.0, 0.0]}, {"name": "ROI_001", "position": [100.0, -50.0, 0.0]}]}

@@ -1,0 +1,7 @@
+# Experiment template of the Hi-M task tests (tests/_short.py experiment()); save_path is set per test.
+sample_name: Mysample
+roi_list_path: rois_2.json
+injections_path: him_injections.yml
+imaging_sequence: [[488, 50.0], [561, 80.0]]
+num_z_planes: 5
+save_path: null

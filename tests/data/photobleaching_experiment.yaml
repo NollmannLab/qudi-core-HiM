@@ -1,0 +1,4 @@
+# Experiment template of the photobleaching task tests (tests/_short.py experiment()).
+roi_list_path: rois_2.json
+imaging_sequence: [[561, 50.0], [640, 80.0]]
+illumination_time: 1.0

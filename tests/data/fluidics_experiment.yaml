@@ -1,0 +1,2 @@
+# Experiment template of the fluidics task tests (tests/_short.py experiment()).
+injections_path: fluidics_injections.yml
