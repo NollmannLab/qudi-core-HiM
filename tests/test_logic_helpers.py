@@ -1,5 +1,6 @@
-"""Logic helpers: data folders defined in the logic modules (ROI lists, injections files) and the random
-ROI list command-line helper (qudi.util.make_random_roi_list).
+"""Logic helpers: data folders defined in the logic modules (ROI lists, injections files), the random
+ROI list command-line helper (qudi.util.make_random_roi_list) and the local / server folder buttons of the
+experiment configurator.
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_logic_helpers.py [<repo_root>]
 Short settings: tests/_short.py (docs/TESTING.md).
@@ -414,9 +415,89 @@ def _section_random_roi_list():
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 
+# --- configurator: local / server folder buttons ---
+def _section_folder_buttons():
+    """Experiment configurator GUI: buttons choosing the local folder (save_path) and the server folder
+    (save_network_path). The folder dialog is replaced by a recorder returning a chosen folder (or '' for
+    Cancel); the SD ROI scan, Hi-M epi and photobleaching definitions of the repository are used."""
+    import os, weakref, importlib, tempfile
+    from qtpy import QtCore, QtWidgets
+    import yaml
+    from qudi.core.connector import Connector
+
+    results = []
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond))); print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+    class FakeMain(QtCore.QObject): pass
+    MAIN = FakeMain()
+    CFG = yaml.safe_load(open(os.path.join(repo, 'custom_config/dummy_config.cfg')))
+    TMP = tempfile.mkdtemp()
+    LOCAL, SERVER, DEF_LOCAL, DEF_SERVER = (os.path.join(TMP, n) for n in ('local', 'server', 'def_local', 'def_server'))
+    for d in (LOCAL, SERVER, DEF_LOCAL, DEF_SERVER): os.makedirs(d)
+    DIALOGS = []; ANSWER = ['']
+    def fake(parent, caption='', directory='', *a, **k):
+        DIALOGS.append((caption, directory)); return ANSWER[0]
+    ORIGINAL_DIALOG = QtWidgets.QFileDialog.getExistingDirectory
+    QtWidgets.QFileDialog.getExistingDirectory = staticmethod(fake)
+    MODS = {}
+    def build(name):
+        if name in MODS: return MODS[name]
+        base = next(b for b in ('hardware', 'logic', 'gui') if name in (CFG.get(b) or {}))
+        entry = CFG[base][name]; mod, cls = entry['module.Class'].rsplit('.', 1)
+        klass = getattr(importlib.import_module(f'qudi.{base}.{mod}'), cls)
+        opts = _short.module_options(name, entry.get('options'))
+        if name == 'experiments_configurator_logic':
+            opts['experiment_definitions_directory'] = os.path.join(repo, 'custom_config/custom_experiments_config/spinning_disk') + '/'
+            opts['experiments'] = ['roi_multicolour_scan.yaml', 'him_epi.yaml', 'photobleaching.yaml']
+            opts['default path imagedata'] = DEF_LOCAL; opts['default network path'] = DEF_SERVER
+        m = klass(qudi_main_weakref=weakref.ref(MAIN), name=name, config=opts)
+        by_name = {c.name: c for k in dir(klass) if isinstance(c := getattr(klass, k, None), Connector)}
+        for key, target in (entry.get('connect') or {}).items():
+            m._meta['connectors'][next(k for k in m._meta['connectors'] if by_name[key] is getattr(klass, k))].connect(build(target))
+        m.module_state.activate(); MODS[name] = m; return m
+    gui = build('experiments_configurator_gui'); gui.show(); app.processEvents()
+    mw, logic = gui._mw, gui._exp_logic
+    lb, nb = mw.local_path_pushButton, mw.network_pushButton
+    check('tooltips', lb.toolTip() == 'Choose the local folder' and nb.toolTip() == 'Choose the server folder')
+
+    def shown(w): return w.isVisibleTo(mw)
+    for exp in ('roi_multicolor_scan', 'him_epi_sd'):
+        gui.start_new_experiment_config(exp); app.processEvents()
+        check(f'({exp}) both buttons shown and enabled, like their fields',
+              shown(lb) and shown(nb) and shown(mw.save_path_LineEdit) and shown(mw.save_network_path_LineEdit)
+              and lb.isEnabled() and nb.isEnabled())
+        for button, edit, key, chosen, title, default in (
+                (lb, mw.save_path_LineEdit, 'save_path', LOCAL, 'Select the local folder for the data', DEF_LOCAL),
+                (nb, mw.save_network_path_LineEdit, 'save_network_path', SERVER, 'Select the server folder for the data', DEF_SERVER)):
+            # start folder: field value (the default) exists -> field; then a missing field value -> logic default; then home
+            edit.setText(os.path.join(TMP, 'missing')); DIALOGS.clear(); ANSWER[0] = ''
+            button.click(); app.processEvents()
+            start_default = DIALOGS[-1][1] if DIALOGS else None
+            check(f'({exp}, {key}) cancel: field unchanged, config unchanged; start = logic default when the field folder '
+                  f'does not exist; title {title!r}',
+                  edit.text() == os.path.join(TMP, 'missing') and logic.config_dict.get(key) == os.path.join(TMP, 'missing')
+                  and start_default == default and DIALOGS[-1][0] == title, (DIALOGS, edit.text()))
+            ANSWER[0] = chosen; button.click(); app.processEvents()
+            check(f'({exp}, {key}) chosen folder fills the field and reaches the logic config',
+                  edit.text() == chosen and logic.config_dict.get(key) == chosen, (edit.text(), logic.config_dict.get(key)))
+            ANSWER[0] = ''; DIALOGS.clear(); button.click(); app.processEvents()
+            check(f'({exp}, {key}) next dialog starts in the folder of the field', DIALOGS and DIALOGS[-1][1] == chosen, DIALOGS)
+    gui.start_new_experiment_config('photobleaching'); app.processEvents()
+    check('(photobleaching, no save fields) both buttons hidden with their fields',
+          not shown(lb) and not shown(nb) and not shown(mw.save_path_LineEdit) and not shown(mw.save_network_path_LineEdit))
+    # home folder fallback: field and logic default missing
+    logic.default_path_imagedata = os.path.join(TMP, 'nowhere'); mw.save_path_LineEdit.setText('')
+    DIALOGS.clear(); ANSWER[0] = ''; gui.load_local_path_clicked()
+    check('start folder = home folder when neither the field nor the logic default exists',
+          DIALOGS and DIALOGS[-1][1] == os.path.expanduser('~'), DIALOGS)
+    QtWidgets.QFileDialog.getExistingDirectory = ORIGINAL_DIALOG
+    KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
+    return results
+
 SECTIONS = [
     ('data folders in the logic', _section_data_folders),
     ('random ROI list helper', _section_random_roi_list),
+    ('configurator: local / server folder buttons', _section_folder_buttons),
 ]
 
 if __name__ == '__main__':

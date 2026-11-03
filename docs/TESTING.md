@@ -51,7 +51,8 @@ One suite per component in `tests/`, one section per feature inside a suite (a
 - `test_roi_path.py` - ROI path optimization: open path and closed tour (`qudi.util.roi_path`),
   the "optimize path" action of the ROI logic / GUI.
 - `test_logic_helpers.py` - data folders defined in the logic modules (ROI lists, injections
-  files) and the random ROI list command-line helper.
+  files), the random ROI list command-line helper and the local / server folder buttons of the
+  experiment configurator.
 - `test_task_runner.py` - Task Runner logic / GUI / task widget: progress display, parameter
   hints (placeholder, tooltip), start / end warning dialogs.
 - `test_photobleaching.py` - photobleaching task: hardware calls, progress display, dialogs.

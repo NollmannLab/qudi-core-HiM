@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1262</width>
-    <height>1293</height>
+    <height>1324</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -39,13 +39,6 @@
         <widget class="QLabel" name="time_step_Label">
          <property name="text">
           <string>Time step (s)</string>
-         </property>
-        </widget>
-       </item>
-       <item row="24" column="5">
-        <widget class="QCheckBox" name="TransferData_checkBox">
-         <property name="text">
-          <string>Transfer data automatically</string>
          </property>
         </widget>
        </item>
@@ -552,9 +545,6 @@
          </property>
         </spacer>
        </item>
-       <item row="22" column="3" colspan="2">
-        <widget class="QLineEdit" name="save_path_LineEdit"/>
-       </item>
        <item row="32" column="1">
         <widget class="QLabel" name="roi_list_path_Label">
          <property name="text">
@@ -676,16 +666,6 @@
          </property>
         </widget>
        </item>
-       <item row="24" column="3" colspan="2">
-        <widget class="QLineEdit" name="save_network_path_LineEdit">
-         <property name="enabled">
-          <bool>true</bool>
-         </property>
-         <property name="readOnly">
-          <bool>false</bool>
-         </property>
-        </widget>
-       </item>
        <item row="40" column="1">
         <widget class="QLabel" name="prebleach_settings_Label">
          <property name="font">
@@ -779,6 +759,40 @@
        </item>
        <item row="6" column="3">
         <widget class="QComboBox" name="select_camera_comboBox"/>
+       </item>
+       <item row="22" column="3">
+        <widget class="QLineEdit" name="save_path_LineEdit"/>
+       </item>
+       <item row="22" column="4">
+        <widget class="QPushButton" name="local_path_pushButton">
+         <property name="text">
+          <string>Select local path</string>
+         </property>
+        </widget>
+       </item>
+       <item row="24" column="3">
+        <widget class="QLineEdit" name="save_network_path_LineEdit">
+         <property name="enabled">
+          <bool>true</bool>
+         </property>
+         <property name="readOnly">
+          <bool>false</bool>
+         </property>
+        </widget>
+       </item>
+       <item row="24" column="5">
+        <widget class="QCheckBox" name="TransferData_checkBox">
+         <property name="text">
+          <string>Transfer data automatically</string>
+         </property>
+        </widget>
+       </item>
+       <item row="24" column="4">
+        <widget class="QPushButton" name="network_pushButton">
+         <property name="text">
+          <string>Select network path</string>
+         </property>
+        </widget>
        </item>
       </layout>
      </widget>

@@ -6,6 +6,22 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-03
 
+### GUI
+
+#### Added
+
+- Experiment configurator: folder buttons for the local and the server data folder (2026-11-03).
+  - `ui_exp_configurator.ui`: `local_path_pushButton` next to `save_path_LineEdit`, `network_pushButton`
+    next to `save_network_path_LineEdit`.
+  - `exp_configurator_gui.py`: `load_local_path_clicked` / `load_network_path_clicked` open a folder
+    dialog ('Select the local folder for the data' / 'Select the server folder for the data') starting in
+    the folder of the field if it exists, otherwise in the logic's `default path imagedata` /
+    `default network path`, otherwise the home folder; the chosen folder goes into the field (and from
+    there into the logic's config). Tooltips 'Choose the local folder' / 'Choose the server folder'.
+  - Each button is listed with its field in `FIELD_WIDGETS` and in the save section visibility code,
+    so it is shown exactly when its field is.
+  - Test: section "configurator: local / server folder buttons" in `tests/test_logic_helpers.py`.
+
 ### Tasks
 
 #### Changed

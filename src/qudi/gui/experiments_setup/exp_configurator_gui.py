@@ -264,11 +264,13 @@ class ExpConfiguratorGUI(GuiBase):
         "save_path": (
             "save_path_Label",
             "save_path_LineEdit",
+            "local_path_pushButton",
         ),
 
         "save_network_path": (
             "save_remote_path_Label",
             "save_network_path_LineEdit",
+            "network_pushButton",
         ),
 
         "transfer_data": (
@@ -496,6 +498,10 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.load_dapi_PushButton.clicked.connect(self.load_dapi_path_clicked)
         self._mw.reference_images_pushButton.clicked.connect(self.load_ref_images_path_clicked)
         self._mw.Zen_saving_folder_pushButton.clicked.connect(self.load_zen_saving_path_clicked)
+        self._mw.local_path_pushButton.clicked.connect(self.load_local_path_clicked)
+        self._mw.network_pushButton.clicked.connect(self.load_network_path_clicked)
+        self._mw.local_path_pushButton.setToolTip('Choose the local folder')
+        self._mw.network_pushButton.setToolTip('Choose the server folder')
         self._mw.load_dz_calibration_pushButton.clicked.connect(self.load_axial_calibration_path_clicked)
 
         # signals to logic
@@ -848,7 +854,9 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.save_path_Label.setVisible(visible)
         self._mw.save_remote_path_Label.setVisible(visible)
         self._mw.save_path_LineEdit.setVisible(visible)
+        self._mw.local_path_pushButton.setVisible(visible)
         self._mw.save_network_path_LineEdit.setVisible(visible)
+        self._mw.network_pushButton.setVisible(visible)
         self._mw.fileformat_Label.setVisible(visible)
         self._mw.fileformat_ComboBox.setVisible(visible)
         self._mw.TransferData_checkBox.setVisible(visible)
@@ -1054,6 +1062,30 @@ class ExpConfiguratorGUI(GuiBase):
                                                           r"W:")  # to be changed using a correct path stem
         if this_dir:
             self._mw.Zen_saving_folder_lineEdit.setText(this_dir)
+
+    @staticmethod
+    def _dialog_start_folder(current, default) -> str:
+        """Start folder of a folder dialog: the folder in the field if it exists, otherwise the default folder of
+        the logic if it exists, otherwise the home folder."""
+        for folder in (current, default):
+            if folder and os.path.isdir(folder):
+                return folder
+        return os.path.expanduser('~')
+
+    def load_local_path_clicked(self):
+        """Choose the local data folder (save_path)."""
+        start = self._dialog_start_folder(self._mw.save_path_LineEdit.text(), self._exp_logic.default_path_imagedata)
+        this_dir = QtWidgets.QFileDialog.getExistingDirectory(self._mw, 'Select the local folder for the data', start)
+        if this_dir:
+            self._mw.save_path_LineEdit.setText(this_dir)
+
+    def load_network_path_clicked(self):
+        """Choose the server data folder (save_network_path)."""
+        start = self._dialog_start_folder(self._mw.save_network_path_LineEdit.text(),
+                                          self._exp_logic.default_network_path)
+        this_dir = QtWidgets.QFileDialog.getExistingDirectory(self._mw, 'Select the server folder for the data', start)
+        if this_dir:
+            self._mw.save_network_path_LineEdit.setText(this_dir)
 
     def load_axial_calibration_path_clicked(self):
         """Choose an axial-calibration file and place its path in the form."""
