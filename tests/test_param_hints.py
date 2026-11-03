@@ -275,6 +275,8 @@ def sd_task(cls, rec, path):
     return task
 
 
+# the ZEN settings box of RoiScanSDTask is answered 'Done - continue' (tests/_short.py AutoAnswer)
+ZEN_BOX = _short.AutoAnswer('ZEN settings')
 sd_cfg = os.path.join(TMP, 'roi_scan_sd.yaml')
 yaml.safe_dump({'sample_name': 'SDsample', 'save_path': os.path.join(TMP, 'sd_data'), 'roi_list_path': '/fake/rois.json',
                 'imaging_sequence': [[488, 50.0]]}, open(sd_cfg, 'w'))

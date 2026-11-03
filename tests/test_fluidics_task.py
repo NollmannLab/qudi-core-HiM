@@ -420,7 +420,7 @@ check('(timeout) cleanup: pressure 0, valves c=1 b=1 a=1', pump.output[0] == 0.0
       and valve_positions() == {'a': 1, 'b': 1, 'c': 1})
 
 # ------------------------------------------------------------------ (6) needle position (robot origin) not defined
-from qudi.tasks.common import fluidics_steps  # noqa: E402
+from qudi.tasks.common import fluidics_steps, popups  # noqa: E402
 
 
 def message_boxes():
@@ -449,7 +449,7 @@ check('(no needle position) GUIs still enabled', all(gui_state()['robot']) and a
 for b in boxes:
     b.close()
 app.processEvents()
-check('(no needle position) closing the box releases it', message_boxes() == [] and fluidics_steps._warning_popup._boxes == [])
+check('(no needle position) closing the box releases it', message_boxes() == [] and popups._warning_popup._boxes == [])
 check('(no needle position) message names the Fluidics GUI and "Set position 1"',
       'Fluidics GUI' in EXPECTED and '"Set position 1"' in EXPECTED and mw.set_position1_Action.text() == 'Set position 1',
       mw.set_position1_Action.text())

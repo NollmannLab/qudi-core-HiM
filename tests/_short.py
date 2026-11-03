@@ -97,6 +97,37 @@ def with_incubation(injections, seconds):
     return content
 
 
+class AutoAnswer:
+    """Answers the modal boxes of tasks/common/popups.py ask_confirmation from the GUI thread: every 20 ms,
+    a visible QMessageBox whose window title is `title` gets its button `button_text` clicked. The texts
+    of the answered boxes are kept in `texts`. Needs a QApplication; keep a reference while it is used."""
+
+    def __init__(self, title, button_text='Done - continue'):
+        from qtpy import QtCore, QtWidgets
+        self.title, self.button_text, self.texts = title, button_text, []
+        self._widgets = QtWidgets
+        self._timer = QtCore.QTimer()
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(20)
+
+    def boxes(self):
+        return [w for w in self._widgets.QApplication.topLevelWidgets()
+                if isinstance(w, self._widgets.QMessageBox) and w.isVisible() and w.windowTitle() == self.title]
+
+    def _poll(self):
+        if self.button_text is None:
+            return
+        for box in self.boxes():
+            for button in box.buttons():
+                if button.text() == self.button_text:
+                    self.texts.append(box.text())
+                    button.click()
+                    return
+
+    def stop(self):
+        self._timer.stop()
+
+
 def load(path):
     """Fresh copy of a YAML / JSON test file (tests/data/<name> or a full path)."""
     path = path if os.path.isabs(path) else os.path.join(DATA, path)

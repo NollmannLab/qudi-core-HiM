@@ -25,48 +25,10 @@ import math
 from time import monotonic, sleep
 
 import yaml
-from qtpy import QtCore, QtWidgets
+from qtpy import QtCore
 
 from qudi.logic.injections_configurator_logic import PROBE_BUFFER_NAME
-
-
-class _WarningPopup(QtCore.QObject):
-    """Shows non-modal warning message boxes in the GUI thread; show() may be called from a task thread."""
-    _sigShow = QtCore.Signal(str, str)
-
-    def __init__(self):
-        super().__init__()
-        self._boxes = []
-        self._sigShow.connect(self._show_box)
-
-    def show(self, title, text):
-        self._sigShow.emit(title, text)
-
-    @QtCore.Slot(str, str)
-    def _show_box(self, title, text):
-        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, title, text, QtWidgets.QMessageBox.Ok)
-        box.setModal(False)
-        box.finished.connect(lambda _result, b=box: self._boxes.remove(b) if b in self._boxes else None)
-        self._boxes.append(box)
-        box.show()
-
-
-_warning_popup = None
-
-
-def show_warning_popup(title, text):
-    """Show a non-modal warning message box in the GUI thread. Returns False (nothing shown) without a GUI."""
-    global _warning_popup
-    app = QtWidgets.QApplication.instance()
-    if not isinstance(app, QtWidgets.QApplication):
-        return False
-    if _warning_popup is None:
-        popup = _WarningPopup()
-        if popup.thread() is not app.thread():
-            popup.moveToThread(app.thread())
-        _warning_popup = popup
-    _warning_popup.show(title, text)
-    return True
+from qudi.tasks.common.popups import show_warning_popup
 
 
 class FluidicsStepsMixin:

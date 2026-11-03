@@ -1339,6 +1339,59 @@ Last updated: 2026-11-03
 
 #### Added
 
+- ROI scan on the spinning disk: ZEN settings box before the scan (2026-11-03).
+  - New `gui/task_runner/dialogs.py`:
+    - `build_confirmation_box(parent, title, text, ok_text)` returns
+      `(box, ok_button)`: warning icon, buttons `ok_text` / Cancel, Cancel the
+      default and Escape button, application modal; `is_confirmed(box,
+      ok_button)` reads the answer.
+    - `build_reminder_box(parent, title, text)`: non-modal box with an OK
+      button.
+    - `taskwidget.py` builds its start_warning ("Before starting: <task>",
+      "Done — start task" / Cancel) and end_warning boxes with them: same
+      title, text, buttons and behaviour as before.
+  - New `tasks/common/popups.py`:
+    - `show_warning_popup` (non-modal warning) moved here from
+      `common/fluidics_steps.py`, which imports it; no change for the
+      fluidics and Hi-M tasks.
+    - New `ask_confirmation(task, title, text, ok_text='Done - continue')`
+      builds the box with `build_confirmation_box` in the GUI thread (called
+      from the task thread) and shows it modal.
+    - The task thread waits for the answer and calls `task._check_interrupt()`
+      at least every 0.1 s; an interrupt closes the box and raises as usual.
+    - Returns True for `ok_text`, False for Cancel or a closed window. Without
+      a GUI it logs the text as a warning and returns True.
+  - `tasks/roi_multicolour_scan.py`:
+    - New hook `RoiScanTaskBase._confirm_before_start()` (default True),
+      called once the ROIs of the run are known, before any hardware call or
+      GUI lock.
+    - If it returns False, the task logs "ROI scan cancelled by the user",
+      returns `{'cancelled': True, 'imaged_rois': []}` and the cleanup
+      restores nothing.
+    - `RoiScanSDTask._confirm_before_start` shows the box "ZEN settings": "In
+      block 7, check the following info: 1- the following channels should be
+      selected: <wavelengths of the imaging sequence, in order> 2- the number
+      of loops for blocks 4>9 should be <ROIs of this run>".
+    - It also logs the channels and the line "ZEN: set the number of
+      acquisition loops to <n>", which moved there from
+      `RoiScanSDTask._prepare_imaging`. That method keeps the progress
+      'Waiting for ZEN "ready"'.
+    - Dummy and RAMM: no box (base default).
+  - Tests (qudi-core 1.8, `tests/test_roi_scan_zen_checklist.py`, 12/12, 11 s):
+    - 'Done - continue': 2 ROIs scanned, no hardware call before the answer.
+    - Cancel: finished, only `load_roi_list` called, GUIs not locked.
+    - Interrupt while the box is open: task stops, box closed.
+    - `start_roi` 'ROI_005' of 20 ROIs: 16 loops; channels in the order of
+      the imaging sequence.
+    - Fluidics dummy without needle position: the warning box still appears.
+    - Photobleaching start warning: same title, text, icon, buttons, default
+      / Escape button and modality as before; Cancel prevents the start.
+  - Regression suites adapted (not run for this change):
+    - the SD runs of `test_param_hints.py` and `test_roi_scan_progress.py`
+      answer the box through `_short.AutoAnswer`;
+    - `test_fluidics_task.py` reads the warning box list from
+      `tasks/common/popups.py`.
+
 - `tasks/him.py` (2026-10-19): **Hi-M task**. Checks first, then for each
   probe (RT), sorted by tube: hybridization -> imaging of every ROI ->
   photobleaching -> needle rinse. Translated from

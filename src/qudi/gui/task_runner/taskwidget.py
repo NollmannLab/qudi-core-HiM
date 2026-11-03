@@ -35,6 +35,7 @@ from qudi.util.widgets.loading_indicator import CircleLoadingIndicator
 from qudi.util.widgets.separator_lines import VerticalLine
 from qudi.core.logger import get_logger
 from qudi.core.scripting.moduletask import ModuleTask
+from qudi.gui.task_runner.dialogs import build_confirmation_box, build_reminder_box, is_confirmed
 
 _log = get_logger(__name__)
 
@@ -282,17 +283,10 @@ class TaskWidget(QtWidgets.QWidget):
         """Show the task's start_warning in a modal dialog. Returns True only if the user clicked
         the confirm button; Cancel, Esc or closing the dialog return False.
         """
-        box = QtWidgets.QMessageBox(self.window())
-        box.setIcon(QtWidgets.QMessageBox.Warning)
-        box.setWindowTitle(f'Before starting: {self._task_name}')
-        box.setText(self._start_warning)
-        confirm_button = box.addButton('Done — start task', QtWidgets.QMessageBox.AcceptRole)
-        cancel_button = box.addButton(QtWidgets.QMessageBox.Cancel)
-        box.setDefaultButton(cancel_button)
-        box.setEscapeButton(cancel_button)
-        box.setWindowModality(QtCore.Qt.ApplicationModal)
+        box, confirm_button = build_confirmation_box(self.window(), f'Before starting: {self._task_name}',
+                                                     self._start_warning, 'Done — start task')
         box.exec()
-        confirmed = box.clickedButton() is confirm_button
+        confirmed = is_confirmed(box, confirm_button)
         box.deleteLater()
         if confirmed:
             _log.info(f'{self._task_name}: user confirmed start warning: {self._start_warning}')
@@ -301,13 +295,7 @@ class TaskWidget(QtWidgets.QWidget):
     def _show_end_reminder(self) -> None:
         """Show the task's end_warning in a non-modal reminder, so the GUI keeps updating."""
         _log.info(f'{self._task_name}: end reminder shown: {self._end_warning}')
-        box = QtWidgets.QMessageBox(self.window())
-        box.setIcon(QtWidgets.QMessageBox.Warning)
-        box.setWindowTitle(f'Task finished: {self._task_name}')
-        box.setText(self._end_warning)
-        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
-        box.setWindowModality(QtCore.Qt.NonModal)
-        box.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        box = build_reminder_box(self.window(), f'Task finished: {self._task_name}', self._end_warning)
         box.finished.connect(self._end_reminder_closed)
         self._end_reminder_box = box
         box.show()

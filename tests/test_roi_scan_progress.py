@@ -247,6 +247,7 @@ check(f'(dummy, error at the move to ROI 2/{N}) label showed 2/{N}, cleared and 
               for t, lvl, m in LOGS if t >= t0), (seen[-3:], FINISHED[-1:]))
 
 # (5) SD with the fake TriggerLogic
+ZEN_BOX = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box 'Done - continue'
 TRIGGER.sent.clear()
 t0, seen, emits = run('roi_scan_sd')
 exp = [f'0/{N} - Preparing imaging', f'0/{N} - Waiting for ZEN "ready"'] + \

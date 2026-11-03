@@ -46,6 +46,7 @@ from datetime import datetime
 
 from qudi.core.connector import Connector
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
+from qudi.tasks.common.popups import ask_confirmation
 from qudi.tasks.common.progress import ProgressModuleTask
 
 
@@ -79,6 +80,10 @@ class RoiScanTaskBase(ProgressModuleTask):
     Progress (Task Runner window), with M the number of ROIs scanned in this run and j the index in
     this run: '0/M - Preparing imaging' (SD: then 'Waiting for ZEN "ready"'), 'j/M - <roi>' before
     each move, 'M/M - Done' after the last ROI.
+
+    Confirmation hook: _confirm_before_start() is called once the ROIs of this run are known, before
+    any hardware call or GUI lock; if it returns False the scan is cancelled (result
+    {'cancelled': True, 'imaged_rois': []}, nothing to restore). Default: True (no question).
 
     During the run the lasers are off (unless the imaging switches them), ROI tracking and ROI
     actions are locked and the stage moves at scan_stage_velocity. _cleanup() moves the stage back
@@ -132,6 +137,11 @@ class RoiScanTaskBase(ProgressModuleTask):
     def _end_imaging(self) -> None:
         pass
 
+    def _confirm_before_start(self) -> bool:
+        """Called once the ROIs of this run are known, before any hardware call: False cancels the
+        scan. Default: True (no question)."""
+        return True
+
     # ======================================================================================
     # Main entry point
     # ======================================================================================
@@ -157,7 +167,13 @@ class RoiScanTaskBase(ProgressModuleTask):
         else:
             self.log.info('The ROI list is empty - no ROI to scan.')
 
-        # 3. lasers off, ROI tracking and ROI actions locked, scan stage velocity (restored in
+        # 3. setup-specific confirmation before any hardware call (e.g. ZEN settings on the SD)
+        self._check_interrupt()
+        if not self._confirm_before_start():
+            self.log.info('ROI scan cancelled by the user')
+            return {'cancelled': True, 'imaged_rois': []}
+
+        # 4. lasers off, ROI tracking and ROI actions locked, scan stage velocity (restored in
         #    _cleanup)
         self._check_interrupt()
         self._hardware_touched = True
@@ -169,16 +185,16 @@ class RoiScanTaskBase(ProgressModuleTask):
             raise RuntimeError(f'Could not set the scan stage velocity {self.scan_stage_velocity} - '
                                f'see the log.')
 
-        # 4. setup-specific preparation of the imaging
+        # 5. setup-specific preparation of the imaging
         total = len(self._scan_rois)
         self._report_progress(f'0/{total}', 'Preparing imaging')
         self._prepare_imaging()
 
-        # 5. new data folder and metadata
+        # 6. new data folder and metadata
         self.directory = self._create_directory(self.save_path)
         self._save_metadata_file()
 
-        # 6. ROI loop: move, image (progress 'j/M - <name>'; the "Moving to" line is the log)
+        # 7. ROI loop: move, image (progress 'j/M - <name>'; the "Moving to" line is the log)
         for number, roi_name in enumerate(self._scan_rois, 1):
             self._check_interrupt()
             self._report_progress(f'{number}/{total}', f'{roi_name}', log=False)
@@ -186,7 +202,7 @@ class RoiScanTaskBase(ProgressModuleTask):
             self._image_roi(roi_name, self._file_name(roi_name))
             self._scanned_rois.append(roi_name)
 
-        # 7. summary ("All ROIs done." is the log line of the progress 'Done')
+        # 8. summary ("All ROIs done." is the log line of the progress 'Done')
         self._report_progress(f'{total}/{total}', 'Done', log=False)
         self.log.info('All ROIs done.')
         return {'directory': self.directory, 'imaged_rois': list(self._scanned_rois)}
@@ -349,8 +365,13 @@ class RoiScanTaskBase(ProgressModuleTask):
 class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     """ROI scan on the spinning disk: one ZEN autofocus block and one ZEN acquisition block per ROI,
     synchronized over DAQ triggers (see SDImagingMixin). trigger_logic is required on this setup.
-    Before waiting for ZEN "ready", the log gives the number of acquisition loops to set in ZEN:
-    the number of ROIs scanned in this run (from start_roi to the end of the list).
+
+    ZEN settings check: before any hardware call, a modal box 'ZEN settings' (ask_confirmation,
+    tasks/common/popups.py) lists the ZEN settings to check in block 7 - the channels to select (the
+    wavelengths of the imaging sequence, in order) and the number of loops for blocks 4>9 (the number
+    of ROIs scanned in this run, from start_roi to the end of the list) - and waits for the answer:
+    'Done - continue' starts the scan, Cancel ends the task without touching the hardware. Both values
+    are also logged. Then the progress shows 'Waiting for ZEN "ready"' until ZEN is ready.
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -368,11 +389,21 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
 
     trigger_logic = Connector(interface='TriggerLogic')
 
+    def _confirm_before_start(self) -> bool:
+        """Log the ZEN channels and number of acquisition loops of this run and ask the user to check
+        them in ZEN (modal box, waits for the answer, interruptible). True: continue, False: cancel."""
+        channels = ', '.join(f'{wavelength} nm' for wavelength, *_ in self.imaging_sequence)
+        loops = len(self._scan_rois)
+        self.log.info(f'ZEN: select the channels {channels}')
+        self.log.info(f'ZEN: set the number of acquisition loops to {loops}')
+        text = ('In block 7, check the following info:\n'
+                f'1- the following channels should be selected: {channels}\n'
+                f'2- the number of loops for blocks 4>9 should be {loops}')
+        return ask_confirmation(self, 'ZEN settings', text)
+
     def _prepare_imaging(self) -> None:
-        """Log the number of ROIs of this run (the number of acquisition loops to set in ZEN), show
-        'Waiting for ZEN "ready"' in the progress line, then the SD imaging preparation
+        """Show 'Waiting for ZEN "ready"' in the progress line, then the SD imaging preparation
         (SDImagingMixin), which waits for ZEN "ready" (and logs it)."""
-        self.log.info(f'ZEN: set the number of acquisition loops to {len(self._scan_rois)}')
         self._report_progress(f'0/{len(self._scan_rois)}', 'Waiting for ZEN "ready"', log=False)
         super()._prepare_imaging()
 
