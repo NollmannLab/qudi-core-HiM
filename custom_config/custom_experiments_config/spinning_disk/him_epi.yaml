@@ -34,12 +34,18 @@ fields:
     required: true
     default: ""
 
+  # not used: the run folder is created by qudi
   zen_saving_path:
-    required: true
+    visible: false
+    required: false
     default: ""
 
+  # run folder created by qudi: on save_network_path (server) when it is writable, otherwise in save_path
+  save_path:
+    required: true
+    default_from: default_path_imagedata
+
   save_network_path:
-    visible: false
     required: false
     default_from: default_network_path
 

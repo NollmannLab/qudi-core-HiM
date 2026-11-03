@@ -1,5 +1,5 @@
-"""ROI scan task (qudi.tasks.roi_multicolour_scan): progress display, start ROI, ZEN settings pop-up and
-ZEN data folder of the spinning disk.
+"""ROI scan task (qudi.tasks.roi_multicolour_scan): progress display, start ROI, ZEN settings pop-up of the
+spinning disk, run folder on the server folder or in the local folder (also the Hi-M task).
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_roi_scan.py [<repo_root> [<roi_scan_with_resume.py>]]
 <roi_scan_with_resume.py>: the ROI scan module before the start_roi change; the comparison "same calls as
@@ -563,7 +563,7 @@ def _section_start_roi():
     # the ZEN settings box of RoiScanSDTask is answered 'Done - continue' (tests/_short.py AutoAnswer)
     ZEN_BOX = _short.AutoAnswer('ZEN settings')
     sd_cfg = os.path.join(TMP, 'roi_scan_sd.yaml')
-    yaml.safe_dump({'sample_name': 'SDsample', 'zen_saving_path': ZEN.root, 'roi_list_path': '/fake/rois.json',
+    yaml.safe_dump({'sample_name': 'SDsample', 'save_path': os.path.join(TMP, 'sd_data'), 'roi_list_path': '/fake/rois.json',
                     'imaging_sequence': [[488, 50.0]]}, open(sd_cfg, 'w'))
     for start, n in (('', 3), ('ROI_002', 2)):
         LOGS.clear()
@@ -848,56 +848,54 @@ def _section_zen_popup():
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 
-# --- ZEN data folder ---
-def _section_zen_folder():
-    """ROI scan on the spinning disk: files in the folder created by ZEN (shared SDImagingMixin code with the
-    Hi-M SD task), and the ROI scan dummy unchanged.
-    
-    A temporary zen_saving_path holds 2 existing folders; the fake TriggerLogic creates the "ZEN" folder(s)
-    when "ready" is polled (one, none or two). ROI scan: roi / laser stand-ins; Hi-M: the real dummy
-    fluidics, roi and laser modules of dummy_config.cfg. The ZEN settings box of the ROI scan is answered
-    'Done - continue'. Short settings and test data: tests/_short.py (docs/TESTING.md)."""
-    import sys, os, logging, tempfile, threading, weakref, importlib, copy, glob
+# --- data folder (server / local) ---
+def _section_data_folder():
+    """Run folder created by qudi (tasks/common/data_folders.py) for the ROI scan and the Hi-M task: on the
+    server folder (save_network_path) when it is writable, otherwise in the local folder (save_path).
+
+    Temporary "server" and "local" folders; unreachable folders are paths under a regular file or under
+    /proc (cannot be created, also when the tests run as root). ROI scan SD: roi / laser stand-ins and a
+    fake TriggerLogic (ZEN ready / done answered at once), the ZEN settings box answered 'Done - continue'.
+    Hi-M: the real dummy fluidics, roi and laser modules of dummy_config.cfg. Short settings and test data:
+    tests/_short.py (docs/TESTING.md)."""
+    import os, logging, tempfile, threading, weakref, importlib, glob
+    from datetime import datetime
     from time import monotonic, sleep
-    from importlib.metadata import version
 
-    from qtpy import QtCore, QtWidgets  # noqa: E402
+    from qtpy import QtCore, QtWidgets
 
-    import yaml  # noqa: E402
-    import qudi.core  # noqa: E402
-    from qudi.core.connector import Connector  # noqa: E402
-    from qudi.tasks import roi_multicolour_scan as rs  # noqa: E402
-    from qudi.tasks import him  # noqa: E402
+    import yaml
+    from qudi.core.connector import Connector
+    from qudi.tasks import roi_multicolour_scan as rs
+    from qudi.tasks import him
+    from qudi.tasks.common import data_folders
 
     results = []
-
 
     def check(label, cond, detail=''):
         results.append((label, bool(cond)))
         print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
 
-
     TMP = tempfile.mkdtemp()
+    DAY = datetime.today().strftime('%Y_%m_%d')
     LOGS = []
     QtCore.qInstallMessageHandler(lambda *a: None)
-
 
     class H(logging.Handler):
         def emit(self, r):
             LOGS.append((r.levelno, r.getMessage()))
 
-
     ROIS = _short.roi_names()   # ROI_000, ROI_001
     ZEN_BOX = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box of the ROI scan
+    A_FILE = os.path.join(TMP, 'a_file.txt')
+    open(A_FILE, 'w').close()
+    MISSING = os.path.join(A_FILE, 'server')        # parent is a file: cannot be created
+    READ_ONLY = '/proc/qudi_test_server'             # under /proc: cannot be created
 
-
-    def zen_root(name):
-        """Temporary zen_saving_path with 2 existing folders."""
-        root = os.path.join(TMP, name)
-        for old in ('2026_10_01_old', '2026_10_02_old'):
-            os.makedirs(os.path.join(root, old))
-        return root
-
+    def folder(name):
+        path = os.path.join(TMP, name)
+        os.makedirs(path, exist_ok=True)
+        return path
 
     # ------------------------------------------------------------------ stand-ins
     class Rec:
@@ -907,7 +905,6 @@ def _section_zen_folder():
         def rec(self, name, *args):
             self.calls.append((name, args))
 
-
     class _Stand:
         def __init__(self, rec):
             self._rec = rec
@@ -916,7 +913,6 @@ def _section_zen_folder():
             if name.startswith('_'):
                 raise AttributeError(name)
             return lambda *a, **k: self._rec.rec(name, *a, *k.values()) or True
-
 
     class RoiLogic(_Stand):
         _meta = {'mro': ('RoiLogic',)}
@@ -933,32 +929,18 @@ def _section_zen_folder():
             self._rec.rec('get_roi_position', name)
             return (float(name[-3:]) * 10, 0.0, 0.0)
 
-
     class LaserControlLogic(_Stand):
         _meta = {'mro': ('LaserControlLogic',)}
 
-
     class TriggerLogic(_Stand):
-        """Fake ZEN: when "ready" is polled the first time, creates `new` folders in `root` (ZEN starting the
-        experiment), then answers every poll at once."""
+        """Fake ZEN: every poll answered at once."""
         _meta = {'mro': ('TriggerLogic',)}
-
-        def __init__(self, rec, root=None, new=('2026_11_03_ZEN_experiment',)):
-            super().__init__(rec)
-            self.root, self.new, self.created = root, new, []
 
         def is_triggered(self, name):
             self._rec.rec('is_triggered', name)
-            if name == 'trigger_ZEN_ready' and self.root and not self.created:
-                for folder in self.new:
-                    path = os.path.join(self.root, folder)
-                    os.makedirs(path)
-                    self.created.append(path)
             return True
 
-
     KEEP = []
-
 
     def run(task, kwargs=None, timeout=120):
         out = {}
@@ -981,7 +963,6 @@ def _section_zen_folder():
             sleep(0.01)
         return out.get('result'), out.get('error')
 
-
     def scan_yaml(name, **values):
         path = os.path.join(TMP, f'{name}.yaml')
         content = {'sample_name': 'SDsample', 'roi_list_path': '/fake/rois.json', 'imaging_sequence': [[488, 50.0]]}
@@ -989,88 +970,102 @@ def _section_zen_folder():
         yaml.safe_dump(content, open(path, 'w'))
         return path
 
-
-    def scan_task(cls, path, trigger=None):
+    def scan_task(cls, path):
         rec = Rec()
         stands = {'roi_logic': RoiLogic(rec), 'laser_logic': LaserControlLogic(rec)}
-        if trigger is not None:
-            trigger._rec = rec
-            stands['trigger_logic'] = trigger
+        if cls is rs.RoiScanSDTask:
+            stands['trigger_logic'] = TriggerLogic(rec)
         KEEP.append(stands)
         task = _short.shorten(type(cls.__name__ + 'UnderTest', (cls,), {'user_config_path': path})())
         task.connect_modules(stands)
         task.log.addHandler(H())
         return task, rec
 
-
-    def movies(folder):
-        path = os.path.join(folder, 'movie_name.txt')
+    def movies(path):
+        path = os.path.join(path, 'movie_name.txt')
         return open(path).read().split() if os.path.exists(path) else None
 
+    def server_boxes():
+        return [w for w in app.topLevelWidgets() if isinstance(w, QtWidgets.QMessageBox) and w.isVisible()
+                and w.windowTitle() == data_folders.SERVER_WARNING_TITLE]
 
-    # ------------------------------------------------------------------ (1) ROI scan SD, 2 ROIs
-    for dapi in (False, True):
-        root = zen_root(f'zen_scan_{int(dapi)}')
-        trigger = TriggerLogic(None, root)
-        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_{int(dapi)}', zen_saving_path=root, dapi=dapi), trigger)
+    def close_boxes():
+        for box in server_boxes():
+            box.close()
+        app.processEvents()
+
+    def run_folders(root):
+        return sorted(glob.glob(os.path.join(root, DAY, '*')))
+
+    # ------------------------------------------------------------------ (1) ROI scan SD, server folder writable
+    server, local = folder('server_1'), folder('local_1')
+    cfg = scan_yaml('sd_server', save_path=local, save_network_path=server)
+    for number in ('001', '002'):
+        task, rec = scan_task(rs.RoiScanSDTask, cfg)
         result, err = run(task, {'start_roi': ''})
-        folder = os.path.join(trigger.created[0], 'metadata') if trigger.created else None
-        expected = [f'scan_003_{"DAPI_" if dapi else ""}{r[4:]}_ROI' for r in ROIS]
-        label = 'with dapi' if dapi else 'no dapi'
-        check(f'(1 ROI scan SD, {label}) both ROIs imaged; data folder = <new ZEN folder>/metadata, with '
-              f'parameters.yml and movie_name.txt; prefix 003; movie names {expected}',
-              err is None and result.get('imaged_rois') == ROIS and result.get('directory') == folder
-              and os.path.exists(os.path.join(folder, 'parameters.yml')) and task.prefix == '003'
-              and movies(folder) == expected, (err, result, task.prefix, movies(folder) if folder else None))
-        check(f'(1 ROI scan SD, {label}) no other folder created (only the ZEN folder in zen_saving_path); '
-              f'"ZEN will save the data in the following folder" logged',
-              sorted(os.listdir(root)) == sorted(['2026_10_01_old', '2026_10_02_old', os.path.basename(trigger.created[0])])
-              and any(m == f'ZEN will save the data in the following folder : {trigger.created[0]}' for _, m in LOGS),
-              os.listdir(root))
+        run_folder = os.path.join(server, DAY, f'{number}_Scan_SDsample')
+        expected = [f'scan_{number}_{r[4:]}_ROI' for r in ROIS]
+        check(f'(1 ROI scan SD, server writable, run {number}) run folder <server>/YYYY_MM_DD/{number}_Scan_SDsample '
+              f'with parameters.yml and movie_name.txt; names {expected}; both ROIs imaged',
+              err is None and result.get('directory') == run_folder and result.get('imaged_rois') == ROIS
+              and os.path.exists(os.path.join(run_folder, 'parameters.yml')) and movies(run_folder) == expected
+              and task.prefix == number, (err, result, run_folders(server)))
+    check('(1 ROI scan SD, server writable) nothing in the local folder; only the two run folders in the server day '
+          'folder (no write-test file left); no pop-up, no warning',
+          run_folders(local) == [] and sorted(os.listdir(os.path.join(server, DAY))) == ['001_Scan_SDsample',
+                                                                                        '002_Scan_SDsample']
+          and not server_boxes() and not any(lvl >= logging.WARNING for lvl, _ in LOGS),
+          (run_folders(local), os.listdir(os.path.join(server, DAY)), [m for lvl, m in LOGS if lvl >= logging.WARNING]))
 
-    # ------------------------------------------------------------------ (2) no new folder / two new folders
-    for label, new, fragment in (('no new folder', (), 'No new file was created by ZEN'),
-                                 ('two new folders', ('2026_11_03_a', '2026_11_03_b'), 'More than one folder were found')):
-        root = zen_root(f'zen_{label.replace(" ", "_")}')
-        trigger = TriggerLogic(None, root, new=new)
-        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(label.replace(' ', '_'), zen_saving_path=root), trigger)
-        task._ZEN_FOLDER_ATTEMPTS = 2  # shorter wait for the missing folder (2 attempts, 1 s apart)
+    # ------------------------------------------------------------------ (2) server folder not writable / missing
+    for label, server in (('missing', MISSING), ('not writable', READ_ONLY)):
+        local = folder(f'local_2_{label.replace(" ", "_")}')
+        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_{label}', save_path=local, save_network_path=server))
+        result, err = run(task, {'start_roi': ''})
+        boxes = server_boxes()
+        warnings = [m for lvl, m in LOGS if lvl == logging.WARNING]
+        run_folder = os.path.join(local, DAY, '001_Scan_SDsample')
+        text = f'The server folder {server} is not reachable ('
+        tail = f'). The metadata are saved locally in {local}.'
+        check(f'(2 server {label}) warning logged and one non-modal warning pop-up with the server folder, the error '
+              f'and the local folder',
+              any(m.startswith(text) and m.endswith(tail) for m in warnings) and len(boxes) == 1
+              and boxes[0].text().startswith(text) and boxes[0].text().endswith(tail) and not boxes[0].isModal()
+              and boxes[0].icon() == QtWidgets.QMessageBox.Warning, (warnings, [b.text() for b in boxes]))
+        check(f'(2 server {label}) run folder created locally (YYYY_MM_DD/001_Scan_SDsample), scan runs (both ROIs, '
+              f'names scan_001_<roi>_ROI)',
+              err is None and result.get('directory') == run_folder and result.get('imaged_rois') == ROIS
+              and movies(run_folder) == [f'scan_001_{r[4:]}_ROI' for r in ROIS], (err, result))
+        close_boxes()
+
+    # ------------------------------------------------------------------ (3) save_network_path empty
+    local = folder('local_3')
+    task, rec = scan_task(rs.RoiScanSDTask, scan_yaml('sd_no_server', save_path=local, save_network_path=''))
+    result, err = run(task, {'start_roi': ''})
+    run_folder = os.path.join(local, DAY, '001_Scan_SDsample')
+    check('(3 save_network_path empty) run folder in the local folder, scan runs, no pop-up, no warning',
+          err is None and result.get('directory') == run_folder and movies(run_folder) is not None
+          and not server_boxes() and not any(lvl >= logging.WARNING for lvl, _ in LOGS),
+          (err, result, [m for lvl, m in LOGS if lvl >= logging.WARNING]))
+
+    # ------------------------------------------------------------------ (4) local folder not writable, no server
+    for label, local in (('under a file', os.path.join(A_FILE, 'local')), ('on /proc', '/proc/qudi_test_local')):
+        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_local_{label[:4]}', save_path=local))
         result, err = run(task, {'start_roi': ''})
         names = [n for n, _ in rec.calls]
-        msgs = [m for _, m in LOGS]
-        print(f'    {label}: {err}')
-        check(f'(2 {label}) clear error ("{fragment}..."), no ROI imaged, no data file; cleanup as usual (stage back to '
-              f'the first ROI, lasers off, velocity restored, ROI GUI unlocked)',
-              err is not None and fragment in str(err) and 'send_trigger' not in names
-              and not glob.glob(os.path.join(root, '*', 'metadata')) and 'cleanup finished' in msgs
-              and 'go_to_roi_xy' in names and 'set_laser_disabled' in names[names.index('is_triggered'):]
-              and 'enable_roi_actions' in names and names.count('set_stage_velocity') == 2, (err, names[-8:]))
+        check(f'(4 local folder {label}, no server) error before any hardware call (only the ROI list loaded, no '
+              f'laser / stage / trigger call), cleanup restores nothing, no pop-up',
+              err is not None and f'The local data folder {local} cannot be written' in str(err)
+              and names == ['load_roi_list'] and any('nothing to restore' in m for _, m in LOGS)
+              and not server_boxes(), (err, names))
 
-    # ------------------------------------------------------------------ (3) zen_saving_path missing / not a folder
-    not_a_folder = os.path.join(TMP, 'a_file.txt')
-    open(not_a_folder, 'w').close()
-    for label, values, fragment in (('missing', {}, "'zen_saving_path' missing"),
-                                    ('not a folder', {'zen_saving_path': not_a_folder}, 'is not an existing folder')):
-        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'zen_{label.replace(" ", "_")}', **values),
-                              TriggerLogic(None))
-        ZEN_BOX.texts.clear()
-        result, err = run(task, {'start_roi': ''})
-        check(f'(3 zen_saving_path {label}) error "{fragment}" before any hardware call (no roi / laser / trigger call, '
-              f'no ZEN box), cleanup restores nothing',
-              err is not None and fragment in str(err) and rec.calls == [] and not ZEN_BOX.texts
-              and any('nothing to restore' in m for _, m in LOGS), (err, rec.calls))
-
-    # ------------------------------------------------------------------ (4) Hi-M SD, 1 probe, 2 ROIs (real dummy modules)
-
-
+    # ------------------------------------------------------------------ Hi-M (real dummy modules)
     class FakeMain(QtCore.QObject):
         pass
-
 
     MAIN = FakeMain()
     CFG = yaml.safe_load(open(os.path.join(repo, 'custom_config/dummy_config.cfg'), encoding='utf-8'))
     MODULES = {}
-
 
     def build(name):
         if name in MODULES:
@@ -1088,61 +1083,75 @@ def _section_zen_folder():
         MODULES[name] = m
         return m
 
-
     flow = build('fluidics_flow_logic')
     mods = {'valve_logic': MODULES['fluidics_valve_logic'], 'flow_logic': flow, 'robot_logic': build('pipetting_robot_logic'),
             'roi_logic': build('roi_logic'), 'laser_logic': build('laser_control_logic')}
     mods['robot_logic'].set_origin((0.0, 0.0, 1000.0))
     app.processEvents()
-    root = zen_root('zen_him')
-    ref_images = os.path.join(TMP, 'zen_ref')
-    os.makedirs(ref_images)
     injections = _short.load(_short.HIM_INJECTIONS)
     injections['probes'] = {1: 'RT1'}
     injections['hybridization list'] = [{'step_number': 1, 'procedure': 'Hybridization', 'product': 'SSC',
                                          'volume': _short.INJECTION_UL, 'flowrate': _short.HIM_FLOWRATE, 'time': None}]
     injections['photobleaching list'] = []
-    inj_path = os.path.join(TMP, 'him_sd_injections.yml')
+    inj_path = os.path.join(TMP, 'him_injections_1probe.yml')
     yaml.safe_dump(injections, open(inj_path, 'w'))
-    exp = _short.experiment(TMP, 'him_experiment.yaml', 'him_sd', injections_path=inj_path, zen_saving_path=root,
-                            zen_ref_images_path=ref_images, correlation_threshold=0.6)
-    him_rec = Rec()
-    him_trigger = TriggerLogic(him_rec, root)
-    KEEP.append(him_trigger)
-    him_task = _short.shorten(him.HiMSDTask(), progress_interval_s=0.2)
-    him_task.user_config_path = exp
-    him_task.connect_modules(dict(mods, trigger_logic=him_trigger))
-    him_task.log.addHandler(H())
-    result, err = run(him_task, timeout=180)
-    folder = os.path.join(him_trigger.created[0], 'metadata') if him_trigger.created else None
-    names = movies(folder) if folder else None
-    check("(4 Hi-M SD, 1 probe, 2 ROIs) new ZEN folder found; HiM_parameters.yml and movie_name.txt in <new folder>/metadata; "
-          "movie names unchanged ('scan__RT1_<roi number>_ROI')",
-          err is None and result and result['cycles_done'] == 1 and result['directory'] == folder
-          and os.path.exists(os.path.join(folder, 'HiM_parameters.yml'))
-          and names == [f'scan__RT1_{r[4:]}_ROI' for r in ROIS], (err, result, names))
+    sample = _short.load('him_experiment.yaml')['sample_name']
 
-    # ------------------------------------------------------------------ (5) ROI scan dummy: own folder under save_path
+    def him_task(cls, exp, trigger=None):
+        task = _short.shorten(cls(), progress_interval_s=0.2)
+        task.user_config_path = exp
+        task.connect_modules(dict(mods, trigger_logic=trigger) if trigger else dict(mods))
+        task.log.addHandler(H())
+        return task
+
+    # ------------------------------------------------------------------ (5) Hi-M SD, 1 probe, 2 ROIs, server folder
+    server, local = folder('server_5'), folder('local_5')
+    ref_images = folder('zen_ref')
+    exp = _short.experiment(TMP, 'him_experiment.yaml', 'him_sd', injections_path=inj_path, save_path=local,
+                            save_network_path=server, zen_ref_images_path=ref_images, correlation_threshold=0.6)
+    trigger = TriggerLogic(Rec())
+    KEEP.append(trigger)
+    result, err = run(him_task(him.HiMSDTask, exp, trigger), timeout=180)
+    run_folder = os.path.join(server, DAY, f'001_HiM_{sample}')
+    names = movies(run_folder)
+    check(f'(5 Hi-M SD, 1 probe, 2 ROIs) run folder <server>/YYYY_MM_DD/001_HiM_{sample} with HiM_parameters.yml '
+          f'and movie_name.txt; names scan_001_RT1_<roi>_ROI; nothing in the local folder',
+          err is None and result and result['cycles_done'] == 1 and result['directory'] == run_folder
+          and os.path.exists(os.path.join(run_folder, 'HiM_parameters.yml'))
+          and names == [f'scan_001_RT1_{r[4:]}_ROI' for r in ROIS] and run_folders(local) == [],
+          (err, result, names))
+
+    # ------------------------------------------------------------------ (6) dummies with save_path only
     save_path = os.path.join(TMP, 'dummy_data')
     task, rec = scan_task(rs.RoiScanDummyTask, scan_yaml('dummy', save_path=save_path))
     result, err = run(task, {'start_roi': ''})
-    created = glob.glob(os.path.join(save_path, '*', '001_Scan_SDsample'))
-    check('(5 ROI scan dummy) still creates save_path/YYYY_MM_DD/001_Scan_<sample> with parameters.yml and '
-          'movie_name.txt; names scan_001_<roi number>_ROI',
-          err is None and len(created) == 1 and result.get('directory') == created[0]
-          and os.path.exists(os.path.join(created[0], 'parameters.yml'))
-          and movies(created[0]) == [f'scan_001_{r[4:]}_ROI' for r in ROIS], (err, result, created))
-
+    run_folder = os.path.join(save_path, DAY, '001_Scan_SDsample')
+    check('(6 ROI scan dummy, save_path only) save_path/YYYY_MM_DD/001_Scan_<sample> with parameters.yml and '
+          'movie_name.txt; names scan_001_<roi number>_ROI; no pop-up, no warning',
+          err is None and result.get('directory') == run_folder
+          and os.path.exists(os.path.join(run_folder, 'parameters.yml'))
+          and movies(run_folder) == [f'scan_001_{r[4:]}_ROI' for r in ROIS]
+          and not server_boxes() and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (err, result))
+    exp = _short.experiment(TMP, 'him_experiment.yaml', 'him_dummy', injections_path=inj_path)
+    result, err = run(him_task(him.HiMDummyTask, exp), timeout=180)
+    run_folder = os.path.join(TMP, 'data_him_dummy', DAY, f'001_HiM_{sample}')
+    check(f'(6 Hi-M dummy, save_path only) save_path/YYYY_MM_DD/001_HiM_{sample} with HiM_parameters.yml and '
+          f'movie_name.txt; names scan_001_RT1_<roi>_ROI; no pop-up',
+          err is None and result and result['cycles_done'] == 1 and result['directory'] == run_folder
+          and os.path.exists(os.path.join(run_folder, 'HiM_parameters.yml'))
+          and movies(run_folder) == [f'scan_001_RT1_{r[4:]}_ROI' for r in ROIS] and not server_boxes(),
+          (err, result))
 
     ZEN_BOX.stop()
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 
+
 SECTIONS = [
     ('progress display', _section_progress),
     ('start ROI', _section_start_roi),
     ('ZEN settings pop-up', _section_zen_popup),
-    ('ZEN data folder', _section_zen_folder),
+    ('data folder (server / local)', _section_data_folder),
 ]
 
 if __name__ == '__main__':

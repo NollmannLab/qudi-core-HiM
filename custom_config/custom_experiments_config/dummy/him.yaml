@@ -33,3 +33,8 @@ fields:
   save_path:
     required: true
     default_from: default_path_imagedata
+
+  # server folder: the run folder is created there when it is writable, otherwise in save_path
+  save_network_path:
+    required: false
+    default_from: default_network_path

@@ -442,13 +442,16 @@ if not QUICK:
     print('    SD result:', result, err)
     check(f'(SD) ZEN settings logged before the wait for ready: loops 1 x {N} = {N}, C = 2, Z = 5',
           f'ZEN: number of acquisition loops = 1 x {N} = {N}, C = 2, Z = 5' in msgs, [m for m in msgs if 'ZEN' in m][:4])
-    check('(SD) new ZEN folder found (the old folder and the file ignored); metadata subfolder is the data folder',
-          err is None and result['directory'] == os.path.join(zen, 'metadata') and os.path.isdir(result['directory'])
-          and f'ZEN will save the data in the following folder : {zen}' in msgs, (result, err))
-    movies = open(os.path.join(zen, 'metadata', 'movie_name.txt')).read().split() if zen else []
-    check('(SD) HiM_parameters.yml and movie_name.txt in metadata/; legacy SD names with an empty prefix '
-          f'({movies[:1]})', os.path.exists(os.path.join(zen, 'metadata', 'HiM_parameters.yml'))
-          and movies == [f'scan__RT1_{n[4:]}_ROI' for n in NAMES], movies)
+    run_folder = result['directory'] if result else ''
+    check('(SD) run folder created by qudi in save_path (no server folder): YYYY_MM_DD/001_HiM_<sample>; the folder '
+          'created by ZEN is not used',
+          err is None and os.path.isdir(run_folder) and os.path.basename(run_folder).startswith('001_HiM_')
+          and os.path.dirname(os.path.dirname(run_folder)) == os.path.join(TMP, 'data_sd')
+          and not os.path.exists(os.path.join(zen, 'metadata')), (result, err))
+    movies = open(os.path.join(run_folder, 'movie_name.txt')).read().split() if run_folder else []
+    check(f'(SD) HiM_parameters.yml and movie_name.txt in the run folder; names scan_001_RT1_<roi>_ROI ({movies[:1]})',
+          os.path.exists(os.path.join(run_folder, 'HiM_parameters.yml'))
+          and movies == [f'scan_001_RT1_{n[4:]}_ROI' for n in NAMES], movies)
     ph = [m for lvl, m in logs if 'Autofocus check not implemented yet' in m]
     check(f'(SD) autofocus placeholder logged once per run ({N} ROIs)', ph == [
           'Autofocus check not implemented yet (zen_ref_images_path, correlation_threshold)'], ph)
@@ -457,26 +460,14 @@ if not QUICK:
     i_acq = [k for k, m in enumerate(msgs) if 'Triggering ZEN acquisition' in m]
     check('(SD) order: autofocus done -> autofocus check -> acquisition block; 2 ZEN blocks per ROI',
           i_af and i_ph and i_acq and i_af[0] < i_ph[0] < i_acq[0] and trigger.sent.count('trigger_ZEN_start_block') == 2 * N)
-    for mode, fragment in (('none', 'No new file was created by ZEN'), ('two', 'More than one folder were found')):
-        trigger.mode = mode
-        trigger.created = []
-        task = sd_task()
-        t0 = monotonic()
-        result, err, _, _ = run(task)
-        imaged = [m for t, lvl, m in LOGS if t >= t0 and 'Triggering ZEN' in m]
-        check(f'(SD, {mode} new ZEN folder) clear error "{fragment}...", no ROI imaged, cleanup ran',
-              err is not None and fragment in str(err) and not imaged
-              and any('Hi-M task ended after 0/1' in m for t, lvl, m in LOGS if t >= t0), err)
-        print('    message:', err)
-        end_state_ok(f'SD, {mode} new ZEN folder', t0)
-    SD_MISSING = files(sd_inj, 'sd_missing', extra={'zen_saving_path': os.path.join(TMP, 'nowhere'),
-                                                     'zen_ref_images_path': ZEN_REF, 'correlation_threshold': 0.6})
+    SD_MISSING = files(sd_inj, 'sd_missing', extra={'zen_ref_images_path': os.path.join(TMP, 'nowhere'),
+                                                     'correlation_threshold': 0.6})
     task = sd_task()
     task.user_config_path = SD_MISSING
     t0 = monotonic()
     result, err, _, _ = run(task)
-    check('(SD) zen_saving_path not an existing folder -> error before any hardware call',
-          err is not None and 'zen_saving_path' in str(err) and 'is not an existing folder' in str(err)
+    check('(SD) zen_ref_images_path not an existing folder -> error before any hardware call',
+          err is not None and 'zen_ref_images_path' in str(err) and 'is not an existing folder' in str(err)
           and not [n for n, _ in calls(t0) if n in HARDWARE], err)
 
     # ------------------------------------------------------------------ (5) RAMM placeholder

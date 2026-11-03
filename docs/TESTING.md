@@ -55,8 +55,8 @@ One suite per component in `tests/`, one section per feature inside a suite (a
 - `test_task_runner.py` - Task Runner logic / GUI / task widget: progress display, parameter
   hints (placeholder, tooltip), start / end warning dialogs.
 - `test_photobleaching.py` - photobleaching task: hardware calls, progress display, dialogs.
-- `test_roi_scan.py` - ROI scan task: progress display, start ROI, ZEN settings pop-up and ZEN
-  data folder of the spinning disk.
+- `test_roi_scan.py` - ROI scan task: progress display, start ROI, ZEN settings pop-up of the
+  spinning disk, run folder on the server or local folder (ROI scan and Hi-M).
 - `test_fluidics.py` - fluidics task: options, sequence, interrupt, validation and hardware
   errors, needle position, probe valve read from the injections file.
 - `test_him.py` - Hi-M task: cycles, progress, interrupt, errors, needle modes, SD (fake ZEN),

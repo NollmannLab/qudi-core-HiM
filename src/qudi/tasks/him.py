@@ -37,13 +37,13 @@ You should have received a copy of the GNU General Public License along with Qud
 import copy
 import math
 import os
-from datetime import datetime
 from time import monotonic
 
 import yaml
 from qtpy import QtCore
 
 from qudi.core.connector import Connector
+from qudi.tasks.common.data_folders import choose_data_root, create_run_folder
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
@@ -96,8 +96,15 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     task): the probe valve is the outlet of the 'Probe' buffer entry of the injections file.
 
     Experiment YAML (user_config_path): sample_name, roi_list_path, injections_path,
-    imaging_sequence ([[wavelength, intensity %], ...]), num_z_planes, and the keys read by the
-    subclass (_read_microscope_parameters).
+    imaging_sequence ([[wavelength, intensity %], ...]), num_z_planes, save_path (local data folder),
+    save_network_path (server data folder, optional), and the keys read by the subclass
+    (_read_microscope_parameters).
+
+    Data folder (all setups): <root>/YYYY_MM_DD/NNN_HiM_<sample_name>, created by qudi
+    (tasks/common/data_folders.py); self.prefix = NNN. <root> is chosen before any hardware call
+    (choose_data_root): save_network_path when it is set and writable, otherwise save_path (a server
+    folder that is not reachable gives a warning in the log and a non-modal pop-up). qudi writes
+    HiM_parameters.yml and movie_name.txt there.
     Injections file (injections configurator): buffer {outlet: name}, probes {tube: name},
     hybridization list, photobleaching list, probe_needle_mode 'next' | 'same' (missing -> 'next').
 
@@ -121,7 +128,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     Hi-M hooks (overridden by the setup subclasses):
         _read_microscope_parameters(params)  extra keys of the experiment YAML
         _check_microscope() -> list          problems found (checked with the other problems)
-        _create_data_folder() -> str         folder where qudi writes its files (self.directory)
+        _create_data_folder() -> str         run folder where qudi writes its files (self.directory)
         _file_name(rt, roi_name) -> str      name of the stack of one ROI for one probe
     Imaging hooks (imaging mixin): _prepare_imaging(), _image_roi(roi, file_name),
     _end_imaging(), scan_stage_velocity.
@@ -142,7 +149,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     needle_rinsing_duration_s = 30  # rinsing of the needle after each cycle (s)
 
-    _EXPERIMENT_KEYS = ('sample_name', 'roi_list_path', 'injections_path', 'imaging_sequence', 'num_z_planes')
+    _EXPERIMENT_KEYS = ('sample_name', 'roi_list_path', 'injections_path', 'imaging_sequence', 'num_z_planes',
+                        'save_path')
     _RINSE_TIMEOUT_MARGIN_S = 30.0  # the rinse must end within needle_rinsing_duration_s + this margin
     # problems of FluidicsStepsMixin._validate checked once for the whole experiment instead
     _SKIPPED_VALIDATION_PROBLEMS = ('robot origin', 'probe list is empty', 'probe injection(s) from tube')
@@ -164,6 +172,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.prefix = ''
         self.sample_name = None
         self.save_path = None
+        self.save_network_path = ''
+        self._data_root = None
         self.imaging_sequence = None
         self.num_z_planes = None
         self._valve = self._flow = self._robot = None
@@ -192,6 +202,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.injections_path = params.get('injections_path')
         self.imaging_sequence = params.get('imaging_sequence') or []
         self.num_z_planes = params.get('num_z_planes')
+        self.save_path = params.get('save_path')
+        self.save_network_path = params.get('save_network_path') or ''
         self._read_microscope_parameters(params)
 
         # injections file; the probe valve is its 'Probe' buffer entry (None: no probe injection)
@@ -251,9 +263,10 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         for step in pb_steps:
             step['probe'] = False  # photobleaching: buffer valve only, the needle is not moved
 
-        # 3. plan (before any hardware call)
+        # 3. plan and data root (server folder or local folder, write-tested), before any hardware call
         self._log_plan(hyb_steps, pb_steps, probe_valve)
         self._check_interrupt()
+        self._data_root = choose_data_root(self, self.save_network_path, self.save_path)
 
         # 4. lock the GUIs, lasers off, scan stage velocity (restored in _cleanup)
         self._check_interrupt()
@@ -572,16 +585,9 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         return []
 
     def _create_data_folder(self) -> str:
-        """Create save_path/YYYY_MM_DD/{prefix}_HiM_{sample_name} (prefix: next 3-digit number in the
-        day folder, sets self.prefix) and return it."""
-        if not self.save_path:
-            raise RuntimeError('No save_path for the data folder.')
-        day_folder = os.path.join(self.save_path, datetime.today().strftime('%Y_%m_%d'))
-        os.makedirs(day_folder, exist_ok=True)
-        folders = [name for name in os.listdir(day_folder) if os.path.isdir(os.path.join(day_folder, name))]
-        self.prefix = str(len(folders) + 1).zfill(3)
-        path = os.path.join(day_folder, f'{self.prefix}_HiM_{self.sample_name}')
-        os.makedirs(path)
+        """Create <root>/YYYY_MM_DD/NNN_HiM_<sample_name> under the root chosen before any hardware call,
+        set self.prefix = NNN and return the folder."""
+        path, self.prefix = create_run_folder(self._data_root, 'HiM', self.sample_name)
         return path
 
     def _file_name(self, rt: str, roi_name: str) -> str:
@@ -605,15 +611,12 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     acquisition block, synchronized over DAQ triggers - see SDImagingMixin); trigger_logic is
     required. Valve layout of FluidicsSDTask.
 
-    Experiment YAML, extra keys: zen_saving_path (folder where ZEN creates the folder of the
-    experiment), zen_ref_images_path (reference images of the autofocus), correlation_threshold.
-    Before waiting for ZEN "ready", the log gives the ZEN settings: number of acquisition loops
-    (probes x ROIs), C (laser lines) and Z (planes). The new folder created by ZEN in
-    zen_saving_path when the experiment starts is found by comparing the folders before and after
-    (SDImagingMixin, shared with the ROI scan); qudi writes its files (HiM_parameters.yml,
-    movie_name.txt) in its "metadata" subfolder. As no data folder is created by qudi, self.prefix
-    stays '' and the file names are
-    scan__<RT>_<roi number>_ROI.
+    Experiment YAML, extra keys: zen_ref_images_path (reference images of the autofocus),
+    correlation_threshold; zen_saving_path is not read. Before waiting for ZEN "ready", the log gives the
+    ZEN settings: number of acquisition loops (probes x ROIs), C (laser lines) and Z (planes). Data
+    folder created by qudi as on all setups (HiMTaskBase: NNN_HiM_<sample_name> on the server folder or
+    in the local folder, the folder created by ZEN is not used); file names
+    scan_<NNN>_<RT>_<roi number>_ROI.
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -640,15 +643,13 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     cleanup_valve_positions = FluidicsSDTask.cleanup_valve_positions
 
     def _read_microscope_parameters(self, params) -> None:
-        self.zen_saving_path = params.get('zen_saving_path')
         self.zen_ref_images_path = params.get('zen_ref_images_path')
         self.correlation_threshold = params.get('correlation_threshold')
-        self._zen_directory = None
         self._autofocus_check_logged = False
 
     def _check_microscope(self) -> list:
         problems = []
-        for key in ('zen_saving_path', 'zen_ref_images_path'):
+        for key in ('zen_ref_images_path',):
             path = getattr(self, key)
             if not path:
                 problems.append(f'experiment file: {key!r} missing')
@@ -657,18 +658,15 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         return problems
 
     def _prepare_imaging(self) -> None:
-        """ZEN settings in the log, SD imaging preparation (laser source, wait for ZEN "ready"), then
-        the new folder created by ZEN."""
-        folders_before = self._zen_folders()
+        """ZEN settings in the log, SD imaging preparation (laser source, wait for ZEN "ready")."""
+        # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
+        # folders_before = self._zen_folders()
         self.log.warning(f'ZEN: number of acquisition loops = {len(self._cycles)} x {len(self.roi_names)} = '
                          f'{len(self._cycles) * len(self.roi_names)}, C = {len(self.imaging_sequence)}, '
                          f'Z = {self.num_z_planes}')
         super()._prepare_imaging()
-        self._zen_directory = self._find_new_zen_folder(folders_before)
-
-    def _create_data_folder(self) -> str:
-        """<new ZEN folder>/metadata (created, SDImagingMixin)."""
-        return self._create_zen_metadata_folder(self._zen_directory)
+        # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
+        # self._zen_directory = self._find_new_zen_folder(folders_before)
 
     def _check_autofocus(self, roi_name: str) -> None:
         """PLACEHOLDER - logs once per run that the check is not implemented.
@@ -734,8 +732,8 @@ class HiMRAMMTask(RAMMImagingMixin, HiMTaskBase):
 
 class HiMDummyTask(DummyImagingMixin, HiMTaskBase):
     """Hi-M without imaging hardware, for testing with dummy_config.cfg: RAMM valve layout on the dummy
-    valves (a, b, c), a fixed interruptible wait per ROI (DummyImagingMixin), data folder
-    save_path/YYYY_MM_DD/NNN_HiM_<sample_name> (experiment YAML key save_path).
+    valves (a, b, c), a fixed interruptible wait per ROI (DummyImagingMixin), data folder as on all
+    setups (HiMTaskBase).
 
     Config example (dummy_config.cfg, logic: task_runner: options: module_tasks:):
 
@@ -757,9 +755,3 @@ class HiMDummyTask(DummyImagingMixin, HiMTaskBase):
     incubation_valve_positions = FluidicsRAMMTask.incubation_valve_positions
     incubation_end_valve_positions = FluidicsRAMMTask.incubation_end_valve_positions
     cleanup_valve_positions = FluidicsRAMMTask.cleanup_valve_positions
-
-    def _read_microscope_parameters(self, params) -> None:
-        self.save_path = params.get('save_path')
-
-    def _check_microscope(self) -> list:
-        return [] if self.save_path else ["experiment file: 'save_path' missing"]

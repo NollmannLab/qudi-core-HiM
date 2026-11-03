@@ -6,6 +6,37 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-03
 
+### Tasks
+
+#### Changed
+
+- ROI scan and Hi-M: run folder created by qudi, on the server folder or in the local folder
+  (2026-11-03).
+  - New `src/qudi/tasks/common/data_folders.py`:
+    - `choose_data_root(task, network_path, local_path)`: server folder when it is set and writable
+      (write test in its `YYYY_MM_DD` folder); otherwise local folder. A server folder that is not
+      reachable gives a warning in the log and a non-modal pop-up; a local folder that cannot be written
+      is an error before any hardware call.
+    - `create_run_folder(root, kind, sample_name, suffix='')`: `root/YYYY_MM_DD/NNN_<kind>_<sample><suffix>`.
+  - `roi_multicolour_scan.py`, all setups: experiment keys `save_path` (required) and
+    `save_network_path` (optional); root chosen after the ZEN settings pop-up, before any hardware call;
+    run folder `NNN_Scan_<sample>[_DAPI|_RNA]`, movie names unchanged. `_create_directory` replaced by
+    `create_run_folder`. The SD task no longer reads `zen_saving_path`.
+  - `him.py`, all setups: `save_path` required, `save_network_path` optional; run folder
+    `NNN_HiM_<sample>` with `HiM_parameters.yml` and `movie_name.txt`. SD file names now carry the
+    prefix: `scan_<NNN>_<RT>_<roi>_ROI`. The SD task no longer reads or checks `zen_saving_path`.
+  - `common/imaging_steps.py`: ZEN data folder detection kept but commented out, and its calls in
+    both SD tasks too.
+  - Experiment definitions `spinning_disk/roi_multicolour_scan.yaml`, `spinning_disk/him_epi.yaml`,
+    `dummy/roi_multicolour_scan.yaml`, `dummy/him.yaml`: `save_path` shown and required,
+    `save_network_path` shown and optional (default `default network path`); `zen_saving_path`
+    hidden and optional where present.
+  - Tests: the ZEN data folder section of `tests/test_roi_scan.py` is replaced by a "data folder
+    (server / local)" section; the SD experiment files of the other ROI scan sections and the Hi-M
+    SD checks of `tests/test_him.py` are adapted (run folder created by qudi, prefixed names; the
+    "no / two new ZEN folders" and "zen_saving_path not a folder" checks removed, the
+    `zen_ref_images_path` check kept).
+
 ### Documentation
 
 #### Changed
