@@ -12,9 +12,8 @@ These rules apply by default to every task in this repository, unless a prompt s
    - shorten durations by overriding the class attributes in the test (e.g.
      `needle_rinsing_duration_s`, `dummy_imaging_time_s`, progress / poll intervals), never by
      changing the real defaults or the configs used on the microscopes.
-3. **Order of a test run:** first the cases listed in the prompt; then the existing regression
-   suites with the same short settings. Report both, briefly (pass/fail per case, details only for
-   failures).
+3. Run only the tests needed for the change described in the prompt. Do not run the full regression
+   suites unless the prompt explicitly asks for them (e.g. 'run full tests').
 4. **What is checked** is the order and synchronization of the hardware calls (valves, needle,
    pressure regulation start/stop, ZEN triggers, stage moves, GUI locks, cleanup after interrupt or
    error), not durations.
