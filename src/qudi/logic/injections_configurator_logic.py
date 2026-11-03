@@ -102,8 +102,13 @@ class InjectionsLogic(LogicBase):
     injections_logic:
         module.Class: 'injections_logic.InjectionsLogic'
         probe_valve_outlet: 7
+        injections_directory: 'C:\\Users\\sCMOS-1\\qudi_files\\qudi_injection_parameters'
         number_of_valve_positions: 8
         number_of_probes: 100
+
+    injections_directory: folder of the injections files. The GUIs that save or open injections files
+    (injections GUI, experiment configurator) start their file dialogs there (read-only property
+    injections_directory).
 
     probe_valve_outlet: outlet of the buffer valve connected to the probe needle on this setup. It is written
     into every injections file as the buffer entry PROBE_BUFFER_NAME ('Probe') -> outlet; the fluidics and Hi-M
@@ -116,6 +121,7 @@ class InjectionsLogic(LogicBase):
     # outlet of the buffer valve connected to the probe needle on this setup (see the class docstring)
     probe_valve_number = ConfigOption('probe_valve_outlet', missing='error', converter=int)
     buffer_valve_address = ConfigOption('buffer_valve_address', missing='error')
+    _injections_directory = ConfigOption('injections_directory', default='', missing='warn')
 
     # signals
     sigBufferListChanged = QtCore.Signal()
@@ -173,6 +179,11 @@ class InjectionsLogic(LogicBase):
 # ----------------------------------------------------------------------------------------------------------------------
 # Probe needle mode
 # ----------------------------------------------------------------------------------------------------------------------
+
+    @property
+    def injections_directory(self) -> str:
+        """Folder of the injections files (config option injections_directory, '' if not set)."""
+        return str(self._injections_directory or '')
 
     @property
     def probe_needle_mode(self):

@@ -25,6 +25,7 @@ SUITES = [
     'test_roi_tour.py',
     'test_roi_optimize.py',
     'test_random_roi_list.py',
+    'test_data_folders.py',
     'test_param_hints.py',
     'test_task_progress.py',
     'test_photobleaching_progress.py',

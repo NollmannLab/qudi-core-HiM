@@ -46,15 +46,18 @@ class InjectionsGUI(GuiBase):
 
     Injections Configurator:
         module.Class: 'injections.injections_gui.InjectionsGUI'
-        default_path: 'C:\\Users\\sCMOS-1\\qudi_files\\qudi_injection_parameters'
         connect:
             injections_logic: 'injections_logic'
+
+    The load and save dialogs start in the folder of the injections files, option injections_directory of
+    the injections logic. The former option default_path of this GUI is still read: it is used only if
+    injections_directory is not set, with one warning at activation (the value belongs to the logic).
     """
     # connector to logic module
     injections_logic = Connector(name='injection_logic', interface='InjectionsLogic')
 
     # config options
-    default_path = ConfigOption('default_path')
+    default_path = ConfigOption('default_path', default=None, missing='nothing')  # obsolete, see class docstring
 
     # Signals
     sigAddBuffer = QtCore.Signal(str, int)
@@ -80,11 +83,26 @@ class InjectionsGUI(GuiBase):
         super().__init__(config=config, **kwargs)
         self._injections_logic = None
         self._mw = None
+        self._directory = ''  # start folder of the file dialogs (set in on_activate)
+
+    def _injections_directory(self) -> str:
+        """Injections folder: injections_directory of the injections logic; the obsolete option default_path
+        of this GUI only if the logic folder is not set. One warning if default_path is still in the config."""
+        folder = self._injections_logic.injections_directory
+        if self.default_path not in (None, ''):
+            used = folder or str(self.default_path)
+            self.log.warning(f'Option default_path of this injections GUI is obsolete: the injections folder is '
+                             f'the option injections_directory of the injections logic. Move the value to '
+                             f'injections_configurator_logic: options: injections_directory and remove default_path '
+                             f'from the options of this GUI (folder used: {used}).')
+            return used
+        return folder
 
     def on_activate(self):
         """ Required initialization steps.
         """
         self._injections_logic = self.injections_logic()
+        self._directory = self._injections_directory()
 
         self._mw = InjectionsWindow()
         self._mw.centralwidget.hide()  # everything is in dockwidgets
@@ -327,7 +345,7 @@ class InjectionsGUI(GuiBase):
         """ Callback of the toolbutton load injections. Opens a dialog to select a file and hands the path
         over to the logic where the data is loaded.
         """
-        data_directory = self.default_path  # default location to look for the file
+        data_directory = self._directory  # default location to look for the file
         this_file = QtWidgets.QFileDialog.getOpenFileName(self._mw, 'Load injections', data_directory, 'yaml files ('
                                                                                                        '*.yaml)')[0]
         if this_file:
@@ -336,7 +354,7 @@ class InjectionsGUI(GuiBase):
     def save_injections_clicked(self):
         """ Callback of the toolbutton save injections. Opens a dialog to select a file or a path where
         the data should be saved. The path is handed over to the logic module where data saving is managed. """
-        data_directory = self.default_path
+        data_directory = self._directory
         this_file = QtWidgets.QFileDialog.getSaveFileName(self._mw,
                                                           'Save injection sequence',
                                                           data_directory,

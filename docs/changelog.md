@@ -1391,6 +1391,41 @@ Last updated: 2026-11-03
       answer the box through `_short.AutoAnswer`;
     - `test_fluidics_task.py` reads the warning box list from
       `tasks/common/popups.py`.
+- Data folders defined once, in the logic that owns the data (2026-11-03).
+  - `logic/roi_logic.py`: option `roi_list_directory` (default '', warned if
+    missing), read-only property `roi_list_directory`.
+  - `logic/injections_configurator_logic.py`: option `injections_directory`,
+    read-only property `injections_directory`.
+  - `logic/experiment_configurator_logic.py`: optional connectors
+    `roi_logic` and `injections_logic` (read-only use); properties
+    `roi_list_directory` and `injections_directory`, '' if not connected.
+  - GUIs:
+    - ROI GUI: the save path field (also the start folder of the load
+      dialog) starts at `roi_logic.roi_list_directory`.
+    - Injections GUI: the load / save dialogs start at the logic folder.
+    - Experiment configurator: the ROI list / injections dialogs start at the
+      folders of the connected logic modules.
+  - The former GUI options (`roi_gui` and injections GUI `default_path`,
+    configurator `default_roi_path` / `default_injections_path`) are still
+    read.
+    - Each one still set gives one warning at activation, naming the config
+      line to move or remove.
+    - The logic folder is used when it is set, otherwise the GUI value; the
+      configurator then falls back to its `default_path`.
+  - Configs (SD, RAMM, OPM, dummy):
+    - the folder values moved from the GUI options to `roi_logic:
+      roi_list_directory` and `injections_configurator_logic:
+      injections_directory` (where present);
+    - `experiments_configurator_logic` connected to `roi_logic` /
+      `injections_configurator_logic` where they exist;
+    - the duplicated GUI options removed. On the SD the configurator dialogs
+      now open in the ROI list and injections folders.
+  - Tests (`tests/test_data_folders.py`, 7/7, 4 s, dummy config):
+    - all dialogs start in the logic folders;
+    - an old config gives one warning per option and uses the logic values
+      (the GUI values when the logic options are not set);
+    - a configurator without roi_logic / injections logic falls back to
+      `default_path`.
 
 - `tasks/him.py` (2026-10-19): **Hi-M task**. Checks first, then for each
   probe (RT), sorted by tube: hybridization -> imaging of every ROI ->

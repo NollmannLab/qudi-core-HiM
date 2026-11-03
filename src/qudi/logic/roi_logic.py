@@ -419,6 +419,11 @@ class RoiLogic(LogicBase):
         module.Class: 'roi_logic.RoiLogic'
         connect:
           stage: 'dummy_translation_stage'
+        options:
+          roi_list_directory: 'C:\\Users\\CBS\\qudi_files\\qudi_roi_lists'
+
+    roi_list_directory: folder of the ROI list files. The GUIs that save or open ROI lists (ROI GUI,
+    experiment configurator) start their file dialogs there (read-only property roi_list_directory).
     """
     # declare the connector
     stage = Connector(interface='MultiAxisStageInterface', name='stage')
@@ -436,6 +441,7 @@ class RoiLogic(LogicBase):
 
     # Axis-role mapping used by the ROI logic. The connected stage may expose
     # two or three axes, but ROI positions are always represented as (x, y, z).
+    _roi_list_directory = ConfigOption(name='roi_list_directory', default='', missing='warn')
     _x_axis_label = ConfigOption(name='x_axis_label', default='x')
     _y_axis_label = ConfigOption(name='y_axis_label', default='y')
     _z_axis_label = ConfigOption(name='z_axis_label', default='z')
@@ -566,6 +572,11 @@ class RoiLogic(LogicBase):
         :return: (currently None) could be modified to return the camera image extent
         """
         return self._roi_list.cam_image_extent
+
+    @property
+    def roi_list_directory(self) -> str:
+        """Folder of the ROI list files (config option roi_list_directory, '' if not set)."""
+        return str(self._roi_list_directory or '')
 
     @property
     def roi_width(self):

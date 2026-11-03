@@ -205,12 +205,16 @@ class ExpConfigLogic(LogicBase):
     configuration files.
 
     The optional camera, laser, and filter-wheel connectors are only needed for reading live hardware values
-    or populating setup-dependent choices."""
+    or populating setup-dependent choices. The optional roi_logic and injections_logic connectors give the
+    folders where the GUI opens ROI lists and injections files (roi_list_directory, injections_directory)."""
 
     # define connectors to logic modules
     camera_logic = Connector(name='camera_logic', interface='CameraLogic', optional=True)
     laser_logic = Connector(interface='LaserControlLogic', optional=True)
     filter_logic = Connector(interface='FilterWheelLogic', optional=True)
+    # read-only: folders of the ROI lists and of the injections files (roi_list_directory, injections_directory)
+    roi_logic = Connector(interface='RoiLogic', optional=True)
+    injections_logic = Connector(interface='InjectionsLogic', optional=True)
 
     # signals
     sigConfigDictUpdated = QtCore.Signal()
@@ -232,6 +236,8 @@ class ExpConfigLogic(LogicBase):
     _camera_logic = None
     _laser_logic = None
     _filter_logic = None
+    _roi_logic = None
+    _injections_logic = None
     filters = None
     lasers = None
     cameras = None
@@ -250,6 +256,8 @@ class ExpConfigLogic(LogicBase):
         self._camera_logic = self.camera_logic()
         self._laser_logic = self.laser_logic()
         self._filter_logic = self.filter_logic()
+        self._roi_logic = self.roi_logic()
+        self._injections_logic = self.injections_logic()
 
         # prepare the items that will be displayed in the ComboBoxes on the GUI
         self.lasers = []
@@ -290,6 +298,18 @@ class ExpConfigLogic(LogicBase):
 # ----------------------------------------------------------------------------------------------------------------------
 # Check instruments availability
 # ----------------------------------------------------------------------------------------------------------------------
+
+    @property
+    def roi_list_directory(self) -> str:
+        """Folder of the ROI lists, from the connected roi_logic ('' if not connected)."""
+        return str(getattr(self._roi_logic, 'roi_list_directory', '') or '') if self._roi_logic is not None else ''
+
+    @property
+    def injections_directory(self) -> str:
+        """Folder of the injections files, from the connected injections logic ('' if not connected)."""
+        if self._injections_logic is None:
+            return ''
+        return str(getattr(self._injections_logic, 'injections_directory', '') or '')
 
     @property
     def camera_available(self) -> bool:

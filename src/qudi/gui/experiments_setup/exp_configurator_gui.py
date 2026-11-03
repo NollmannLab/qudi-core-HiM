@@ -58,6 +58,12 @@ GUI modules::
       options:
         default_path: /path/to/qudi_files
 
+The ROI list and injections file dialogs start in the folders of the logic modules that own them
+(roi_logic roi_list_directory, injections logic injections_directory, through the optional connectors
+roi_logic and injections_logic of experiments_configurator_logic). Fallback: the former GUI options
+default_roi_path / default_injections_path (one warning each at activation if they are still set), then
+default_path.
+
 The ``experiments`` list above contains definition filenames. The human-readable experiment names shown in the
 combo box come from the ``experiment`` key inside those files.
 
@@ -368,8 +374,8 @@ class ExpConfiguratorGUI(GuiBase):
 
     # config options
     default_location = ConfigOption('default_path', missing='error')
-    default_roi_path = ConfigOption('default_roi_path', default='')
-    default_injections_path = ConfigOption('default_injections_path', default='')
+    default_roi_path = ConfigOption('default_roi_path', default='')  # obsolete: roi_logic roi_list_directory
+    default_injections_path = ConfigOption('default_injections_path', default='')  # obsolete: injections_directory
     _ui_window_filename = 'ui_exp_configurator.ui'
 
     # Signals
@@ -385,6 +391,18 @@ class ExpConfiguratorGUI(GuiBase):
         self._exp_logic = None
         self._mw = None
 
+    def _start_folder(self, logic_folder, old_option, config_line) -> str:
+        """Start folder of a file dialog: the folder of the owning logic; else the obsolete GUI option
+        old_option (one warning whenever it is still set); else default_path."""
+        old_value = getattr(self, old_option)
+        if old_value not in (None, ''):
+            used = logic_folder or str(old_value)
+            self.log.warning(f'Option {old_option} of the experiment configurator GUI is obsolete: set the folder '
+                             f'in {config_line} (and connect that logic to experiments_configurator_logic), then '
+                             f'remove {old_option} from the options of this GUI (folder used: {used}).')
+            return used
+        return logic_folder or str(self.default_location)
+
     def on_activate(self):
         """Create the window and connect it to the configurator logic.
 
@@ -393,6 +411,10 @@ class ExpConfiguratorGUI(GuiBase):
         then toolbar actions, form widgets, and logic signals are connected.
         """
         self._exp_logic = self.exp_logic()
+        self._roi_dir = self._start_folder(self._exp_logic.roi_list_directory, 'default_roi_path',
+                                           'roi_logic: options: roi_list_directory')
+        self._injections_dir = self._start_folder(self._exp_logic.injections_directory, 'default_injections_path',
+                                                  'injections_configurator_logic: options: injections_directory')
 
         self._mw = ExpConfiguratorWindow(self._ui_window_filename)
         self._mw.formWidget.hide()
@@ -994,7 +1016,7 @@ class ExpConfiguratorGUI(GuiBase):
         """Choose a JSON ROI-list file and place its path in the form."""
         this_file = QtWidgets.QFileDialog.getOpenFileName(self._mw,
                                                           'Open ROI list',
-                                                          self.default_roi_path,
+                                                          self._roi_dir,
                                                           'json files (*.json)')[0]
         if this_file:
             self._mw.roi_list_path_LineEdit.setText(this_file)
@@ -1003,7 +1025,7 @@ class ExpConfiguratorGUI(GuiBase):
         """Choose an injection-parameter YAML file and place its path in the form."""
         this_file = QtWidgets.QFileDialog.getOpenFileName(self._mw,
                                                           'Open injections file',
-                                                          self.default_injections_path,
+                                                          self._injections_dir,
                                                           'yaml files (*.yaml)')[0]
         # print(this_file)
         if this_file:

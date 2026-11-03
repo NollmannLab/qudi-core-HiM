@@ -318,13 +318,16 @@ class RoiGUI(GuiBase):
           roi_logic: 'roi_logic'
         options:
             stagemarker_width: 300
-            default_path: 'C:\\Users\\CBS\\qudi_files\\qudi_roi_lists'
+
+    The save path field and the load dialog start in the folder of the ROI lists, roi_logic option
+    roi_list_directory. The former option default_path of this GUI is still read: it is used only if
+    roi_list_directory is not set, with one warning at activation (the value belongs to roi_logic).
     """
     # declare connector to logic module
     roi_logic = Connector(interface='RoiLogic')
 
     # config options
-    default_path = ConfigOption('default_path', missing='warn')
+    default_path = ConfigOption('default_path', default=None, missing='nothing')  # obsolete, see class docstring
     stagemarker_width = ConfigOption('stagemarker_width', 50, missing='info')  # stagemarker width in um
 
     # signals
@@ -345,6 +348,19 @@ class RoiGUI(GuiBase):
     stagemarker = None
     _mosaic_sd = None
 
+    def _roi_list_directory(self) -> str:
+        """ROI list folder: roi_logic.roi_list_directory; the obsolete option default_path of this GUI only
+        if the logic folder is not set. One warning if default_path is still in the config."""
+        folder = self._roi_logic.roi_list_directory
+        if self.default_path not in (None, ''):
+            used = folder or str(self.default_path)
+            self.log.warning(f'Option default_path of this ROI GUI is obsolete: the ROI list folder is the '
+                             f'roi_logic option roi_list_directory. Move the value to roi_logic: options: '
+                             f'roi_list_directory and remove default_path from the options of this GUI '
+                             f'(folder used: {used}).')
+            return used
+        return folder
+
     def on_activate(self):
         """
         Initializes the overall GUI, and establishes the connectors.
@@ -354,8 +370,9 @@ class RoiGUI(GuiBase):
         self._mw = RoiMainWindowCE(self.close_function)
         self._markers = {}
 
-        # set the default save path before validator is applied: make sure that config is correct
-        self._mw.save_path_LineEdit.setText(self.default_path)
+        # save path field (also the start folder of the load dialog): ROI list folder of roi_logic; set
+        # before the validator is applied
+        self._mw.save_path_LineEdit.setText(self._roi_list_directory())
 
         # Add validator to LineEdits
         self._mw.roi_list_name_LineEdit.setValidator(NameValidator())
