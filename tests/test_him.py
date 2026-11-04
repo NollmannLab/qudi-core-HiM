@@ -13,7 +13,7 @@ Sections:
   - probe valve read from the injections file (plan, needle, valve, obsolete option).
 Short settings and test data: tests/_short.py, tests/data/ (him_injections.yml, rois_2.json), docs/TESTING.md.
 """
-import sys, os, re, weakref, logging, importlib, tempfile, threading, copy, glob, shutil
+import sys, os, re, weakref, logging, logging.handlers, importlib, tempfile, threading, copy, glob, shutil
 from time import monotonic, sleep
 from importlib.metadata import version
 
@@ -228,11 +228,56 @@ def end_state_ok(label, t0):
 
 
 QUICK = 'quick' in sys.argv[1:]
-ONLY = set(sys.argv[1:]) & {'metadata', 'sd_z_planes'}  # run only these blocks, then stop
+ONLY = set(sys.argv[1:]) & {'metadata', 'sd_z_planes', 'sd_zen_folder'}  # run only these blocks, then stop
 
 
 def selected(block):
     return not ONLY or block in ONLY
+
+
+class ZenSim:
+    """Fake ZEN saving folder: when "ready" is raised (the user starts the ZEN experiment), ZEN creates its data
+    folder there - one new folder ('one'), none ('none') or two ('two')."""
+    def __init__(self, root):
+        self.root, self.mode, self.created = root, 'one', []
+        for old in ('2026-11-01_old_experiment', '2026-11-02_old_experiment'):
+            os.makedirs(os.path.join(root, old), exist_ok=True)
+        open(os.path.join(root, 'notes.txt'), 'w').close()  # a file: not counted as a folder
+
+    def ready(self):
+        for _ in range({'one': 1, 'none': 0, 'two': 2}[self.mode]):
+            path = os.path.join(self.root, f'2026-11-04_HiM_test_{len(self.created) + 1:02d}')
+            os.makedirs(path)
+            self.created.append(path)
+
+    def folders(self):
+        return [n for n in os.listdir(self.root) if os.path.isdir(os.path.join(self.root, n))]
+
+    def tree(self):
+        return sorted(os.path.relpath(os.path.join(d, n), self.root)
+                      for d, dirs, fs in os.walk(self.root) for n in dirs + fs)
+
+
+class ZenTriggerLogic:
+    """Fake TriggerLogic: ZEN ready / done answered at once; "ready" makes the fake ZEN create its data folder."""
+    _meta = {'mro': ('TriggerLogic',)}
+
+    def __init__(self, zen):
+        self.zen, self.sent = zen, []
+
+    def send_trigger(self, name):
+        self.sent.append(name)
+
+    def is_triggered(self, name):
+        if name == 'trigger_ZEN_ready':
+            self.zen.ready()
+        return True
+
+
+def run_log_handlers():
+    """Log handlers of a Hi-M run still attached to the qudi logger (none after the cleanup)."""
+    return [h for h in logging.getLogger('qudi').handlers
+            if isinstance(h, (logging.handlers.MemoryHandler, logging.FileHandler))]
 
 
 # --- run files: experiment copy and metadata.yml ---
@@ -274,19 +319,8 @@ if selected('metadata'):
 
 # --- number of z planes: not used by the SD task, still required by the dummy ---
 if selected('sd_z_planes'):
-    class ZenTrigger:  # fake TriggerLogic: ZEN ready / done answered at once
-        _meta = {'mro': ('TriggerLogic',)}
-
-        def __init__(self):
-            self.sent = []
-
-        def send_trigger(self, name):
-            self.sent.append(name)
-
-        def is_triggered(self, name):
-            return True
-
-    z_trigger = ZenTrigger()
+    z_zen = ZenSim(os.path.join(TMP, 'zen_z_planes'))
+    z_trigger = ZenTriggerLogic(z_zen)
     z_box = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box ('Done - continue')
     z_ref = os.path.join(TMP, 'zen_ref_z')
     os.makedirs(z_ref, exist_ok=True)
@@ -320,7 +354,7 @@ if selected('sd_z_planes'):
         logs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
         return task, result, err, params, acq, logs, t0
 
-    sd_extra = {'zen_ref_images_path': z_ref, 'correlation_threshold': 0.6}
+    sd_extra = {'zen_ref_images_path': z_ref, 'correlation_threshold': 0.6, 'zen_saving_path': z_zen.root}
     # (1) SD experiment file without num_z_planes
     task, result, err, params, acq, logs, t0 = z_run(him.HiMSDTask, 'sd_no_z', True, **sd_extra)
     check(f'(SD, no num_z_planes in the file) 1 cycle x {N} ROIs done; HiM_parameters.yml without "number of z planes"; '
@@ -392,6 +426,130 @@ if selected('sd_z_planes'):
         mw.close()
     check('(configurator) SD Hi-M experiment: number-of-planes field and label hidden; Hi-M dummy: still shown',
           shown['him_epi_sd'][:2] == (False, False) and shown['Hi-M Dummy'][:2] == (True, True), shown)
+
+# --- spinning disk: folder named after the ZEN data folder, log file of the run ---
+if selected('sd_zen_folder'):
+    zen = ZenSim(os.path.join(TMP, 'zen_saving_hm'))
+    zen_trigger = ZenTriggerLogic(zen)
+    zen_box = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box ('Done - continue')
+    zen_ref = os.path.join(TMP, 'zen_ref_hm')
+    os.makedirs(zen_ref, exist_ok=True)
+    one_probe = copy.deepcopy(EXAMPLE)
+    one_probe['probes'] = {1: 'RT1'}
+    LOG_LINE = re.compile(r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ - [A-Za-z]+ - qudi\.\S+ - ')  # qudi: lower-case levels
+
+    def zen_case(name, interrupt_when=None, **extra):
+        server, local = os.path.join(TMP, f'server_{name}'), os.path.join(TMP, f'local_{name}')
+        os.makedirs(server)
+        os.makedirs(local)
+        values = {'save_network_path': server, 'zen_saving_path': zen.root, 'zen_ref_images_path': zen_ref,
+                  'correlation_threshold': 0.6}
+        values.update(extra)
+        exp = files(one_probe, name, save_path=local, extra={k: v for k, v in values.items() if v is not None})
+        task = him.HiMSDTask()
+        for k, v in _short.local_options(repo, ENTRY['options']).items():
+            setattr(task, k, v)
+        task.user_config_path = exp
+        _short.shorten(task, progress_interval_s=0.2)
+        task.connect_modules(dict(MODS, trigger_logic=zen_trigger))
+        if not any(isinstance(h, H) for h in task.log.handlers):
+            task.log.addHandler(H())
+        folders_before = len(zen.folders())
+        tree_before = zen.tree()
+        result, err, t0, t_int = run(task, interrupt_when=interrupt_when)
+        return task, result, err, t0, t_int, server, local, folders_before, tree_before, exp
+
+    def log_lines(folder):
+        path = os.path.join(folder, 'HiM_task.log')
+        return open(path, encoding='utf-8').read().splitlines() if os.path.exists(path) else []
+
+    # (2) Hi-M SD, 1 probe, 2 ROIs, server reachable
+    task, result, err, t0, _, server, local, before, tree_before, exp = zen_case('zen_ok')
+    zen_folder = zen.created[-1] if zen.created else ''
+    folder = os.path.join(server, os.path.basename(zen_folder), 'metadata')
+    prefix = str(before + 1).zfill(3)
+    names = open(os.path.join(folder, 'movie_name.txt')).read().split() if os.path.isdir(folder) else []
+    check(f'(ZEN folder) Hi-M SD, 1 probe, {N} ROIs: files in <server>/<ZEN folder name>/metadata: HiM_parameters.yml, '
+          f'movie_name.txt, experiment_config.yaml, injections.yml (copy of the injections file), metadata.yml, '
+          f'HiM_task.log; prefix {prefix} (folders before + 1), names scan_{prefix}_RT1_<roi>_ROI',
+          err is None and result and result['cycles_done'] == 1 and result['directory'] == folder
+          and sorted(os.listdir(folder)) == ['HiM_parameters.yml', 'HiM_task.log', 'experiment_config.yaml',
+                                             'injections.yml', 'metadata.yml', 'movie_name.txt']
+          and open(os.path.join(folder, 'injections.yml'), 'rb').read() == open(task.injections_path, 'rb').read()
+          and task.prefix == prefix and names == [f'scan_{prefix}_RT1_{n[4:]}_ROI' for n in NAMES],
+          (err, result, os.listdir(folder) if os.path.isdir(folder) else None, names))
+    check('(ZEN folder) nothing created or modified in the ZEN saving folder (only the folder ZEN created, empty); '
+          'nothing in the local folder',
+          zen.tree() == sorted(tree_before + [os.path.basename(zen_folder)]) and os.listdir(zen_folder) == []
+          and os.listdir(local) == [], (zen.tree(), os.listdir(local)))
+    lines = log_lines(folder)
+    plan = [k for k, l in enumerate(lines) if ' - qudi.tasks.him.HiMSDTask - ' in l and 'ZEN: select the channels' in l]
+    hardware = [k for k, l in enumerate(lines) if 'Waiting for ZEN to signal' in l or 'Triggering ZEN' in l
+                or 'Moving to' in l]
+    print('    HiM_task.log, first / last lines:', *lines[:3], '...', *lines[-2:], sep='\n      ')
+    check('(log file) HiM_task.log: every line "time - level - logger - message"; starts with "Hi-M task started" and '
+          'the check messages of the run (ROI list loaded ...) before the ZEN settings and any hardware step; messages of other qudi modules included; last '
+          'line "Hi-M task ended after 1/1 cycle(s)."; handlers removed',
+          lines and all(LOG_LINE.match(l) for l in lines if not l.startswith((' ', '\t')))
+          and lines[0].endswith(f' - qudi.tasks.him.HiMSDTask - Hi-M task started - experiment file {exp}')
+          and any('Loaded ROI list' in l for l in lines[:plan[0]] if plan) and plan and plan[0] > 0
+          and (not hardware or hardware[0] > plan[0])
+          and any(' - qudi.logic.' in l for l in lines)
+          and lines[-1].endswith(' - qudi.tasks.him.HiMSDTask - Hi-M task ended after 1/1 cycle(s).')
+          and not run_log_handlers(), (lines[:2], lines[-1:], run_log_handlers()))
+    end_state_ok('ZEN folder', t0)
+
+    # (4) zen_saving_path missing / not a folder -> error before any hardware call
+    for label, value, fragment in (('missing', None, "'zen_saving_path' missing"),
+                                   ('not a folder', os.path.join(TMP, 'nowhere_zen'), 'is not an existing folder')):
+        task, result, err, t0, _, server, local, *_ = zen_case(f'zen_{label[:3]}', zen_saving_path=value)
+        check(f'(zen_saving_path {label}) error "{fragment}" before any hardware call; no log file, handlers removed',
+              err is not None and fragment in str(err) and not [n for n, _ in calls(t0) if n in HARDWARE]
+              and not glob.glob(os.path.join(server, '**', 'HiM_task.log'), recursive=True)
+              and not run_log_handlers(), (err, run_log_handlers()))
+    # (4) no / two new ZEN folders -> clear error, cleanup, log handlers closed
+    for mode, fragment in (('none', 'No new file was created by ZEN'), ('two', 'More than one folder were found')):
+        zen.mode = mode
+        HiMSDTaskAttempts = him.HiMSDTask._ZEN_FOLDER_ATTEMPTS
+        him.HiMSDTask._ZEN_FOLDER_ATTEMPTS = 2  # shorter wait for the missing folder (2 attempts, 1 s apart)
+        try:
+            task, result, err, t0, _, server, local, *_ = zen_case(f'zen_{mode}')
+        finally:
+            him.HiMSDTask._ZEN_FOLDER_ATTEMPTS = HiMSDTaskAttempts
+        msgs = [m for t, lvl, m in LOGS if t >= t0]
+        check(f'({mode} new ZEN folder) clear error "{fragment}...", no ROI imaged, cleanup ran (last line "Hi-M task '
+              f'ended after 0/1"), no qudi folder, log handlers closed',
+              err is not None and fragment in str(err) and not any('Triggering ZEN' in m for m in msgs)
+              and msgs and msgs[-1] == 'Hi-M task ended after 0/1 cycle(s).'
+              and not glob.glob(os.path.join(server, '*', 'metadata')) and not run_log_handlers(), (err, msgs[-1:]))
+        end_state_ok(f'{mode} new ZEN folder', t0)
+    zen.mode = 'one'
+
+    # (5) interrupt during hybridization -> log file closed, last line present
+    cond = (lambda: any(t.startswith('Hybridization 2/4') for _, s, t in PROGRESS)
+            and any('Injecting Probe -' in t for _, s, t in PROGRESS))
+    task, result, err, t0, t_int, server, local, *_ = zen_case('zen_int', interrupt_when=cond)
+    folder = os.path.join(server, os.path.basename(zen.created[-1]), 'metadata')
+    lines = log_lines(folder)
+    check('(interrupt during hybridization) task stopped; HiM_task.log closed (handlers removed), last line "Hi-M task '
+          'ended after 0/1 cycle(s)."',
+          t_int is not None and result is None and not task.success and lines
+          and lines[-1].endswith(' - Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
+          (t_int, result, lines[-1:], run_log_handlers()))
+    end_state_ok('interrupt during hybridization (ZEN folder)', t0)
+    zen_box.stop()
+
+    # (6) Hi-M dummy: run folder as before, with HiM_task.log
+    task = make_task(user_config_path=files(one_probe, 'dummy_log'))
+    result, err, t0, _ = run(task)
+    folder = result['directory'] if result else ''
+    lines = log_lines(folder)
+    check('(dummy) run folder as before (save_path/YYYY_MM_DD/001_HiM_<sample>), with HiM_task.log ending with '
+          '"Hi-M task ended after 1/1 cycle(s)."; handlers removed',
+          err is None and result and os.path.basename(folder) == '001_HiM_Mysample'
+          and os.path.dirname(os.path.dirname(folder)) == os.path.join(TMP, 'data_dummy_log')
+          and lines and lines[-1].endswith(' - qudi.tasks.him.HiMDummyTask - Hi-M task ended after 1/1 cycle(s).')
+          and not run_log_handlers(), (err, result, lines[-1:]))
 
 if ONLY:
     print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)
@@ -624,15 +782,14 @@ if not QUICK:
           and not any(m.startswith('ZEN: number of acquisition loops =') for m in msgs),
           (ZEN_BOX.texts, [m for m in msgs if 'ZEN' in m][:4]))
     run_folder = result['directory'] if result else ''
-    check('(SD) run folder created by qudi in save_path (no server folder): YYYY_MM_DD/001_HiM_<sample>; the folder '
-          'created by ZEN is not used',
-          err is None and os.path.isdir(run_folder) and os.path.basename(run_folder).startswith('001_HiM_')
-          and os.path.dirname(os.path.dirname(run_folder)) == os.path.join(TMP, 'data_sd')
-          and not os.path.exists(os.path.join(zen, 'metadata')), (result, err))
+    check('(SD) files in <save_path>/<ZEN folder name>/metadata (no server folder); nothing written in the ZEN folder',
+          err is None and run_folder == os.path.join(TMP, 'data_sd', os.path.basename(zen), 'metadata')
+          and os.path.isdir(run_folder) and os.listdir(zen) == [], (result, err))
     movies = open(os.path.join(run_folder, 'movie_name.txt')).read().split() if run_folder else []
-    check(f'(SD) HiM_parameters.yml and movie_name.txt in the run folder; names scan_001_RT1_<roi>_ROI ({movies[:1]})',
+    check(f'(SD) HiM_parameters.yml and movie_name.txt in that folder; prefix 002 (1 folder in zen_saving_path before '
+          f'ZEN started + 1), names scan_002_RT1_<roi>_ROI ({movies[:1]})',
           os.path.exists(os.path.join(run_folder, 'HiM_parameters.yml'))
-          and movies == [f'scan_001_RT1_{n[4:]}_ROI' for n in NAMES], movies)
+          and movies == [f'scan_002_RT1_{n[4:]}_ROI' for n in NAMES], movies)
     ph = [m for lvl, m in logs if 'Autofocus check not implemented yet' in m]
     check(f'(SD) autofocus placeholder logged once per run ({N} ROIs)', ph == [
           'Autofocus check not implemented yet (zen_ref_images_path, correlation_threshold)'], ph)

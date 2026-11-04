@@ -565,7 +565,7 @@ def _section_start_roi():
     ZEN_BOX = _short.AutoAnswer('ZEN settings')
     sd_cfg = os.path.join(TMP, 'roi_scan_sd.yaml')
     yaml.safe_dump({'sample_name': 'SDsample', 'save_path': os.path.join(TMP, 'sd_data'), 'roi_list_path': '/fake/rois.json',
-                    'imaging_sequence': [[488, 50.0]]}, open(sd_cfg, 'w'))
+                    'zen_saving_path': ZEN.root, 'imaging_sequence': [[488, 50.0]]}, open(sd_cfg, 'w'))
     for start, n in (('', 3), ('ROI_002', 2)):
         LOGS.clear()
         rec = Rec()
@@ -861,7 +861,7 @@ def _section_data_folder():
     fake TriggerLogic (ZEN ready / done answered at once), the ZEN settings box answered 'Done - continue'.
     Hi-M: the real dummy fluidics, roi and laser modules of dummy_config.cfg. Short settings and test data:
     tests/_short.py (docs/TESTING.md)."""
-    import os, logging, tempfile, threading, weakref, importlib, glob
+    import os, re, logging, tempfile, threading, weakref, importlib, glob
     from datetime import datetime
     from time import monotonic, sleep
 
@@ -936,12 +936,40 @@ def _section_data_folder():
     class LaserControlLogic(_Stand):
         _meta = {'mro': ('LaserControlLogic',)}
 
+    class ZenSim:
+        """Fake ZEN saving folder: when "ready" is raised (the user starts the ZEN experiment), ZEN creates its
+        data folder there - one new folder ('one'), none ('none') or two ('two')."""
+        def __init__(self, root):
+            self.root, self.mode, self.created = root, 'one', []
+            for old in ('2026-11-01_old_experiment', '2026-11-02_old_experiment'):
+                os.makedirs(os.path.join(root, old), exist_ok=True)
+            open(os.path.join(root, 'notes.txt'), 'w').close()  # a file: not counted as a folder
+
+        def ready(self):
+            for _ in range({'one': 1, 'none': 0, 'two': 2}[self.mode]):
+                path = os.path.join(self.root, f'{DAY.replace("_", "-")}_Scan_test_{len(self.created) + 1:02d}')
+                os.makedirs(path)
+                self.created.append(path)
+
+        def tree(self):
+            """Every file and folder under the ZEN saving folder (relative paths)."""
+            return sorted(os.path.relpath(os.path.join(d, n), self.root)
+                          for d, dirs, files in os.walk(self.root) for n in dirs + files)
+
+    ZEN = ZenSim(folder('zen'))
+
     class TriggerLogic(_Stand):
-        """Fake ZEN: every poll answered at once."""
+        """Fake ZEN triggers: every poll answered at once; "ready" makes ZEN create its data folder."""
         _meta = {'mro': ('TriggerLogic',)}
+
+        def __init__(self, rec, zen=None):
+            super().__init__(rec)
+            self.zen = zen if zen is not None else ZEN
 
         def is_triggered(self, name):
             self._rec.rec('is_triggered', name)
+            if name == 'trigger_ZEN_ready':
+                self.zen.ready()
             return True
 
     KEEP = []
@@ -969,7 +997,8 @@ def _section_data_folder():
 
     def scan_yaml(name, **values):
         path = os.path.join(TMP, f'{name}.yaml')
-        content = {'sample_name': 'SDsample', 'roi_list_path': '/fake/rois.json', 'imaging_sequence': [[488, 50.0]]}
+        content = {'sample_name': 'SDsample', 'roi_list_path': '/fake/rois.json', 'imaging_sequence': [[488, 50.0]],
+                   'zen_saving_path': ZEN.root}
         content.update(values)
         yaml.safe_dump(content, open(path, 'w'))
         return path
@@ -1003,25 +1032,42 @@ def _section_data_folder():
     def run_folders(root):
         return sorted(glob.glob(os.path.join(root, DAY, '*')))
 
+    def mirror(root, zen_folder):
+        return os.path.join(root, os.path.basename(zen_folder), 'metadata')
+
     # ------------------------------------------------------------------ (1) ROI scan SD, server folder writable
     server, local = folder('server_1'), folder('local_1')
     cfg = scan_yaml('sd_server', save_path=local, save_network_path=server)
-    for number in ('001', '002'):
+    for run_number in (1, 2):
+        before = len([n for n in os.listdir(ZEN.root) if os.path.isdir(os.path.join(ZEN.root, n))])
+        tree_before = ZEN.tree()
         task, rec = scan_task(rs.RoiScanSDTask, cfg)
         result, err = run(task, {'start_roi': ''})
-        run_folder = os.path.join(server, DAY, f'{number}_Scan_SDsample')
-        expected = [f'scan_{number}_{r[4:]}_ROI' for r in ROIS]
-        check(f'(1 ROI scan SD, server writable, run {number}) run folder <server>/YYYY_MM_DD/{number}_Scan_SDsample '
-              f'with parameters.yml and movie_name.txt; names {expected}; both ROIs imaged',
+        zen_folder = ZEN.created[-1] if ZEN.created else ''
+        run_folder = mirror(server, zen_folder)
+        prefix = str(before + 1).zfill(3)
+        expected = [f'scan_{prefix}_{r[4:]}_ROI' for r in ROIS]
+        check(f'(1 ROI scan SD, server writable, run {run_number}) files in <server>/<ZEN folder name>/metadata: '
+              f'parameters.yml, movie_name.txt, experiment_config.yaml, metadata.yml; prefix {prefix} (folders before '
+              f'+ 1); names {expected}; no HiM_task.log',
               err is None and result.get('directory') == run_folder and result.get('imaged_rois') == ROIS
-              and os.path.exists(os.path.join(run_folder, 'parameters.yml')) and movies(run_folder) == expected
-              and task.prefix == number, (err, result, run_folders(server)))
-    check('(1 ROI scan SD, server writable) nothing in the local folder; only the two run folders in the server day '
-          'folder (no write-test file left); no pop-up, no warning',
-          run_folders(local) == [] and sorted(os.listdir(os.path.join(server, DAY))) == ['001_Scan_SDsample',
-                                                                                        '002_Scan_SDsample']
-          and not server_boxes() and not any(lvl >= logging.WARNING for lvl, _ in LOGS),
-          (run_folders(local), os.listdir(os.path.join(server, DAY)), [m for lvl, m in LOGS if lvl >= logging.WARNING]))
+              and task.prefix == prefix and movies(run_folder) == expected
+              and sorted(os.listdir(run_folder)) == ['experiment_config.yaml', 'metadata.yml', 'movie_name.txt',
+                                                     'parameters.yml'],
+              (err, result, task.prefix, os.listdir(run_folder) if os.path.isdir(run_folder) else None))
+        check(f'(1 ROI scan SD, run {run_number}) nothing created or modified in the ZEN saving folder (only the folder '
+              f'ZEN created, still empty); nothing in the local folder; no pop-up, no warning',
+              ZEN.tree() == sorted(tree_before + [os.path.basename(zen_folder)]) and os.listdir(zen_folder) == []
+              and os.listdir(local) == [] and not server_boxes()
+              and not any(lvl >= logging.WARNING for lvl, _ in LOGS),
+              (ZEN.tree(), os.listdir(local), [m for lvl, m in LOGS if lvl >= logging.WARNING]))
+    # metadata folder already holding files -> metadata_<HHMMSS>
+    other = data_folders.create_mirror_folder(server, zen_folder, task.log)
+    check('(1 create_mirror_folder) existing metadata folder with files -> metadata_<HHMMSS> in the same folder, '
+          'logged; nothing created in the ZEN folder',
+          os.path.dirname(other) == os.path.dirname(run_folder) and re.fullmatch(r'metadata_\d{6}', os.path.basename(other))
+          and os.path.isdir(other) and os.listdir(zen_folder) == []
+          and any('already holds files' in m for _, m in LOGS), other)
 
     # ------------------------------------------------------------------ (2) server folder not writable / missing
     for label, server in (('missing', MISSING), ('not writable', READ_ONLY)):
@@ -1030,7 +1076,7 @@ def _section_data_folder():
         result, err = run(task, {'start_roi': ''})
         boxes = server_boxes()
         warnings = [m for lvl, m in LOGS if lvl == logging.WARNING]
-        run_folder = os.path.join(local, DAY, '001_Scan_SDsample')
+        run_folder = mirror(local, ZEN.created[-1])
         text = f'The server folder {server} is not reachable ('
         tail = f'). The metadata are saved locally in {local}.'
         check(f'(2 server {label}) warning logged and one non-modal warning pop-up with the server folder, the error '
@@ -1038,21 +1084,45 @@ def _section_data_folder():
               any(m.startswith(text) and m.endswith(tail) for m in warnings) and len(boxes) == 1
               and boxes[0].text().startswith(text) and boxes[0].text().endswith(tail) and not boxes[0].isModal()
               and boxes[0].icon() == QtWidgets.QMessageBox.Warning, (warnings, [b.text() for b in boxes]))
-        check(f'(2 server {label}) run folder created locally (YYYY_MM_DD/001_Scan_SDsample), scan runs (both ROIs, '
-              f'names scan_001_<roi>_ROI)',
+        check(f'(2 server {label}) files under <local>/<ZEN folder name>/metadata, scan runs (both ROIs)',
               err is None and result.get('directory') == run_folder and result.get('imaged_rois') == ROIS
-              and movies(run_folder) == [f'scan_001_{r[4:]}_ROI' for r in ROIS], (err, result))
+              and movies(run_folder) == [f'scan_{task.prefix}_{r[4:]}_ROI' for r in ROIS], (err, result))
         close_boxes()
 
     # ------------------------------------------------------------------ (3) save_network_path empty
     local = folder('local_3')
     task, rec = scan_task(rs.RoiScanSDTask, scan_yaml('sd_no_server', save_path=local, save_network_path=''))
     result, err = run(task, {'start_roi': ''})
-    run_folder = os.path.join(local, DAY, '001_Scan_SDsample')
-    check('(3 save_network_path empty) run folder in the local folder, scan runs, no pop-up, no warning',
+    run_folder = mirror(local, ZEN.created[-1])
+    check('(3 save_network_path empty) files under <local>/<ZEN folder name>/metadata, scan runs, no pop-up, no warning',
           err is None and result.get('directory') == run_folder and movies(run_folder) is not None
           and not server_boxes() and not any(lvl >= logging.WARNING for lvl, _ in LOGS),
           (err, result, [m for lvl, m in LOGS if lvl >= logging.WARNING]))
+
+    # ------------------------------------------------------------------ (3b) zen_saving_path missing / not a folder
+    for label, values, fragment in (('missing', {'zen_saving_path': None}, "'zen_saving_path' missing"),
+                                    ('not a folder', {'zen_saving_path': A_FILE}, 'is not an existing folder')):
+        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_zen_{label[:3]}', save_path=folder('local_3b'), **values))
+        result, err = run(task, {'start_roi': ''})
+        check(f'(3b zen_saving_path {label}) error "{fragment}" before any hardware call (no roi / laser / trigger call), '
+              f'cleanup restores nothing',
+              err is not None and fragment in str(err) and rec.calls == []
+              and any('nothing to restore' in m for _, m in LOGS), (err, rec.calls))
+
+    # ------------------------------------------------------------------ (3c) no / two new ZEN folders
+    for mode, fragment in (('none', 'No new file was created by ZEN'), ('two', 'More than one folder were found')):
+        ZEN.mode = mode
+        local = folder(f'local_3c_{mode}')
+        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_zen_{mode}', save_path=local))
+        task._ZEN_FOLDER_ATTEMPTS = 2  # shorter wait for the missing folder (2 attempts, 1 s apart)
+        result, err = run(task, {'start_roi': ''})
+        names = [n for n, _ in rec.calls]
+        check(f'(3c {mode} new ZEN folder) clear error ("{fragment}..."), no ROI imaged, no qudi folder; cleanup as '
+              f'usual (stage back to the first ROI, lasers off, velocity restored, ROI GUI unlocked)',
+              err is not None and fragment in str(err) and 'send_trigger' not in names and os.listdir(local) in ([], [DAY])
+              and 'cleanup finished' in [m for _, m in LOGS] and 'go_to_roi_xy' in names
+              and 'enable_roi_actions' in names and names.count('set_stage_velocity') == 2, (err, names[-6:]))
+    ZEN.mode = 'one'
 
     # ------------------------------------------------------------------ (4) local folder not writable, no server
     for k, (label, local) in enumerate((('under a file', os.path.join(A_FILE, 'local')),
@@ -1116,18 +1186,22 @@ def _section_data_folder():
     server, local = folder('server_5'), folder('local_5')
     ref_images = folder('zen_ref')
     exp = _short.experiment(TMP, 'him_experiment.yaml', 'him_sd', injections_path=inj_path, save_path=local,
-                            save_network_path=server, zen_ref_images_path=ref_images, correlation_threshold=0.6)
+                            save_network_path=server, zen_ref_images_path=ref_images, correlation_threshold=0.6,
+                            zen_saving_path=ZEN.root)
     trigger = TriggerLogic(Rec())
     KEEP.append(trigger)
     result, err = run(him_task(him.HiMSDTask, exp, trigger), timeout=180)
-    run_folder = os.path.join(server, DAY, f'001_HiM_{sample}')
+    run_folder = mirror(server, ZEN.created[-1])
     names = movies(run_folder)
-    check(f'(5 Hi-M SD, 1 probe, 2 ROIs) run folder <server>/YYYY_MM_DD/001_HiM_{sample} with HiM_parameters.yml '
-          f'and movie_name.txt; names scan_001_RT1_<roi>_ROI; nothing in the local folder',
+    prefix = str(len([n for n in os.listdir(ZEN.root) if os.path.isdir(os.path.join(ZEN.root, n))])).zfill(3)
+    check(f'(5 Hi-M SD, 1 probe, 2 ROIs) files in <server>/<ZEN folder name>/metadata (HiM_parameters.yml, '
+          f'movie_name.txt, injections.yml, HiM_task.log); names scan_{prefix}_RT1_<roi>_ROI; nothing in the local '
+          f'folder or the ZEN folder',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == run_folder
-          and os.path.exists(os.path.join(run_folder, 'HiM_parameters.yml'))
-          and names == [f'scan_001_RT1_{r[4:]}_ROI' for r in ROIS] and run_folders(local) == [],
-          (err, result, names))
+          and {'HiM_parameters.yml', 'injections.yml', 'HiM_task.log', 'experiment_config.yaml',
+               'metadata.yml'} <= set(os.listdir(run_folder))
+          and names == [f'scan_{prefix}_RT1_{r[4:]}_ROI' for r in ROIS] and os.listdir(local) == []
+          and os.listdir(ZEN.created[-1]) == [], (err, result, names))
 
     # ------------------------------------------------------------------ (6) dummies with save_path only
     save_path = os.path.join(TMP, 'dummy_data')

@@ -44,7 +44,7 @@ import os
 import yaml
 
 from qudi.core.connector import Connector
-from qudi.tasks.common.data_folders import choose_data_root, create_run_folder
+from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder
 from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
                                             write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
@@ -392,8 +392,9 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     """ROI scan on the spinning disk: one ZEN autofocus block and one ZEN acquisition block per ROI,
     synchronized over DAQ triggers (see SDImagingMixin). trigger_logic is required on this setup.
 
-    Experiment file: save_path (local folder, required) and save_network_path (server folder, optional),
-    as on all setups; zen_saving_path is not read.
+    Experiment file: save_path (local folder, required), save_network_path (server folder, optional) and
+    zen_saving_path (required: the folder where ZEN creates the data folder of the experiment; it must be an
+    existing folder that can be listed - checked before any hardware call). zen_saving_path is only read.
 
     ZEN settings check: before any hardware call, a modal box 'ZEN settings' (SDImagingMixin
     _confirm_zen_settings, shared with the Hi-M task) lists the ZEN settings to check in block 7 - the channels to select (the
@@ -402,10 +403,15 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     'Done - continue' starts the scan, Cancel ends the task without touching the hardware. Both values
     are also logged. Then the progress shows 'Waiting for ZEN "ready"' until ZEN is ready.
 
-    Data folder: created by qudi as on all setups (RoiScanTaskBase): <root>/YYYY_MM_DD/
-    NNN_Scan_<sample>[_DAPI|_RNA] on the server folder or in the local folder, with parameters.yml and
-    movie_name.txt; movie names scan_<NNN>_<roi number>_ROI (scan_<NNN>_DAPI_... / scan_<NNN>_RNA_...).
-    The folder created by ZEN is not used.
+    Data folder: named after the folder ZEN creates for the experiment. The folders of zen_saving_path
+    are listed before waiting for ZEN "ready"; once ZEN is ready, the single new folder is the ZEN data
+    folder (SDImagingMixin, shared with the Hi-M task; error if there is none or several, then the cleanup
+    runs as usual). qudi creates <root>/<ZEN folder name>/metadata (create_mirror_folder;
+    metadata_<HHMMSS> if that folder already holds files), <root> being save_network_path when it is
+    reachable, otherwise save_path (choose_data_root, before any hardware call), and writes there
+    parameters.yml, movie_name.txt, experiment_config.yaml and metadata.yml. Nothing is written in the ZEN
+    folder. self.prefix is the number of folders that were in zen_saving_path before ZEN started + 1, on 3
+    digits; movie names scan_<prefix>_<roi number>_ROI (scan_<prefix>_DAPI_... / scan_<prefix>_RNA_...).
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -429,15 +435,31 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
         run. True: continue, False: cancel."""
         return self._confirm_zen_settings(len(self._scan_rois))
 
+    def _read_data_location(self, params) -> None:
+        """save_path (required), save_network_path (optional) as on all setups, plus zen_saving_path (required,
+        an existing folder that can be listed)."""
+        super()._read_data_location(params)
+        self.zen_saving_path = params.get('zen_saving_path')
+        self._zen_folders_before = set()
+        self._zen_directory = None
+        problems = self._zen_saving_path_problems()
+        if problems:
+            raise RuntimeError('; '.join(problems) + f' (experiment file {self.user_config_path}).')
+
     def _prepare_imaging(self) -> None:
-        """Show 'Waiting for ZEN "ready"' in the progress line and run the SD imaging preparation
-        (SDImagingMixin: laser source, wait for ZEN "ready")."""
-        # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-        # self._zen_folders_before = self._zen_folders()
+        """List the folders of zen_saving_path, show 'Waiting for ZEN "ready"' in the progress line, run the SD
+        imaging preparation (SDImagingMixin: laser source, wait for ZEN "ready"), then find the new folder
+        created by ZEN."""
+        self._zen_folders_before = self._zen_folders()
         self._report_progress(f'0/{len(self._scan_rois)}', 'Waiting for ZEN "ready"', log=False)
         super()._prepare_imaging()
-        # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-        # self._zen_directory = self._find_new_zen_folder(self._zen_folders_before)
+        self._zen_directory = self._find_new_zen_folder(self._zen_folders_before)
+
+    def _create_data_folder(self) -> str:
+        """<root>/<ZEN folder name>/metadata (create_mirror_folder); self.prefix = folders in zen_saving_path
+        before ZEN started + 1, on 3 digits."""
+        self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
+        return create_mirror_folder(self._data_root, self._zen_directory, self.log)
 
 
 class RoiScanRAMMTask(RAMMImagingMixin, RoiScanTaskBase):

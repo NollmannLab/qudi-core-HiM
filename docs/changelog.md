@@ -10,6 +10,36 @@ Last updated: 2026-11-04
 
 #### Changed
 
+- Spinning disk (ROI scan, Hi-M): qudi's files go to a folder named after the data folder ZEN creates
+  (2026-11-04).
+  - `common/imaging_steps.py`, `SDImagingMixin`: ZEN folder detection on again, read only
+    (`_zen_folders`, `_find_new_zen_folder`: 10 attempts 1 s apart, errors for no / several new folders,
+    `_zen_wait`), new `_zen_saving_path_problems` (missing, not a folder, cannot be listed). The former
+    `_create_zen_metadata_folder` (wrote in the ZEN folder) is not restored. The "not used" comments are
+    removed.
+  - `common/data_folders.py`: `create_mirror_folder(root, zen_folder)` -> `<root>/<ZEN folder name>/metadata`
+    (`metadata_<HHMMSS>` when that folder already holds files).
+  - `RoiScanSDTask`, `HiMSDTask`: `zen_saving_path` required again (checked before any hardware call),
+    `save_path` required, `save_network_path` optional; root from `choose_data_root` as before; folders of
+    `zen_saving_path` listed before the ZEN ready wait, new folder found after it; files in the mirror
+    folder; prefix = folders in `zen_saving_path` before ZEN started + 1. Nothing is written in the ZEN
+    folder. Hi-M SD also copies the injections file as `injections.yml`. Dummy and RAMM unchanged.
+  - Hi-M log file (`HiMTaskBase`, all setups): records of the run (`qudi` logger: task and modules) kept in
+    memory from the start of `_run` (first line 'Hi-M task started - experiment file ...'), written to
+    `<run folder>/HiM_task.log` once the folder exists ('time - level - logger - message', INFO), closed
+    by `_cleanup` after its last line 'Hi-M task ended ...' (also after an error or an interrupt; dropped
+    without a run folder).
+  - Experiment definitions `spinning_disk/roi_multicolour_scan.yaml`, `spinning_disk/him_epi.yaml`:
+    `zen_saving_path` shown and required again.
+  - Tests: `test_roi_scan.py` run folder section (fake ZEN folder; mirror folder, server unreachable,
+    `zen_saving_path` missing / not a folder, no / two new ZEN folders, `create_mirror_folder` with an
+    existing metadata folder); `test_him.py` block `sd_zen_folder` (mirror folder, `HiM_task.log`,
+    errors, interrupt, dummy log file), `sd_z_planes` and SD checks adapted.
+
+### Tasks
+
+#### Changed
+
 - Hi-M on the spinning disk: the number of z planes is no longer used (2026-11-04).
   - `him.py`: `_EXPERIMENT_KEYS` documented as the required keys a setup subclass may override;
     `num_z_planes` is read, written in `HiM_parameters.yml` ('number of z planes') and passed to

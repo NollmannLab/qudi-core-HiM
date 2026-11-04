@@ -62,8 +62,9 @@ One suite per component in `tests/`, one section per feature inside a suite (a
 - `test_fluidics.py` - fluidics task: options, sequence, interrupt, validation and hardware
   errors, needle position, probe valve read from the injections file.
 - `test_him.py` - Hi-M task: run files (experiment copy, metadata.yml), number of z planes (not
-  used on the SD, still required by the dummy; also the configurator field) - the words `metadata`
-  / `sd_z_planes` run only these blocks -, cycles, progress, interrupt, errors, needle modes, SD (fake ZEN),
+  used on the SD, still required by the dummy; also the configurator field), SD folder named after
+  the ZEN data folder and HiM_task.log - the words `metadata` / `sd_z_planes` / `sd_zen_folder` run
+  only these blocks -, cycles, progress, interrupt, errors, needle modes, SD (fake ZEN),
   RAMM placeholder, probe valve read from the injections file.
 
 Rule: a change adds or adapts cases in the existing suite of the component it touches; a new file

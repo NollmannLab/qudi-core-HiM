@@ -35,15 +35,18 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 import copy
+import logging
+import logging.handlers
 import math
 import os
+import shutil
 from time import monotonic
 
 import yaml
 from qtpy import QtCore
 
 from qudi.core.connector import Connector
-from qudi.tasks.common.data_folders import choose_data_root, create_run_folder
+from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
 from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
                                             set_metadata_field, write_metadata)
@@ -135,6 +138,12 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     ends the imaging, moves the stage back to the first ROI, restores the stage velocity and
     unlocks the GUIs.
 
+    Log file (all setups): the log records of the run (the task and every qudi module: fluidics, robot, ROI,
+    lasers, triggers) are kept in memory from the start of _run; as soon as the run folder exists they are
+    written to <run folder>/HiM_task.log ('time - level - logger - message', level INFO), then the records go
+    straight to the file. _cleanup writes the line 'Hi-M task ended ...' last and closes the file (also after an
+    error or an interrupt); without a run folder the records kept in memory are dropped.
+
     Hi-M hooks (overridden by the setup subclasses):
         _read_microscope_parameters(params)  extra keys of the experiment YAML
         _check_microscope() -> list          problems found (checked with the other problems)
@@ -177,6 +186,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         # connector fails
         self._hardware_touched = False
         self._gui_locked = False
+        self._log_buffer = None        # records of the run kept until HiM_task.log is opened
+        self._log_file_handler = None  # HiM_task.log
         self._arrival_slot = None
         self._needle_arrived_at = None
         self._needle_mode = None
@@ -209,6 +220,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # ==============================================================================================
 
     def _run(self) -> dict:
+        self._start_run_log()
+        self.log.info(f'Hi-M task started - experiment file {self.user_config_path}')
         self._check_options()
 
         # 1. parameters: experiment YAML and injections file, no hardware call
@@ -314,6 +327,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         # 5. imaging preparation, data folder, parameters file
         self._prepare_imaging()
         self.directory = self._create_data_folder()
+        self._open_run_log()
         self._save_parameters(params, injections)
         self._save_run_files(injections)
 
@@ -404,6 +418,59 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
         self.log.info(f'Hi-M task ended after {getattr(self, "_cycles_done", 0)}/{len(getattr(self, "_cycles", []))} '
                       f'cycle(s).')
+        self._close_run_log()
+
+    # ==============================================================================================
+    # Log file of the run (HiM_task.log)
+    # ==============================================================================================
+
+    _LOG_FILE_NAME = 'HiM_task.log'
+    _LOG_FORMAT = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+    _LOG_BUFFER_CAPACITY = 100000  # records kept in memory before the run folder exists
+
+    @staticmethod
+    def _qudi_logger():
+        """Common parent of the qudi module loggers (qudi.core.logger.get_logger: 'qudi.<module>.<Class>')."""
+        return logging.getLogger('qudi')
+
+    def _start_run_log(self) -> None:
+        """Keep the log records of the run (INFO and above) in memory until HiM_task.log is opened."""
+        self._close_run_log()
+        buffer = logging.handlers.MemoryHandler(self._LOG_BUFFER_CAPACITY, flushLevel=logging.CRITICAL + 1,
+                                                flushOnClose=False)
+        buffer.setLevel(logging.INFO)
+        self._qudi_logger().addHandler(buffer)
+        self._log_buffer = buffer
+
+    def _open_run_log(self) -> None:
+        """Open <self.directory>/HiM_task.log, write the records kept in memory, then log straight to the file."""
+        handler = logging.FileHandler(os.path.join(self.directory, self._LOG_FILE_NAME), encoding='utf-8')
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter(self._LOG_FORMAT))
+        buffer, self._log_buffer = self._log_buffer, None
+        if buffer is not None:
+            self._qudi_logger().removeHandler(buffer)
+            buffer.setTarget(handler)
+            buffer.flush()
+            buffer.close()
+        self._qudi_logger().addHandler(handler)
+        self._log_file_handler = handler
+
+    def _close_run_log(self) -> None:
+        """Remove and close the log handlers of the run; records still in memory (no run folder) are dropped.
+        Never raises."""
+        for name in ('_log_buffer', '_log_file_handler'):
+            handler = getattr(self, name, None)
+            setattr(self, name, None)
+            if handler is None:
+                continue
+            try:
+                self._qudi_logger().removeHandler(handler)
+                if isinstance(handler, logging.handlers.MemoryHandler):
+                    handler.buffer.clear()
+                handler.close()
+            except Exception as err:
+                self.log.error(f'Cleanup: could not close the log of the run: {err}')
 
     # ==============================================================================================
     # Cycle steps
@@ -666,8 +733,10 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     required. Valve layout of FluidicsSDTask.
 
     Experiment YAML: the keys of HiMTaskBase except num_z_planes (not required and not read: the z-stack is
-    set in ZEN; an old file that still has it is accepted, the value is ignored), plus zen_ref_images_path
-    (reference images of the autofocus) and correlation_threshold; zen_saving_path is not read. Without
+    set in ZEN; an old file that still has it is accepted, the value is ignored), plus zen_saving_path
+    (required: the folder where ZEN creates the data folder of the experiment, an existing folder that can be
+    listed; only read), zen_ref_images_path (reference images of the autofocus) and correlation_threshold;
+    all checked before any hardware call. Without
     num_z_planes, HiM_parameters.yml has no 'number of z planes' entry and metadata.yml keeps the template's
     number_z_planes field.
 
@@ -678,10 +747,15 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     continue' starts the experiment, Cancel ends the task without touching the hardware (result
     {'cancelled': True, 'cycles_done': 0}). Both values are also logged.
 
-    Data
-    folder created by qudi as on all setups (HiMTaskBase: NNN_HiM_<sample_name> on the server folder or
-    in the local folder, the folder created by ZEN is not used); file names
-    scan_<NNN>_<RT>_<roi number>_ROI.
+    Data folder: named after the folder ZEN creates for the experiment. The folders of zen_saving_path are
+    listed before waiting for ZEN "ready"; once ZEN is ready, the single new folder is the ZEN data folder
+    (SDImagingMixin, shared with the ROI scan; error if there is none or several, then the cleanup runs as
+    usual). qudi creates <root>/<ZEN folder name>/metadata (create_mirror_folder; metadata_<HHMMSS> if that
+    folder already holds files), <root> being save_network_path when it is reachable, otherwise save_path
+    (choose_data_root, before any hardware call), and writes there HiM_parameters.yml, movie_name.txt,
+    experiment_config.yaml, injections.yml (byte copy of the injections file), metadata.yml and
+    HiM_task.log. Nothing is written in the ZEN folder. self.prefix is the number of folders that were in
+    zen_saving_path before ZEN started + 1, on 3 digits; file names scan_<prefix>_<RT>_<roi number>_ROI.
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -712,6 +786,9 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     cleanup_valve_positions = FluidicsSDTask.cleanup_valve_positions
 
     def _read_microscope_parameters(self, params) -> None:
+        self.zen_saving_path = params.get('zen_saving_path')
+        self._zen_folders_before = set()
+        self._zen_directory = None
         self.zen_ref_images_path = params.get('zen_ref_images_path')
         self.correlation_threshold = params.get('correlation_threshold')
         self._autofocus_check_logged = False
@@ -722,7 +799,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         return self._confirm_zen_settings(len(self._cycles) * len(self.roi_names))
 
     def _check_microscope(self) -> list:
-        problems = []
+        problems = self._zen_saving_path_problems()
         for key in ('zen_ref_images_path',):
             path = getattr(self, key)
             if not path:
@@ -732,12 +809,22 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         return problems
 
     def _prepare_imaging(self) -> None:
-        """SD imaging preparation (laser source, wait for ZEN "ready")."""
-        # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-        # folders_before = self._zen_folders()
+        """List the folders of zen_saving_path, SD imaging preparation (laser source, wait for ZEN "ready"),
+        then the new folder created by ZEN."""
+        self._zen_folders_before = self._zen_folders()
         super()._prepare_imaging()
-        # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-        # self._zen_directory = self._find_new_zen_folder(folders_before)
+        self._zen_directory = self._find_new_zen_folder(self._zen_folders_before)
+
+    def _create_data_folder(self) -> str:
+        """<root>/<ZEN folder name>/metadata (create_mirror_folder); self.prefix = folders in zen_saving_path
+        before ZEN started + 1, on 3 digits."""
+        self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
+        return create_mirror_folder(self._data_root, self._zen_directory, self.log)
+
+    def _save_run_files(self, injections) -> None:
+        """Run files of all setups plus injections.yml (byte copy of the injections file)."""
+        super()._save_run_files(injections)
+        shutil.copyfile(self.injections_path, os.path.join(self.directory, 'injections.yml'))
 
     def _check_autofocus(self, roi_name: str) -> None:
         """PLACEHOLDER - logs once per run that the check is not implemented.

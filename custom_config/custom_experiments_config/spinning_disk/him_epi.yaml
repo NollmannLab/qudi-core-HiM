@@ -29,13 +29,12 @@ fields:
     required: true
     default: ""
 
-  # not used: the run folder is created by qudi
+  # folder where ZEN creates the data folder of the experiment (only read by qudi)
   zen_saving_path:
-    visible: false
-    required: false
+    required: true
     default: ""
 
-  # run folder created by qudi: on save_network_path (server) when it is writable, otherwise in save_path
+  # qudi's files in <save_network_path (server) when reachable, otherwise save_path>/<ZEN folder name>/metadata
   save_path:
     required: true
     default_from: default_path_imagedata
