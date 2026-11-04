@@ -53,6 +53,11 @@ fields:
     required: false
     default: ""
 
+  # autofocus check: ZNCC threshold (-1..1) and minimum fraction (0..1) of ROIs per cycle that must pass
   correlation_threshold:
     required: true
     default: 0.6
+
+  autofocus_min_fraction:
+    required: true
+    default: 0.9

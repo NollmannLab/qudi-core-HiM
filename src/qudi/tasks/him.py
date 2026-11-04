@@ -35,17 +35,22 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 import copy
+import csv
 import logging
 import logging.handlers
 import math
 import os
 import shutil
+from glob import glob
 from time import monotonic
+
+import numpy as np
 
 import yaml
 from qtpy import QtCore
 
 from qudi.core.connector import Connector
+from qudi.tasks.common import autofocus_check
 from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
 from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
@@ -735,8 +740,8 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     Experiment YAML: the keys of HiMTaskBase except num_z_planes (not required and not read: the z-stack is
     set in ZEN; an old file that still has it is accepted, the value is ignored), plus zen_saving_path
     (required: the folder where ZEN creates the data folder of the experiment, an existing folder that can be
-    listed; only read), zen_ref_images_path (reference images of the autofocus) and correlation_threshold;
-    all checked before any hardware call. Without
+    listed; only read), zen_ref_images_path (reference images of the autofocus), correlation_threshold (ZNCC
+    threshold, -1..1) and autofocus_min_fraction (0..1); all checked before any hardware call. Without
     num_z_planes, HiM_parameters.yml has no 'number of z planes' entry and metadata.yml keeps the template's
     number_z_planes field.
 
@@ -756,6 +761,26 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     experiment_config.yaml, injections.yml (byte copy of the injections file), metadata.yml and
     HiM_task.log. Nothing is written in the ZEN folder. self.prefix is the number of folders that were in
     zen_saving_path before ZEN started + 1, on 3 digits; file names scan_<prefix>_<RT>_<roi number>_ROI.
+
+    Autofocus check (common/autofocus_check.py): after the ZEN autofocus block of each ROI, the brightfield
+    image ZEN saves (*_AcquisitionBlock1_pt*.czi in the ZEN data folder, first plane) is compared with the
+    reference image of that ROI by zero-normalised cross-correlation (ZNCC, a Pearson coefficient at every XY
+    shift, independent of the intensity and tolerant to drift).
+      - Before any hardware call: the references are read from zen_ref_images_path (autofocus_reference.npy
+        if present, otherwise the *.czi in acquisition order); their number must equal the number of ROIs
+        and they must all have the same shape. correlation_threshold must be in [-1, 1] (values tuned for
+        the score of the former qudi-HiM task do not apply), autofocus_min_fraction in [0, 1].
+      - Once the ZEN folder is known: copy of the references as autofocus_reference.npy in the metadata
+        folder, list of the autofocus images already in the ZEN folder.
+      - Each check: wait (poll every 0.5 s, no timeout, interruptible) until exactly one new autofocus image
+        appears; score and shift (px) logged. Pass (score >= correlation_threshold): the image becomes the
+        reference of the ROI (autofocus_reference.npy saved again). Fail: the reference is kept, warning
+        (and a second one if the ROI already failed in the previous cycle).
+      - Abort: as soon as (ROIs - failures of the cycle) / ROIs < autofocus_min_fraction, an error gives the
+        counts and the experiment stops (error, cleanup as usual). The counter restarts at each cycle.
+      - Files (metadata folder): autofocus_scores.csv (one row per check, written as the run goes),
+        reference_images_<RT>.npy (end of each cycle), correlation.npy (cycles x ROIs, written by the
+        cleanup; NaN for the checks not done).
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -791,7 +816,15 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self._zen_directory = None
         self.zen_ref_images_path = params.get('zen_ref_images_path')
         self.correlation_threshold = params.get('correlation_threshold')
-        self._autofocus_check_logged = False
+        self.autofocus_min_fraction = params.get('autofocus_min_fraction')
+        self._af_refs = None           # reference image of each ROI (n_rois, H, W)
+        self._af_seen = set()          # autofocus images already in the ZEN folder
+        self._af_scores = None         # correlation.npy: cycles x ROIs
+        self._af_failures = 0          # failed checks in the current cycle
+        self._af_failed_rois = set()   # ROIs that failed in the current cycle
+        self._af_failed_before = set()  # ROIs that failed in the previous cycle
+        self._af_passed = 0            # passed checks in the current cycle
+        self._af_rt = None             # probe of the current cycle
 
     def _confirm_before_start(self) -> bool:
         """ZEN settings box (SDImagingMixin._confirm_zen_settings) with loops = number of cycles x number of
@@ -806,6 +839,24 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
                 problems.append(f'experiment file: {key!r} missing')
             elif not os.path.isdir(path):
                 problems.append(f'{key} {path} is not an existing folder')
+        # autofocus check settings
+        for key, low, high in (('correlation_threshold', -1.0, 1.0), ('autofocus_min_fraction', 0.0, 1.0)):
+            value = getattr(self, key)
+            if value is None:
+                problems.append(f'experiment file: {key!r} missing')
+            elif isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+                problems.append(f'{key} must be a number between {low:g} and {high:g} (got {value!r})')
+        # reference images: one per ROI, all of the same shape
+        if self.zen_ref_images_path and os.path.isdir(self.zen_ref_images_path) and self.roi_names:
+            try:
+                self._af_refs = autofocus_check.load_reference_images(self.zen_ref_images_path)
+            except Exception as err:
+                problems.append(f'autofocus reference images: {err}')
+            else:
+                if len(self._af_refs) != len(self.roi_names):
+                    problems.append(f'autofocus reference images: {len(self._af_refs)} reference image(s) in '
+                                    f'{self.zen_ref_images_path} for {len(self.roi_names)} ROI(s) - one reference '
+                                    f'per ROI is required')
         return problems
 
     def _prepare_imaging(self) -> None:
@@ -817,32 +868,109 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
 
     def _create_data_folder(self) -> str:
         """<root>/<ZEN folder name>/metadata (create_mirror_folder); self.prefix = folders in zen_saving_path
-        before ZEN started + 1, on 3 digits."""
+        before ZEN started + 1, on 3 digits. Then the autofocus check files: copy of the references, list of the
+        autofocus images already in the ZEN folder, empty score table."""
         self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
-        return create_mirror_folder(self._data_root, self._zen_directory, self.log)
+        directory = create_mirror_folder(self._data_root, self._zen_directory, self.log)
+        np.save(os.path.join(directory, autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
+        self._af_seen = set(self._autofocus_images())
+        self._af_scores = np.full((len(self._cycles), len(self.roi_names)), np.nan)
+        with open(os.path.join(directory, self._AF_CSV), 'w', newline='') as f:
+            csv.writer(f).writerow(self._AF_CSV_COLUMNS)
+        return directory
 
     def _save_run_files(self, injections) -> None:
         """Run files of all setups plus injections.yml (byte copy of the injections file)."""
         super()._save_run_files(injections)
         shutil.copyfile(self.injections_path, os.path.join(self.directory, 'injections.yml'))
 
-    def _check_autofocus(self, roi_name: str) -> None:
-        """PLACEHOLDER - logs once per run that the check is not implemented.
+    # ----------------------------------------------------------------------------------------------
+    # Autofocus check
+    # ----------------------------------------------------------------------------------------------
 
-        To do (legacy HiM_imaging_SD.py, check_focus / init_autofocus_safety):
-          - at start, load the reference autofocus images from zen_ref_images_path
-            (autofocus_reference.npy, or the czi images sorted in acquisition order);
-          - after the ZEN autofocus block, wait for the new autofocus image saved by ZEN in the ZEN
-            folder (*_AcquisitionBlock1_pt*.czi);
-          - compute the correlation score between this image and the reference image of this ROI;
-          - score below correlation_threshold: a warning the first time, stop the experiment if it
-            happens twice in a row; otherwise the new image replaces the reference of this ROI;
-          - save the scores (correlation.npy) and the reference images (autofocus_reference.npy,
-            reference_images_<RT>.npy) in the metadata folder.
-        """
-        if not self._autofocus_check_logged:
-            self._autofocus_check_logged = True
-            self.log.warning('Autofocus check not implemented yet (zen_ref_images_path, correlation_threshold)')
+    _AF_CSV = 'autofocus_scores.csv'
+    _AF_CSV_COLUMNS = ('cycle', 'RT', 'roi', 'score', 'shift_y_px', 'shift_x_px', 'passed')
+    _AF_POLL_S = 0.5  # poll interval while waiting for the new autofocus image
+
+    def _autofocus_images(self) -> list:
+        """Autofocus images (*_AcquisitionBlock1_pt*.czi) of the ZEN data folder, recursive search."""
+        return glob(os.path.join(self._zen_directory, '**', autofocus_check.AUTOFOCUS_IMAGE_PATTERN), recursive=True)
+
+    def _wait_for_autofocus_image(self) -> str:
+        """Wait until exactly one new autofocus image appears in the ZEN folder (poll every 0.5 s, no timeout,
+        interruptible); returns its path. Several new files: ZEN is still writing (temporary file)."""
+        while True:
+            self._check_interrupt()
+            current = self._autofocus_images()
+            new = sorted(set(current) - self._af_seen)
+            if len(new) == 1:
+                self._af_seen = set(current)
+                return new[0]
+            self._zen_wait(self._AF_POLL_S)
+
+    def _imaging(self, label, rt) -> None:
+        """Imaging of the cycle between the start and the end of its autofocus checks."""
+        self._start_autofocus_cycle(rt)
+        super()._imaging(label, rt)
+        self._end_autofocus_cycle(rt)
+
+    def _start_autofocus_cycle(self, rt) -> None:
+        """Counters of the autofocus checks reset at the start of each cycle."""
+        self._af_rt, self._af_failures, self._af_passed = rt, 0, 0
+        self._af_failed_before, self._af_failed_rois = self._af_failed_rois, set()
+
+    def _end_autofocus_cycle(self, rt) -> None:
+        """References at the end of the cycle (reference_images_<RT>.npy) and fraction of passed checks."""
+        np.save(os.path.join(self.directory, f'reference_images_{rt}.npy'), self._af_refs)
+        n = len(self.roi_names)
+        self.log.info(f'Autofocus check {rt}: {self._af_passed}/{n} ROI(s) passed ({self._af_passed / n:.0%})')
+
+    def _check_autofocus(self, roi_name: str) -> None:
+        """Compare the image ZEN saved at the end of its autofocus block with the reference of roi_name (ZNCC,
+        common/autofocus_check.py); see the class docstring for pass / fail and the abort rule."""
+        cycle, index, n = self._cycles_done, self.roi_names.index(roi_name), len(self.roi_names)
+        # wait for the new autofocus image, read its first plane
+        image = autofocus_check.read_autofocus_image(self._wait_for_autofocus_image())
+        # score and shift against the reference of this ROI
+        score, shift_y, shift_x = autofocus_check.autofocus_score(self._af_refs[index], image)
+        passed = score >= self.correlation_threshold
+        self._af_scores[cycle, index] = score
+        self.log.info(f'Autofocus check cycle {cycle + 1}/{len(self._cycles)} - {self._af_rt} - {roi_name}: score '
+                      f'{score:.3f}, shift (y, x) = ({shift_y}, {shift_x}) px - {"pass" if passed else "FAIL"}')
+        # one row per check, written at once (kept after an abort)
+        with open(os.path.join(self.directory, self._AF_CSV), 'a', newline='') as f:
+            csv.writer(f).writerow((cycle + 1, self._af_rt, roi_name, f'{score:.6f}', shift_y, shift_x, passed))
+        if passed:
+            # pass: the new image becomes the reference of this ROI
+            self._af_passed += 1
+            self._af_refs[index] = image
+            np.save(os.path.join(self.directory, autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
+            return
+        # fail: reference kept, warnings
+        self._af_failures += 1
+        self._af_failed_rois.add(roi_name)
+        self.log.warning(f'Autofocus check failed for {roi_name} (score {score:.3f} < threshold '
+                         f'{self.correlation_threshold})')
+        if roi_name in self._af_failed_before:
+            self.log.warning(f'Autofocus check failed for {roi_name} in the previous cycle too')
+        # abort as soon as the minimum fraction of passed ROIs can no longer be reached in this cycle
+        if (n - self._af_failures) / n < self.autofocus_min_fraction:
+            message = (f'Autofocus check: {self._af_failures} of {n} ROI(s) failed in cycle {cycle + 1} '
+                       f'({self._af_rt}) - at most {(n - self._af_failures) / n:.0%} can pass, below the minimum '
+                       f'fraction {self.autofocus_min_fraction:.0%}. The Hi-M experiment is aborted.')
+            self.log.error(message)
+            # TODO: email alert to the user (legacy send_alert_email), not migrated yet
+            raise RuntimeError(message)
+
+    def _cleanup(self) -> None:
+        """correlation.npy (cycles x ROIs, NaN for the checks not done) in the metadata folder, then the cleanup of
+        all setups."""
+        if getattr(self, '_af_scores', None) is not None and getattr(self, 'directory', None):
+            try:
+                np.save(os.path.join(self.directory, 'correlation.npy'), self._af_scores)
+            except Exception as err:
+                self.log.error(f'Cleanup: could not save correlation.npy: {err}')
+        super()._cleanup()
 
 
 class HiMRAMMTask(RAMMImagingMixin, HiMTaskBase):

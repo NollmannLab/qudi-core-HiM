@@ -8,6 +8,36 @@ Last updated: 2026-11-04
 
 ### Tasks
 
+#### Added
+
+- Hi-M on the spinning disk: autofocus quality check (2026-11-04).
+  - New `src/qudi/tasks/common/autofocus_check.py` (numpy / scipy only): `load_reference_images`
+    (autofocus_reference.npy, otherwise the *.czi in acquisition order - legacy rule),
+    `read_autofocus_image` (first plane of a .czi, czifile imported when needed), `sort_czi_paths`,
+    `preprocess` (binning by `BIN_FACTOR` = 2, minus gaussian blur `BACKGROUND_SIGMA` = 10) and
+    `autofocus_score(ref, new) -> (score, shift_y, shift_x)`: zero-normalised cross-correlation (ZNCC,
+    Pearson at every XY shift, FFT + integral images, same definition as skimage `match_template`) of the
+    central `TEMPLATE_FRACTION` (500/1024: legacy crop [262:762] of a 1024 px binned image) of the
+    reference over the new image; shift in original pixels; shapes from the images.
+  - `HiMSDTask`: references read and checked before any hardware call (one per ROI, same shape),
+    `correlation_threshold` in [-1, 1], new experiment key `autofocus_min_fraction` in [0, 1] (checked with the
+    other problems); copy `autofocus_reference.npy` in the metadata folder; `_check_autofocus`: wait for the
+    single new `*_AcquisitionBlock1_pt*.czi` (0.5 s polling, no timeout, interruptible), score / shift logged
+    per ROI, pass -> new reference, fail -> warning (+ one if the ROI failed in the previous cycle), abort as
+    soon as the minimum fraction of passed ROIs of the cycle can no longer be reached (error, cleanup; email
+    alert left as TODO); `reference_images_<RT>.npy` and the fraction per cycle; `autofocus_scores.csv`
+    (one row per check) and `correlation.npy` (cycles x ROIs, NaN for the checks not done, in the cleanup).
+  - Experiment configurator: `autofocus_min_fraction` (Min_fraction_label / Zen_min_fraction_DSpinBox) wired
+    as `correlation_threshold` (FIELD_SECTIONS, FIELD_WIDGETS, ZEN section, form refresh, logic
+    `update_autofocus_min_fraction`); tooltips of both settings; `spinning_disk/him_epi.yaml`:
+    `autofocus_min_fraction` (required, default 0.9).
+  - New `src/qudi/util/autofocus_calibration.py`: replay of the check on a past ZEN experiment (CSV with the
+    columns of autofocus_scores.csv, summary, optional PNG) to choose `correlation_threshold`.
+  - Tests (`tests/test_him.py`, block `autofocus`; SD runs of `sd_zen_folder` and of the existing SD cases
+    with references and fake autofocus images, `tests/_short.py` helpers).
+
+### Tasks
+
 #### Changed
 
 - Spinning disk (ROI scan, Hi-M): qudi's files go to a folder named after the data folder ZEN creates

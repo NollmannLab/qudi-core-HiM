@@ -197,6 +197,7 @@ class ExpConfiguratorGUI(GuiBase):
 
         "zen_ref_images_path": "zen_security",
         "correlation_threshold": "zen_security",
+        "autofocus_min_fraction": "zen_security",
         "zen_saving_path": "zen_security",
 
         "galvo_start": "galvo",
@@ -352,6 +353,11 @@ class ExpConfiguratorGUI(GuiBase):
             "Zen_correlation_DSpinBox",
         ),
 
+        "autofocus_min_fraction": (
+            "Min_fraction_label",
+            "Zen_min_fraction_DSpinBox",
+        ),
+
         "galvo_start": (
             "galvo_start_Label",
             "galvo_start_DSpinBox",
@@ -470,6 +476,17 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.reference_images_lineEdit.textChanged.connect(self._exp_logic.update_zen_ref_images_path)
         self._mw.Zen_saving_folder_lineEdit.textChanged.connect(self._exp_logic.update_zen_saving_path)
         self._mw.Zen_correlation_DSpinBox.valueChanged.connect(self._exp_logic.update_correlation_threshold)
+        self._mw.Zen_min_fraction_DSpinBox.valueChanged.connect(self._exp_logic.update_autofocus_min_fraction)
+        # hints of the autofocus check settings (Hi-M on the spinning disk, tasks/common/autofocus_check.py)
+        correlation_hint = ('Autofocus check: threshold of the ZNCC score (Pearson coefficient between -1 and 1) of '
+                            'the new autofocus image against the reference of the ROI. Values tuned for the score '
+                            'of the former qudi-HiM task do not apply.')
+        fraction_hint = ('Autofocus check: minimum fraction (0-1) of the ROIs of a cycle whose check must pass; the '
+                         'experiment stops as soon as it can no longer be reached.')
+        for widget in (self._mw.Correlation_threshold_Label, self._mw.Zen_correlation_DSpinBox):
+            widget.setToolTip(correlation_hint)
+        for widget in (self._mw.Min_fraction_label, self._mw.Zen_min_fraction_DSpinBox):
+            widget.setToolTip(fraction_hint)
         self._mw.illumination_time_DSpinBox.valueChanged.connect(self._exp_logic.update_illumination_time)
         self._mw.num_iterations_SpinBox.valueChanged.connect(self._exp_logic.update_num_iterations)
         self._mw.time_step_SpinBox.valueChanged.connect(self._exp_logic.update_time_step)
@@ -907,14 +924,16 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.load_dz_calibration_pushButton.setVisible(visible)
 
     def set_visibility_ZEN_security_settings(self, visible):
-        """Show or hide the ZEN section: header, autofocus reference images, correlation threshold
-        and ZEN saving folder."""
+        """Show or hide the ZEN section: header, autofocus reference images, correlation threshold, minimum
+        fraction of in-focus ROIs and ZEN saving folder."""
         self._mw.zen_settings_Label.setVisible(visible)
         self._mw.reference_image_folder_Label.setVisible(visible)
         self._mw.reference_images_lineEdit.setVisible(visible)
         self._mw.reference_images_pushButton.setVisible(visible)
         self._mw.Correlation_threshold_Label.setVisible(visible)
         self._mw.Zen_correlation_DSpinBox.setVisible(visible)
+        self._mw.Min_fraction_label.setVisible(visible)
+        self._mw.Zen_min_fraction_DSpinBox.setVisible(visible)
         self._mw.Zen_saving_folder_Label.setVisible(visible)
         self._mw.Zen_saving_folder_lineEdit.setVisible(visible)
         self._mw.Zen_saving_folder_pushButton.setVisible(visible)
@@ -1137,6 +1156,7 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.axial_calibration_path_lineEdit.setText(self._exp_logic.config_dict.get('axial_calibration_path', ''))
             self._mw.mail_LineEdit.setText(self._exp_logic.config_dict.get('email', ''))
             self._mw.Zen_correlation_DSpinBox.setValue(self._exp_logic.config_dict.get('correlation_threshold', 0.6))
+            self._mw.Zen_min_fraction_DSpinBox.setValue(self._exp_logic.config_dict.get('autofocus_min_fraction', 0.9))
             self._mw.galvo_start_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_start', 0.0))
             self._mw.galvo_stop_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_stop', 0.0))
             self._mw.galvo_step_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_step', 0.1))
@@ -1241,6 +1261,7 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.reference_images_lineEdit,
             self._mw.Zen_saving_folder_lineEdit,
             self._mw.Zen_correlation_DSpinBox,
+            self._mw.Zen_min_fraction_DSpinBox,
             self._mw.illumination_time_DSpinBox,
             self._mw.num_iterations_SpinBox,
             self._mw.time_step_SpinBox,

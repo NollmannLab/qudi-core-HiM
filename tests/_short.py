@@ -183,3 +183,50 @@ def experiment(folder, template, name, **updates):
     with open(path, 'w', encoding='utf-8') as stream:
         yaml.safe_dump(content, stream)
     return path
+
+
+# ---------------------------------------------------------------------------- autofocus check (Hi-M SD)
+AUTOFOCUS_SIZE = (64, 64)   # size of the synthetic autofocus images of the task runs
+AUTOFOCUS_MIN_FRACTION = 0.5  # autofocus_min_fraction of the SD experiment files of the tests
+
+
+def autofocus_image(seed=0, shape=AUTOFOCUS_SIZE):
+    """Synthetic brightfield-like image (smoothed noise), float."""
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+    return gaussian_filter(np.random.default_rng(seed).random(shape), 2) * 1000.0
+
+
+def write_autofocus_references(folder, n_rois, image=None):
+    """<folder>/autofocus_reference.npy with n_rois copies of image (default autofocus_image())."""
+    import numpy as np
+    os.makedirs(folder, exist_ok=True)
+    image = autofocus_image() if image is None else image
+    np.save(os.path.join(folder, 'autofocus_reference.npy'), np.stack([image] * n_rois))
+    return folder
+
+
+def write_autofocus_image(zen_folder, number, image=None):
+    """What ZEN saves at the end of its autofocus block: <zen_folder>/autofocus/x_AcquisitionBlock1_pt<number>.czi
+    (here the image as .npy content, read by read_npy_image)."""
+    import numpy as np
+    folder = os.path.join(zen_folder, 'autofocus')
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f'experiment_AcquisitionBlock1_pt{number}.czi')
+    with open(path, 'wb') as f:
+        np.save(f, autofocus_image() if image is None else image)
+    return path
+
+
+def read_npy_image(path):
+    """Stand-in of autofocus_check.read_autofocus_image for the test images (no czifile)."""
+    import numpy as np
+    with open(path, 'rb') as f:
+        return np.load(f)
+
+
+def use_npy_autofocus_images():
+    """The task reads the test autofocus images with read_npy_image (installed in the shared module)."""
+    from qudi.tasks.common import autofocus_check
+    autofocus_check.read_autofocus_image = read_npy_image
+

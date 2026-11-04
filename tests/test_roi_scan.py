@@ -959,12 +959,21 @@ def _section_data_folder():
     ZEN = ZenSim(folder('zen'))
 
     class TriggerLogic(_Stand):
-        """Fake ZEN triggers: every poll answered at once; "ready" makes ZEN create its data folder."""
+        """Fake ZEN triggers: every poll answered at once; "ready" makes ZEN create its data folder; with
+        autofocus=True (Hi-M), ZEN saves an autofocus image at each autofocus block (every other start trigger)."""
         _meta = {'mro': ('TriggerLogic',)}
 
-        def __init__(self, rec, zen=None):
+        def __init__(self, rec, zen=None, autofocus=False):
             super().__init__(rec)
             self.zen = zen if zen is not None else ZEN
+            self.autofocus, self.starts = autofocus, 0
+
+        def send_trigger(self, name):
+            self._rec.rec('send_trigger', name)
+            if name == 'trigger_ZEN_start_block':
+                self.starts += 1
+                if self.autofocus and self.starts % 2 == 1:
+                    _short.write_autofocus_image(self.zen.created[-1], self.starts)
 
         def is_triggered(self, name):
             self._rec.rec('is_triggered', name)
@@ -1184,11 +1193,12 @@ def _section_data_folder():
 
     # ------------------------------------------------------------------ (5) Hi-M SD, 1 probe, 2 ROIs, server folder
     server, local = folder('server_5'), folder('local_5')
-    ref_images = folder('zen_ref')
+    _short.use_npy_autofocus_images()  # test autofocus images: .npy content (no czifile)
+    ref_images = _short.write_autofocus_references(folder('zen_ref'), len(ROIS))
     exp = _short.experiment(TMP, 'him_experiment.yaml', 'him_sd', injections_path=inj_path, save_path=local,
                             save_network_path=server, zen_ref_images_path=ref_images, correlation_threshold=0.6,
-                            zen_saving_path=ZEN.root)
-    trigger = TriggerLogic(Rec())
+                            zen_saving_path=ZEN.root, autofocus_min_fraction=_short.AUTOFOCUS_MIN_FRACTION)
+    trigger = TriggerLogic(Rec(), autofocus=True)
     KEEP.append(trigger)
     result, err = run(him_task(him.HiMSDTask, exp, trigger), timeout=180)
     run_folder = mirror(server, ZEN.created[-1])
@@ -1196,12 +1206,12 @@ def _section_data_folder():
     prefix = str(len([n for n in os.listdir(ZEN.root) if os.path.isdir(os.path.join(ZEN.root, n))])).zfill(3)
     check(f'(5 Hi-M SD, 1 probe, 2 ROIs) files in <server>/<ZEN folder name>/metadata (HiM_parameters.yml, '
           f'movie_name.txt, injections.yml, HiM_task.log); names scan_{prefix}_RT1_<roi>_ROI; nothing in the local '
-          f'folder or the ZEN folder',
+          f'folder, nothing written by qudi in the ZEN folder',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == run_folder
           and {'HiM_parameters.yml', 'injections.yml', 'HiM_task.log', 'experiment_config.yaml',
                'metadata.yml'} <= set(os.listdir(run_folder))
           and names == [f'scan_{prefix}_RT1_{r[4:]}_ROI' for r in ROIS] and os.listdir(local) == []
-          and os.listdir(ZEN.created[-1]) == [], (err, result, names))
+          and os.listdir(ZEN.created[-1]) == ['autofocus'], (err, result, names))  # only the images of the fake ZEN
 
     # ------------------------------------------------------------------ (6) dummies with save_path only
     save_path = os.path.join(TMP, 'dummy_data')

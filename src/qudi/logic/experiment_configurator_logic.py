@@ -836,6 +836,12 @@ class ExpConfigLogic(LogicBase):
         self.config_dict['correlation_threshold'] = corr
         self.sigConfigDictUpdated.emit()
 
+    @QtCore.Slot(float)
+    def update_autofocus_min_fraction(self, fraction):
+        """Set the minimum fraction of ROIs per cycle whose autofocus check must pass and notify listeners."""
+        self.config_dict['autofocus_min_fraction'] = fraction
+        self.sigConfigDictUpdated.emit()
+
     @QtCore.Slot(str)
     def update_axial_calibration_path(self, path):
         """Set the axial-calibration file path and notify listeners."""
