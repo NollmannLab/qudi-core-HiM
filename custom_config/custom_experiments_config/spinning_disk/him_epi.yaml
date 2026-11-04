@@ -17,11 +17,6 @@ fields:
     default: []
     model: standard
 
-  num_z_planes:
-    required: true
-    default: 1
-    minimum: 1
-
   roi_list_path:
     required: true
     default: ""

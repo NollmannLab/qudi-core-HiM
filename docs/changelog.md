@@ -8,6 +8,25 @@ Last updated: 2026-11-04
 
 ### Tasks
 
+#### Changed
+
+- Hi-M on the spinning disk: the number of z planes is no longer used (2026-11-04).
+  - `him.py`: `_EXPERIMENT_KEYS` documented as the required keys a setup subclass may override;
+    `num_z_planes` is read, written in `HiM_parameters.yml` ('number of z planes') and passed to
+    `fill_run_metadata` only when it is one of these keys (`_uses_z_planes`). Base, dummy and RAMM
+    placeholder unchanged.
+  - `HiMSDTask`: `_EXPERIMENT_KEYS` without `num_z_planes`; an SD experiment file that still has it is
+    accepted, the value is ignored (no warning); `metadata.yml` keeps the template's `number_z_planes`.
+    Docstring updated.
+  - `custom_config/custom_experiments_config/spinning_disk/him_epi.yaml`: `num_z_planes` field removed.
+  - `common/imaging_steps.py`: the 'Waiting for ZEN "ready"' progress call of `SDImagingMixin._prepare_imaging`
+    gets its missing step argument ('ZEN'); without it every SD run stopped with a TypeError.
+  - `tests/test_him.py`: block "number of z planes" (word `sd_z_planes`): SD with and without `num_z_planes`,
+    dummy still requiring it, configurator field hidden for the SD Hi-M experiment; block selection words
+    generalised (`metadata`, `sd_z_planes`).
+
+### Tasks
+
 #### Added
 
 - ROI scan and Hi-M: experiment file copy and microscope metadata in the run folder (2026-11-04).

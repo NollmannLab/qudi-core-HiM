@@ -86,7 +86,7 @@ class SDImagingMixin:
 
         # handshake with ZEN
         self._check_interrupt()
-        self._report_progress(f'Waiting for ZEN "ready"', log=False)
+        self._report_progress('ZEN', 'Waiting for ZEN "ready"', log=False)
         self._wait_for_ready()
 
     def _image_roi(self, roi_name: str, file_name: str) -> None:

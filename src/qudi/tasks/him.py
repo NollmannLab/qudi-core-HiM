@@ -164,6 +164,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     needle_rinsing_duration_s = 30  # rinsing of the needle after each cycle (s)
 
+    # required keys of the experiment file; a setup subclass may override it. num_z_planes is read, written in
+    # HiM_parameters.yml and in metadata.yml only when it is one of these keys.
     _EXPERIMENT_KEYS = ('sample_name', 'roi_list_path', 'injections_path', 'imaging_sequence', 'num_z_planes',
                         'save_path')
     _RINSE_TIMEOUT_MARGIN_S = 30.0  # the rinse must end within needle_rinsing_duration_s + this margin
@@ -221,7 +223,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.roi_list_path = params.get('roi_list_path')
         self.injections_path = params.get('injections_path')
         self.imaging_sequence = params.get('imaging_sequence') or []
-        self.num_z_planes = params.get('num_z_planes')
+        self.num_z_planes = params.get('num_z_planes') if self._uses_z_planes() else None
         self.save_path = params.get('save_path')
         self.save_network_path = params.get('save_network_path') or ''
         self._read_microscope_parameters(params)
@@ -586,13 +588,18 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
                                            'hybridization list': hyb_list,
                                            'photobleaching list': pb_list},
                  '3- imaging parameters': {'number of laser lines': len(self.imaging_sequence),
-                                           'imaging sequence': self.imaging_sequence,
-                                           'number of z planes': self.num_z_planes},
+                                           'imaging sequence': self.imaging_sequence},
                  '4- ROIs': rois}
+        if self._uses_z_planes():
+            param['3- imaging parameters']['number of z planes'] = self.num_z_planes
         path = os.path.join(self.directory, 'HiM_parameters.yml')
         with open(path, 'w') as outfile:
             yaml.safe_dump(param, outfile, default_flow_style=False, sort_keys=False)
         self.log.info(f'Saved the Hi-M parameters to {path}')
+
+    def _uses_z_planes(self) -> bool:
+        """True when num_z_planes is a required key of the experiment file (_EXPERIMENT_KEYS)."""
+        return 'num_z_planes' in self._EXPERIMENT_KEYS
 
     def _save_run_files(self, injections) -> None:
         """experiment_config.yaml (byte copy of the experiment file) and, with a metadata template, metadata.yml
@@ -658,8 +665,11 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     acquisition block, synchronized over DAQ triggers - see SDImagingMixin); trigger_logic is
     required. Valve layout of FluidicsSDTask.
 
-    Experiment YAML, extra keys: zen_ref_images_path (reference images of the autofocus),
-    correlation_threshold; zen_saving_path is not read.
+    Experiment YAML: the keys of HiMTaskBase except num_z_planes (not required and not read: the z-stack is
+    set in ZEN; an old file that still has it is accepted, the value is ignored), plus zen_ref_images_path
+    (reference images of the autofocus) and correlation_threshold; zen_saving_path is not read. Without
+    num_z_planes, HiM_parameters.yml has no 'number of z planes' entry and metadata.yml keeps the template's
+    number_z_planes field.
 
     ZEN settings check: after all checks and before any hardware call or GUI lock, the modal box 'ZEN
     settings' of the ROI scan (SDImagingMixin._confirm_zen_settings) lists the settings to check in ZEN
@@ -690,6 +700,9 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     """
 
     trigger_logic = Connector(interface='TriggerLogic')
+
+    # the z planes are set in ZEN: num_z_planes is not part of the SD experiment file
+    _EXPERIMENT_KEYS = tuple(key for key in HiMTaskBase._EXPERIMENT_KEYS if key != 'num_z_planes')
 
     start_valve_positions = FluidicsSDTask.start_valve_positions
     needle_move_valve_positions = FluidicsSDTask.needle_move_valve_positions

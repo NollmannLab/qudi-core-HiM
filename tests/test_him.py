@@ -1,12 +1,13 @@
 """Hi-M task (qudi.tasks.him) on the dummy setup, the SD task with a fake ZEN, the RAMM placeholder.
 
-Usage: QT_QPA_PLATFORM=offscreen python tests/test_him.py [<repo_root>] [quick | metadata]
-(quick: without the interrupt / error / SD / RAMM cases; metadata: only the run files case.)
+Usage: QT_QPA_PLATFORM=offscreen python tests/test_him.py [<repo_root>] [quick | metadata | sd_z_planes ...]
+(quick: without the interrupt / error / SD / RAMM cases; metadata, sd_z_planes: only these blocks.)
 Real modules of dummy_config.cfg: fluidics (dummy valve, DaqPumpController pumps, DummyFlowSensor,
 FluidicsFlowLogic, pipetting robot on the dummy stage), roi_logic and laser_control_logic. The task
 runs in its own thread, the modules in the main thread (event loop). Logic calls are recorded.
 Sections:
   - run files: experiment_config.yaml and metadata.yml in the run folder;
+  - number of z planes: not used by the SD task, still required by the dummy;
   - Hi-M cycles: full run, progress, interrupt, errors, needle position, needle modes, SD (fake ZEN),
     RAMM placeholder;
   - probe valve read from the injections file (plan, needle, valve, obsolete option).
@@ -226,48 +227,177 @@ def end_state_ok(label, t0):
           (state, unlocked, last_roi, [m for t, lvl, m in LOGS if t >= t0 and 'Cleanup' in m]))
 
 
-# --- Hi-M cycles: run, progress, interrupt, errors, needle, SD, RAMM ---
 QUICK = 'quick' in sys.argv[1:]
-METADATA_ONLY = 'metadata' in sys.argv[1:]
+ONLY = set(sys.argv[1:]) & {'metadata', 'sd_z_planes'}  # run only these blocks, then stop
+
+
+def selected(block):
+    return not ONLY or block in ONLY
+
 
 # --- run files: experiment copy and metadata.yml ---
-# Hi-M dummy, 1 probe, 2 ROIs, metadata_template of dummy_config.cfg (template of the repository)
-meta_inj = copy.deepcopy(EXAMPLE)
-meta_inj['probes'] = {1: 'RT1'}
-meta_exp = files(meta_inj, 'metadata')
-task = make_task(user_config_path=meta_exp)
-t0 = monotonic()
-result, err, _, _ = run(task)
-run_folder = result['directory'] if result else ''
-meta_path = os.path.join(run_folder, 'metadata.yml')
-meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else None
-template = yaml.safe_load(open(task.metadata_template, encoding='utf-8'))
-section = lambda m, name: {k: v for item in m[name] for k, v in item.items()}  # noqa: E731
-acq = section(meta, 'Acquisition') if meta else {}
-fluidics_meta = section(meta, 'Fluidics') if meta else {}
-check('(run files) 1 cycle done; experiment_config.yaml byte-identical to the experiment file',
-      err is None and result and result['cycles_done'] == 1
-      and open(os.path.join(run_folder, 'experiment_config.yaml'), 'rb').read() == open(meta_exp, 'rb').read(),
-      (err, result))
-check('(run files) metadata.yml: Fluidics hybridization / photobleaching = the lists of the injections file',
-      fluidics_meta.get('hybridization') == meta_inj['hybridization list']
-      and fluidics_meta.get('photobleaching') == meta_inj['photobleaching list'], fluidics_meta)
-check(f'(run files) metadata.yml: Time, sample name, laser lines / powers, 5 z planes, the {N} ROIs with their '
-      f'positions; other sections as in the template',
-      meta is not None and meta['Time'] and acq['sample_name'] == 'Mysample' and acq['laser_lines'] == [488, 561]
-      and acq['laser_power_(%)'] == [50.0, 80.0] and acq['number_z_planes'] == 5
-      and acq['roi_list_(xyz)'] == [{n: [float(v) for v in roi.get_roi_position(n)]} for n in NAMES]
-      and list(meta) == list(template) and meta['Camera'] == template['Camera'], acq)
-him_params = yaml.safe_load(open(os.path.join(run_folder, 'HiM_parameters.yml'))) if run_folder else {}
-check('(run files) HiM_parameters.yml as before (global, fluidic, imaging parameters, ROIs) and movie_name.txt',
-      list(him_params) == ['1- global parameters', '2- fluidic parameters', '3- imaging parameters', '4- ROIs']
-      and him_params['2- fluidic parameters']['probes'] == {1: 'RT1'} and list(him_params['4- ROIs']) == NAMES
-      and open(os.path.join(run_folder, 'movie_name.txt')).read().split()
-      == [f'scan_001_RT1_{n[4:]}_ROI' for n in NAMES], him_params)
-end_state_ok('run files', t0)
-if METADATA_ONLY:
+if selected('metadata'):
+    # Hi-M dummy, 1 probe, 2 ROIs, metadata_template of dummy_config.cfg (template of the repository)
+    meta_inj = copy.deepcopy(EXAMPLE)
+    meta_inj['probes'] = {1: 'RT1'}
+    meta_exp = files(meta_inj, 'metadata')
+    task = make_task(user_config_path=meta_exp)
+    t0 = monotonic()
+    result, err, _, _ = run(task)
+    run_folder = result['directory'] if result else ''
+    meta_path = os.path.join(run_folder, 'metadata.yml')
+    meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else None
+    template = yaml.safe_load(open(task.metadata_template, encoding='utf-8'))
+    section = lambda m, name: {k: v for item in m[name] for k, v in item.items()}  # noqa: E731
+    acq = section(meta, 'Acquisition') if meta else {}
+    fluidics_meta = section(meta, 'Fluidics') if meta else {}
+    check('(run files) 1 cycle done; experiment_config.yaml byte-identical to the experiment file',
+          err is None and result and result['cycles_done'] == 1
+          and open(os.path.join(run_folder, 'experiment_config.yaml'), 'rb').read() == open(meta_exp, 'rb').read(),
+          (err, result))
+    check('(run files) metadata.yml: Fluidics hybridization / photobleaching = the lists of the injections file',
+          fluidics_meta.get('hybridization') == meta_inj['hybridization list']
+          and fluidics_meta.get('photobleaching') == meta_inj['photobleaching list'], fluidics_meta)
+    check(f'(run files) metadata.yml: Time, sample name, laser lines / powers, 5 z planes, the {N} ROIs with their '
+          f'positions; other sections as in the template',
+          meta is not None and meta['Time'] and acq['sample_name'] == 'Mysample' and acq['laser_lines'] == [488, 561]
+          and acq['laser_power_(%)'] == [50.0, 80.0] and acq['number_z_planes'] == 5
+          and acq['roi_list_(xyz)'] == [{n: [float(v) for v in roi.get_roi_position(n)]} for n in NAMES]
+          and list(meta) == list(template) and meta['Camera'] == template['Camera'], acq)
+    him_params = yaml.safe_load(open(os.path.join(run_folder, 'HiM_parameters.yml'))) if run_folder else {}
+    check('(run files) HiM_parameters.yml as before (global, fluidic, imaging parameters, ROIs) and movie_name.txt',
+          list(him_params) == ['1- global parameters', '2- fluidic parameters', '3- imaging parameters', '4- ROIs']
+          and him_params['2- fluidic parameters']['probes'] == {1: 'RT1'} and list(him_params['4- ROIs']) == NAMES
+          and open(os.path.join(run_folder, 'movie_name.txt')).read().split()
+          == [f'scan_001_RT1_{n[4:]}_ROI' for n in NAMES], him_params)
+    end_state_ok('run files', t0)
+
+# --- number of z planes: not used by the SD task, still required by the dummy ---
+if selected('sd_z_planes'):
+    class ZenTrigger:  # fake TriggerLogic: ZEN ready / done answered at once
+        _meta = {'mro': ('TriggerLogic',)}
+
+        def __init__(self):
+            self.sent = []
+
+        def send_trigger(self, name):
+            self.sent.append(name)
+
+        def is_triggered(self, name):
+            return True
+
+    z_trigger = ZenTrigger()
+    z_box = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box ('Done - continue')
+    z_ref = os.path.join(TMP, 'zen_ref_z')
+    os.makedirs(z_ref, exist_ok=True)
+    z_inj = copy.deepcopy(EXAMPLE)
+    z_inj['probes'] = {1: 'RT1'}
+    template = yaml.safe_load(open(_short.local_options(repo, ENTRY['options'])['metadata_template'], encoding='utf-8'))
+    template_z = {k: v for item in template['Acquisition'] for k, v in item.items()}['number_z_planes']
+
+    def z_run(cls, name, drop_z_planes, **extra):
+        exp = files(z_inj, name, extra=extra)
+        if drop_z_planes:
+            content = yaml.safe_load(open(exp))
+            content.pop('num_z_planes')
+            yaml.safe_dump(content, open(exp, 'w'))
+        task = make_task(cls=cls, user_config_path=exp) if cls is him.HiMDummyTask else None
+        if task is None:
+            task = cls()
+            for k, v in _short.local_options(repo, ENTRY['options']).items():
+                setattr(task, k, v)
+            task.user_config_path = exp
+            _short.shorten(task, progress_interval_s=0.2)
+            task.connect_modules(dict(MODS, trigger_logic=z_trigger))
+            if not any(isinstance(h, H) for h in task.log.handlers):
+                task.log.addHandler(H())
+        t0 = monotonic()
+        result, err, _, _ = run(task)
+        folder = result.get('directory') if result else None
+        params = yaml.safe_load(open(os.path.join(folder, 'HiM_parameters.yml'))) if folder else {}
+        meta = yaml.safe_load(open(os.path.join(folder, 'metadata.yml'), encoding='utf-8')) if folder else {}
+        acq = {k: v for item in meta['Acquisition'] for k, v in item.items()} if meta else {}
+        logs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+        return task, result, err, params, acq, logs, t0
+
+    sd_extra = {'zen_ref_images_path': z_ref, 'correlation_threshold': 0.6}
+    # (1) SD experiment file without num_z_planes
+    task, result, err, params, acq, logs, t0 = z_run(him.HiMSDTask, 'sd_no_z', True, **sd_extra)
+    check(f'(SD, no num_z_planes in the file) 1 cycle x {N} ROIs done; HiM_parameters.yml without "number of z planes"; '
+          f'metadata.yml number_z_planes as in the template ({template_z!r})',
+          err is None and result and result['cycles_done'] == 1
+          and 'number of z planes' not in params['3- imaging parameters']
+          and 'num_z_planes' not in params['1- global parameters'] and acq.get('number_z_planes') == template_z
+          and task.num_z_planes is None, (err, result, params.get('3- imaging parameters'), acq.get('number_z_planes')))
+    end_state_ok('SD, no num_z_planes', t0)
+    # (2) old SD experiment file still with num_z_planes (5)
+    task, result, err, params, acq, logs, t0 = z_run(him.HiMSDTask, 'sd_old_z', False, **sd_extra)
+    check('(SD, old file with num_z_planes: 5) runs; value ignored (not read, no "number of z planes" entry, metadata '
+          'field as in the template), no warning about it',
+          err is None and result and result['cycles_done'] == 1 and task.num_z_planes is None
+          and 'number of z planes' not in params['3- imaging parameters'] and acq.get('number_z_planes') == template_z
+          and not any(lvl >= logging.WARNING and 'z_planes' in m for lvl, m in logs), (err, result, acq))
+    # (4) Hi-M dummy: num_z_planes still required and used
+    task, result, err, params, acq, logs, t0 = z_run(him.HiMDummyTask, 'dummy_no_z', True)
+    check("(dummy, no num_z_planes in the file) still an error before any hardware call: 'num_z_planes' missing",
+          err is not None and "'num_z_planes' missing" in str(err) and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+    task, result, err, params, acq, logs, t0 = z_run(him.HiMDummyTask, 'dummy_z', False)
+    check('(dummy, num_z_planes: 5) unchanged: HiM_parameters.yml "number of z planes" 5, metadata.yml number_z_planes 5',
+          err is None and result and params['3- imaging parameters'].get('number of z planes') == 5
+          and acq.get('number_z_planes') == 5 and task.num_z_planes == 5, (err, params.get('3- imaging parameters')))
+    z_box.stop()
+
+    # (3) experiment configurator: the SD Hi-M definition has no number-of-planes field (dummy Hi-M still has it)
+    def configurator(definitions, experiments):
+        """Experiment configurator logic + GUI of dummy_config.cfg on the definitions of the repository."""
+        modules = {}
+
+        def build_cfg(name):
+            if name in modules:
+                return modules[name]
+            if name in MODULES:
+                return MODULES[name]
+            base = next(b for b in ('hardware', 'logic', 'gui') if name in (CFG.get(b) or {}))
+            entry = CFG[base][name]
+            mod, cls = entry['module.Class'].rsplit('.', 1)
+            klass = getattr(importlib.import_module(f'qudi.{base}.{mod}'), cls)
+            opts = _short.module_options(name, entry.get('options'))
+            if name == 'experiments_configurator_logic':
+                opts['experiment_definitions_directory'] = os.path.join(
+                    repo, 'custom_config', 'custom_experiments_config', definitions) + os.sep
+                opts['experiments'] = experiments
+            m = klass(qudi_main_weakref=weakref.ref(MAIN), name=name, config=opts)
+            by_name = {c.name: c for k in dir(klass) if isinstance(c := getattr(klass, k, None), Connector)}
+            for key, target in (entry.get('connect') or {}).items():
+                m._meta['connectors'][next(k for k in m._meta['connectors']
+                                           if by_name[key] is getattr(klass, k))].connect(build_cfg(target))
+            m.module_state.activate()
+            modules[name] = m
+            return m
+        gui = build_cfg('experiments_configurator_gui')
+        KEEP_CFG.append(modules)
+        return gui
+
+    KEEP_CFG = []
+    shown = {}
+    for definitions, experiments, name in (('spinning_disk', ['him_epi.yaml'], 'him_epi_sd'),
+                                           ('dummy', ['him.yaml'], 'Hi-M Dummy')):
+        gui = configurator(definitions, experiments)
+        gui.show()
+        gui.start_new_experiment_config(name)
+        app.processEvents()
+        mw = gui._mw
+        shown[name] = (mw.num_z_planes_SpinBox.isVisibleTo(mw), mw.num_z_planes_Label.isVisibleTo(mw),
+                       mw.imaging_sequence_ListView.isVisibleTo(mw) if hasattr(mw, 'imaging_sequence_ListView') else None)
+        mw.close()
+    check('(configurator) SD Hi-M experiment: number-of-planes field and label hidden; Hi-M dummy: still shown',
+          shown['him_epi_sd'][:2] == (False, False) and shown['Hi-M Dummy'][:2] == (True, True), shown)
+
+if ONLY:
     print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)
     os._exit(0 if all(ok for _, ok in results) else 1)
+
+# --- Hi-M cycles: run, progress, interrupt, errors, needle, SD, RAMM ---
 
 # ------------------------------------------------------------------ (1) full 2-probe run (example injections file)
 # incubation long enough for the live countdown checked below
