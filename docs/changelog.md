@@ -4,7 +4,24 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-11-03
+Last updated: 2026-11-04
+
+### Tasks
+
+#### Added
+
+- Hi-M on the spinning disk: ZEN settings pop-up before any hardware call, as in the ROI scan (2026-11-04).
+  - `common/imaging_steps.py`, `SDImagingMixin._confirm_zen_settings(loops)`: logs the channels (imaging
+    sequence order) and the number of acquisition loops, then shows the modal box 'ZEN settings' with the
+    ROI-scan text (`ask_confirmation`). `RoiScanSDTask._confirm_before_start` uses it with the number of
+    ROIs of the run (same box and log lines as before).
+  - `him.py`: hook `HiMTaskBase._confirm_before_start()` called after all checks, before the plan, the
+    data folder choice and any hardware call or GUI lock; False -> 'Hi-M experiment cancelled by the
+    user', result `{'cancelled': True, 'cycles_done': 0}`, nothing to restore. Default True (dummy and
+    RAMM placeholder unchanged). `HiMSDTask`: loops = number of cycles x number of ROIs; the warning line
+    'ZEN: number of acquisition loops = ...' of `_prepare_imaging` is removed.
+  - `tests/test_him.py`: the SD runs answer the ZEN settings box; the check of the removed warning line
+    is replaced by a check of the box text and of the two log lines.
 
 ### GUI
 

@@ -46,7 +46,6 @@ import yaml
 from qudi.core.connector import Connector
 from qudi.tasks.common.data_folders import choose_data_root, create_run_folder
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
-from qudi.tasks.common.popups import ask_confirmation
 from qudi.tasks.common.progress import ProgressModuleTask
 
 
@@ -369,8 +368,8 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     Experiment file: save_path (local folder, required) and save_network_path (server folder, optional),
     as on all setups; zen_saving_path is not read.
 
-    ZEN settings check: before any hardware call, a modal box 'ZEN settings' (ask_confirmation,
-    tasks/common/popups.py) lists the ZEN settings to check in block 7 - the channels to select (the
+    ZEN settings check: before any hardware call, a modal box 'ZEN settings' (SDImagingMixin
+    _confirm_zen_settings, shared with the Hi-M task) lists the ZEN settings to check in block 7 - the channels to select (the
     wavelengths of the imaging sequence, in order) and the number of loops for blocks 4>9 (the number
     of ROIs scanned in this run, from start_roi to the end of the list) - and waits for the answer:
     'Done - continue' starts the scan, Cancel ends the task without touching the hardware. Both values
@@ -398,16 +397,9 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     trigger_logic = Connector(interface='TriggerLogic')
 
     def _confirm_before_start(self) -> bool:
-        """Log the ZEN channels and number of acquisition loops of this run and ask the user to check
-        them in ZEN (modal box, waits for the answer, interruptible). True: continue, False: cancel."""
-        channels = ', '.join(f'{wavelength} nm' for wavelength, *_ in self.imaging_sequence)
-        loops = len(self._scan_rois)
-        self.log.info(f'ZEN: select the channels {channels}')
-        self.log.info(f'ZEN: set the number of acquisition loops to {loops}')
-        text = ('In block 7, check the following info:\n'
-                f'1- the following channels should be selected: {channels}\n'
-                f'2- the number of loops for blocks 4>9 should be {loops}')
-        return ask_confirmation(self, 'ZEN settings', text)
+        """ZEN settings box (SDImagingMixin._confirm_zen_settings) with loops = number of ROIs scanned in this
+        run. True: continue, False: cancel."""
+        return self._confirm_zen_settings(len(self._scan_rois))
 
     def _prepare_imaging(self) -> None:
         """Show 'Waiting for ZEN "ready"' in the progress line and run the SD imaging preparation

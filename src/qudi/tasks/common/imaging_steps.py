@@ -38,6 +38,8 @@ You should have received a copy of the GNU General Public License along with Qud
 # from glob import glob
 from time import monotonic, sleep
 
+from qudi.tasks.common.popups import ask_confirmation
+
 
 class SDImagingMixin:
     """Imaging at one ROI on the spinning disk, synchronized with ZEN over DAQ triggers (put it before
@@ -57,6 +59,10 @@ class SDImagingMixin:
         has been seen for it.
     _check_autofocus: hook between the autofocus block and the acquisition block; does nothing
         here (overridden by a task that checks the focus, e.g. the Hi-M task).
+    _confirm_zen_settings(loops): ZEN settings box shared by the SD tasks, shown before any hardware
+        call - logs the channels to select (wavelengths of the imaging sequence, in order) and the number
+        of acquisition loops, then asks in a modal box 'ZEN settings' (ask_confirmation,
+        tasks/common/popups.py) to check them in block 7. True: 'Done - continue', False: Cancel.
     _end_imaging: lasers disabled, external trigger off, intensities reset to 0.
 
     Data folder: created by the task (tasks/common/data_folders.py), not by ZEN. The detection of the
@@ -113,6 +119,18 @@ class SDImagingMixin:
         """Check of the focus after the ZEN autofocus block of roi_name, before the acquisition
         block. Does nothing here."""
         pass
+
+    def _confirm_zen_settings(self, loops) -> bool:
+        """Log the ZEN channels (imaging sequence order) and the number of acquisition loops, and ask the user
+        to check them in ZEN block 7 (modal box 'ZEN settings', waits for the answer, interruptible). True:
+        continue, False: cancel."""
+        channels = ', '.join(f'{wavelength} nm' for wavelength, *_ in self.imaging_sequence)
+        self.log.info(f'ZEN: select the channels {channels}')
+        self.log.info(f'ZEN: set the number of acquisition loops to {loops}')
+        text = ('In block 7, check the following info:\n'
+                f'1- the following channels should be selected: {channels}\n'
+                f'2- the number of loops for blocks 4>9 should be {loops}')
+        return ask_confirmation(self, 'ZEN settings', text)
 
     # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
     # # ----------------------------------------------------------------------------------------------

@@ -128,6 +128,10 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     Hi-M hooks (overridden by the setup subclasses):
         _read_microscope_parameters(params)  extra keys of the experiment YAML
         _check_microscope() -> list          problems found (checked with the other problems)
+        _confirm_before_start() -> bool      called after all checks, before any hardware call or GUI
+                                             lock; False cancels the experiment (result
+                                             {'cancelled': True, 'cycles_done': 0}, nothing to restore).
+                                             Default: True (no question)
         _create_data_folder() -> str         run folder where qudi writes its files (self.directory)
         _file_name(rt, roi_name) -> str      name of the stack of one ROI for one probe
     Imaging hooks (imaging mixin): _prepare_imaging(), _image_roi(roi, file_name),
@@ -260,6 +264,12 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
         # one cycle per probe, sorted by tube
         self._cycles = sorted(probes.items())
+
+        # setup-specific confirmation, before any hardware call or GUI lock (e.g. ZEN settings on the SD)
+        self._check_interrupt()
+        if not self._confirm_before_start():
+            self.log.info('Hi-M experiment cancelled by the user')
+            return {'cancelled': True, 'cycles_done': 0}
         for step in pb_steps:
             step['probe'] = False  # photobleaching: buffer valve only, the needle is not moved
 
@@ -584,6 +594,11 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         """Setup-specific checks before any hardware call; return the problems found."""
         return []
 
+    def _confirm_before_start(self) -> bool:
+        """Called after all checks, before any hardware call or GUI lock: False cancels the experiment.
+        Default: True (no question)."""
+        return True
+
     def _create_data_folder(self) -> str:
         """Create <root>/YYYY_MM_DD/NNN_HiM_<sample_name> under the root chosen before any hardware call,
         set self.prefix = NNN and return the folder."""
@@ -612,8 +627,16 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     required. Valve layout of FluidicsSDTask.
 
     Experiment YAML, extra keys: zen_ref_images_path (reference images of the autofocus),
-    correlation_threshold; zen_saving_path is not read. Before waiting for ZEN "ready", the log gives the
-    ZEN settings: number of acquisition loops (probes x ROIs), C (laser lines) and Z (planes). Data
+    correlation_threshold; zen_saving_path is not read.
+
+    ZEN settings check: after all checks and before any hardware call or GUI lock, the modal box 'ZEN
+    settings' of the ROI scan (SDImagingMixin._confirm_zen_settings) lists the settings to check in ZEN
+    block 7 - the channels to select (wavelengths of the imaging sequence, in order) and the number of
+    loops for blocks 4>9 (number of cycles x number of ROIs) - and waits for the answer: 'Done -
+    continue' starts the experiment, Cancel ends the task without touching the hardware (result
+    {'cancelled': True, 'cycles_done': 0}). Both values are also logged.
+
+    Data
     folder created by qudi as on all setups (HiMTaskBase: NNN_HiM_<sample_name> on the server folder or
     in the local folder, the folder created by ZEN is not used); file names
     scan_<NNN>_<RT>_<roi number>_ROI.
@@ -647,6 +670,11 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self.correlation_threshold = params.get('correlation_threshold')
         self._autofocus_check_logged = False
 
+    def _confirm_before_start(self) -> bool:
+        """ZEN settings box (SDImagingMixin._confirm_zen_settings) with loops = number of cycles x number of
+        ROIs. True: continue, False: cancel."""
+        return self._confirm_zen_settings(len(self._cycles) * len(self.roi_names))
+
     def _check_microscope(self) -> list:
         problems = []
         for key in ('zen_ref_images_path',):
@@ -658,12 +686,9 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         return problems
 
     def _prepare_imaging(self) -> None:
-        """ZEN settings in the log, SD imaging preparation (laser source, wait for ZEN "ready")."""
+        """SD imaging preparation (laser source, wait for ZEN "ready")."""
         # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
         # folders_before = self._zen_folders()
-        self.log.warning(f'ZEN: number of acquisition loops = {len(self._cycles)} x {len(self.roi_names)} = '
-                         f'{len(self._cycles) * len(self.roi_names)}, C = {len(self.imaging_sequence)}, '
-                         f'Z = {self.num_z_planes}')
         super()._prepare_imaging()
         # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
         # self._zen_directory = self._find_new_zen_folder(folders_before)

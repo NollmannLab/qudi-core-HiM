@@ -433,6 +433,7 @@ if not QUICK:
             task.log.addHandler(H())
         return task
 
+    ZEN_BOX = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box of the SD task ('Done - continue')
     task = sd_task()
     t0 = monotonic()
     result, err, _, _ = run(task)
@@ -440,8 +441,13 @@ if not QUICK:
     msgs = [m for _, m in logs]
     zen = trigger.created[0] if trigger.created else ''
     print('    SD result:', result, err)
-    check(f'(SD) ZEN settings logged before the wait for ready: loops 1 x {N} = {N}, C = 2, Z = 5',
-          f'ZEN: number of acquisition loops = 1 x {N} = {N}, C = 2, Z = 5' in msgs, [m for m in msgs if 'ZEN' in m][:4])
+    check(f'(SD) ZEN settings box answered once, loops 1 cycle x {N} ROIs = {N}; channels and loops logged before the '
+          f'wait for ready; no warning line with the loops any more',
+          len(ZEN_BOX.texts) == 1 and ZEN_BOX.texts[0].endswith(f'2- the number of loops for blocks 4>9 should be {N}')
+          and 'ZEN: select the channels 488 nm, 561 nm' in msgs
+          and f'ZEN: set the number of acquisition loops to {N}' in msgs
+          and not any(m.startswith('ZEN: number of acquisition loops =') for m in msgs),
+          (ZEN_BOX.texts, [m for m in msgs if 'ZEN' in m][:4]))
     run_folder = result['directory'] if result else ''
     check('(SD) run folder created by qudi in save_path (no server folder): YYYY_MM_DD/001_HiM_<sample>; the folder '
           'created by ZEN is not used',
@@ -469,6 +475,7 @@ if not QUICK:
     check('(SD) zen_ref_images_path not an existing folder -> error before any hardware call',
           err is not None and 'zen_ref_images_path' in str(err) and 'is not an existing folder' in str(err)
           and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+    ZEN_BOX.stop()
 
     # ------------------------------------------------------------------ (5) RAMM placeholder
     task = him.HiMRAMMTask()
