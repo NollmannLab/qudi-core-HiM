@@ -45,6 +45,8 @@ from qtpy import QtCore
 from qudi.core.connector import Connector
 from qudi.tasks.common.data_folders import choose_data_root, create_run_folder
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
+from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
+                                            set_metadata_field, write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
 from qudi.tasks.fluidics import FluidicsSDTask, FluidicsRAMMTask
@@ -92,6 +94,10 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     Not meant to be configured directly - use a setup subclass. Options (config "options:"):
         user_config_path    experiment YAML written by the experiment configurator (required)
+        metadata_template   microscope metadata template (YAML, custom_config/custom_metadata_templates/,
+                            same file as the basic imaging GUI's metadata_template); optional: not set ->
+                            one warning, no metadata.yml; set but missing / unreadable -> reported with the
+                            other problems, before any hardware call
     The obsolete option probe_valve_number is accepted but ignored (one warning at the start of the
     task): the probe valve is the outlet of the 'Probe' buffer entry of the injections file.
 
@@ -104,7 +110,11 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     (tasks/common/data_folders.py); self.prefix = NNN. <root> is chosen before any hardware call
     (choose_data_root): save_network_path when it is set and writable, otherwise save_path (a server
     folder that is not reachable gives a warning in the log and a non-modal pop-up). qudi writes
-    HiM_parameters.yml and movie_name.txt there.
+    HiM_parameters.yml, movie_name.txt, experiment_config.yaml (byte copy of the experiment file) and, with
+    a metadata template, metadata.yml there: the template with Time, the Acquisition fields sample_name,
+    laser_lines, laser_power_(%), number_z_planes and roi_list_(xyz) (all ROIs with their positions), and
+    Fluidics: hybridization and photobleaching (the lists of the injections file); other fields as in the
+    template.
     Injections file (injections configurator): buffer {outlet: name}, probes {tube: name},
     hybridization list, photobleaching list, probe_needle_mode 'next' | 'same' (missing -> 'next').
 
@@ -147,6 +157,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     # options, set by the config ("options:")
     user_config_path = None
+    metadata_template = None  # optional: microscope metadata template (metadata.yml in the run folder)
     # obsolete option: accepted so that a config still setting it loads, ignored (warning in _run) - the
     # probe valve is read from the injections file
     probe_valve_number = None
@@ -178,6 +189,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.save_path = None
         self.save_network_path = ''
         self._data_root = None
+        self._metadata_template = None
         self.imaging_sequence = None
         self.num_z_planes = None
         self._valve = self._flow = self._robot = None
@@ -201,6 +213,10 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         params = self._read_yaml(self.user_config_path, 'experiment file')
         problems = [f'experiment file {self.user_config_path}: {key!r} missing'
                     for key in self._EXPERIMENT_KEYS if params.get(key) is None]
+        try:
+            self._metadata_template = optional_metadata_template(self)
+        except RuntimeError as err:
+            problems.append(str(err))
         self.sample_name = params.get('sample_name')
         self.roi_list_path = params.get('roi_list_path')
         self.injections_path = params.get('injections_path')
@@ -297,6 +313,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self._prepare_imaging()
         self.directory = self._create_data_folder()
         self._save_parameters(params, injections)
+        self._save_run_files(injections)
 
         # 6. cycles: hybridization -> imaging -> photobleaching -> needle rinse
         total = len(self._cycles)
@@ -577,6 +594,21 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
             yaml.safe_dump(param, outfile, default_flow_style=False, sort_keys=False)
         self.log.info(f'Saved the Hi-M parameters to {path}')
 
+    def _save_run_files(self, injections) -> None:
+        """experiment_config.yaml (byte copy of the experiment file) and, with a metadata template, metadata.yml
+        in self.directory."""
+        copy_experiment_file(self.user_config_path, self.directory)
+        if self._metadata_template is None:
+            return
+        _, _, hyb_list, pb_list, _ = injections
+        positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self.roi_names}
+        metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
+                                     self.num_z_planes)
+        set_metadata_field(metadata, 'Fluidics', 'hybridization', hyb_list)
+        set_metadata_field(metadata, 'Fluidics', 'photobleaching', pb_list)
+        path = write_metadata(self.directory, metadata)
+        self.log.info(f'Saved the microscope metadata to {path}')
+
     def _append_movie_name(self, movie_name: str) -> None:
         with open(os.path.join(self.directory, 'movie_name.txt'), 'a+') as outfile:
             outfile.write(movie_name)
@@ -654,6 +686,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             trigger_logic: trigger_logic
           options:
             user_config_path: '/path/to/qudi_task_config_files/him_task_sd_epi.yaml'
+            metadata_template: '/path/to/custom_metadata_templates/Spinning_Disk_setup.cfg'  # optional
     """
 
     trigger_logic = Connector(interface='TriggerLogic')
@@ -742,6 +775,7 @@ class HiMRAMMTask(RAMMImagingMixin, HiMTaskBase):
         #     laser_logic: laser_control_logic
         #   options:
         #     user_config_path: 'TO FILL'
+        #     metadata_template: 'TO FILL'  # optional, e.g. .../custom_metadata_templates/RAMM_setup.cfg
     """
 
     start_valve_positions = FluidicsRAMMTask.start_valve_positions
@@ -772,6 +806,7 @@ class HiMDummyTask(DummyImagingMixin, HiMTaskBase):
             laser_logic: laser_control_logic
           options:
             user_config_path: '/home/jb/qudi/qudi_task_config_files/him_task_dummy.yaml'
+            metadata_template: '/home/jb/Repositories/qudi-core-HiM/custom_config/custom_metadata_templates/Spinning_Disk_setup.cfg'
     """
 
     start_valve_positions = FluidicsRAMMTask.start_valve_positions

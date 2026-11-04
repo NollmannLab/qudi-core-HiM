@@ -45,6 +45,8 @@ import yaml
 
 from qudi.core.connector import Connector
 from qudi.tasks.common.data_folders import choose_data_root, create_run_folder
+from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
+                                            write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
 
@@ -54,8 +56,12 @@ class RoiScanTaskBase(ProgressModuleTask):
     ROI with the setup's imaging mixin (_prepare_imaging / _image_roi / _end_imaging, see
     tasks/common/imaging_steps.py).
 
-    Not meant to be configured directly - use a setup subclass. Option (config "options:"):
+    Not meant to be configured directly - use a setup subclass. Options (config "options:"):
         user_config_path    experiment YAML written by the experiment configurator (required)
+        metadata_template   microscope metadata template (YAML, custom_config/custom_metadata_templates/,
+                            same file as the basic imaging GUI's metadata_template); optional: not set ->
+                            one warning, no metadata.yml; set but missing / unreadable -> error before any
+                            hardware call
 
     User config file (user_config_path) expected keys:
         sample_name: 'Mysample'
@@ -76,7 +82,10 @@ class RoiScanTaskBase(ProgressModuleTask):
     Data (all setups): qudi creates the run folder <root>/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA]/
     (NNN: self.prefix, tasks/common/data_folders.py create_run_folder) and writes there parameters.yml
     (sample name, start_roi and the positions of the ROIs scanned in this run) and movie_name.txt (one
-    file name per imaged ROI). <root> is chosen before any hardware call, after the confirmation hook
+    file name per imaged ROI), experiment_config.yaml (byte copy of the experiment file) and, with a
+    metadata template, metadata.yml (the template with Time and the Acquisition fields sample_name,
+    laser_lines, laser_power_(%), number_z_planes when the experiment file has it, roi_list_(xyz): the ROIs
+    of this run with their positions; other fields as in the template). <root> is chosen before any hardware call, after the confirmation hook
     (choose_data_root): save_network_path (server) when it is set and writable, otherwise save_path
     (local; a server folder that is not reachable gives a warning in the log and a non-modal pop-up).
     The run folder itself is created after _prepare_imaging(). The data location keys are read and
@@ -100,6 +109,7 @@ class RoiScanTaskBase(ProgressModuleTask):
     trigger_logic = Connector(interface='TriggerLogic', optional=True)
 
     user_config_path = None  # set by the config: options: user_config_path: ...
+    metadata_template = None  # optional, set by the config: options: metadata_template: ...
 
     # shown by the Task Runner GUI for the call parameters (placeholder text and tooltip)
     parameter_hints = {'start_roi': 'ROI name, e.g. ROI_005 (empty = first ROI)'}
@@ -124,6 +134,8 @@ class RoiScanTaskBase(ProgressModuleTask):
         self._scan_rois = []      # ROIs to scan in this run, in list order
         self._scanned_rois = []   # ROIs whose imaging has finished, for the summary
         self.imaging_sequence = None
+        self._user_params = {}          # experiment file content
+        self._metadata_template = None  # metadata template (None: no metadata.yml)
         self._prev_stage_velocity = None  # stage velocity read before the scan, restored by _cleanup
         self._hardware_touched = False  # True once _run() has started changing the hardware state
 
@@ -178,6 +190,7 @@ class RoiScanTaskBase(ProgressModuleTask):
             raise RuntimeError(f'user_config_path not set for task {type(self).__name__} — add '
                                f'`options: user_config_path: ...` to this task\'s entry in the '
                                f'config file')
+        self._metadata_template = optional_metadata_template(self)
         self._load_user_parameters()
 
         # 2. ROIs of this run, from start_roi to the end of the list - checked before any hardware call
@@ -215,9 +228,10 @@ class RoiScanTaskBase(ProgressModuleTask):
         self._report_progress(f'0/{total}', 'Preparing imaging')
         self._prepare_imaging()
 
-        # 6. new data folder (hook) and metadata
+        # 6. new data folder (hook), parameters.yml, experiment file copy and metadata.yml
         self.directory = self._create_data_folder()
         self._save_metadata_file()
+        self._save_run_files()
 
         # 7. ROI loop: move, image (progress 'j/M - <name>'; the "Moving to" line is the log)
         for number, roi_name in enumerate(self._scan_rois, 1):
@@ -319,6 +333,7 @@ class RoiScanTaskBase(ProgressModuleTask):
         self.is_rna = user_param_dict.get('rna', False)
         self.roi_list_path = user_param_dict['roi_list_path']
         self.imaging_sequence = user_param_dict['imaging_sequence']
+        self._user_params = user_param_dict
         self._read_data_location(user_param_dict)
 
         self._roi_logic.load_roi_list(self.roi_list_path)
@@ -360,6 +375,18 @@ class RoiScanTaskBase(ProgressModuleTask):
             yaml.safe_dump(metadata, outfile, default_flow_style=False)
         self.log.info(f'Saved metadata to {path}')
 
+    def _save_run_files(self) -> None:
+        """experiment_config.yaml (byte copy of the experiment file) and, with a metadata template, metadata.yml
+        in the run folder."""
+        copy_experiment_file(self.user_config_path, self.directory)
+        if self._metadata_template is None:
+            return
+        positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self._scan_rois}
+        metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
+                                     self._user_params.get('num_z_planes'))
+        path = write_metadata(self.directory, metadata)
+        self.log.info(f'Saved the microscope metadata to {path}')
+
 
 class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     """ROI scan on the spinning disk: one ZEN autofocus block and one ZEN acquisition block per ROI,
@@ -390,6 +417,7 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
             laser_logic: laser_control_logic
           options:
             user_config_path: '/path/to/qudi_task_config_files/roi_multicolor_scan_task_sd.yaml'
+            metadata_template: '/path/to/custom_metadata_templates/Spinning_Disk_setup.cfg'  # optional
             acquisition_timeout_s: 120.0   # optional, max wait for ZEN's "done" trigger per block
             poll_interval_s: 0.1           # optional
     """
@@ -425,6 +453,7 @@ class RoiScanRAMMTask(RAMMImagingMixin, RoiScanTaskBase):
         #     laser_logic: laser_control_logic
         #   options:
         #     user_config_path: 'TO FILL'
+        #     metadata_template: 'TO FILL'  # optional, e.g. .../custom_metadata_templates/RAMM_setup.cfg
     """
 
 
@@ -441,5 +470,6 @@ class RoiScanDummyTask(DummyImagingMixin, RoiScanTaskBase):
             laser_logic: laser_control_logic
           options:
             user_config_path: '/home/jb/qudi/qudi_task_config_files/ROI_multicolor_scan_task_AIRYSCAN.yaml'
+            metadata_template: '/home/jb/Repositories/qudi-core-HiM/custom_config/custom_metadata_templates/Spinning_Disk_setup.cfg'
             dummy_imaging_time_s: 2.0      # optional
     """

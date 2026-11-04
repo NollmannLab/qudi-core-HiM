@@ -159,6 +159,7 @@ def _section_progress():
     entry = copy.deepcopy(CFG['logic']['task_runner']['options']['module_tasks']['roi_multicolour_scan_dummy'])
     check('dummy_config: roi_multicolour_scan_dummy is RoiScanDummyTask',
           entry['module.Class'] == 'qudi.tasks.roi_multicolour_scan.RoiScanDummyTask')
+    entry['options'] = _short.local_options(repo, entry['options'])  # metadata_template of the repository
     entry['options'].update({'user_config_path': user_cfg, 'dummy_imaging_time_s': _short.IMAGING_S})
     tasks_cfg = {'roi_multicolour_scan_dummy': entry,
                  'roi_scan_sd': {'module.Class': 'qudi.tasks.roi_multicolour_scan.RoiScanSDTask',
@@ -848,10 +849,12 @@ def _section_zen_popup():
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 
-# --- data folder (server / local) ---
+# --- run folder and run files ---
 def _section_data_folder():
     """Run folder created by qudi (tasks/common/data_folders.py) for the ROI scan and the Hi-M task: on the
-    server folder (save_network_path) when it is writable, otherwise in the local folder (save_path).
+    server folder (save_network_path) when it is writable, otherwise in the local folder (save_path); files
+    written there besides the data (tasks/common/run_metadata.py): experiment_config.yaml and metadata.yml
+    (option metadata_template; the repository's Spinning_Disk_setup.cfg unless a case changes it).
 
     Temporary "server" and "local" folders; unreachable folders are paths under a regular file or under
     /proc (cannot be created, also when the tests run as root). ROI scan SD: roi / laser stand-ins and a
@@ -868,7 +871,7 @@ def _section_data_folder():
     from qudi.core.connector import Connector
     from qudi.tasks import roi_multicolour_scan as rs
     from qudi.tasks import him
-    from qudi.tasks.common import data_folders
+    from qudi.tasks.common import data_folders, run_metadata
 
     results = []
 
@@ -891,6 +894,7 @@ def _section_data_folder():
     open(A_FILE, 'w').close()
     MISSING = os.path.join(A_FILE, 'server')        # parent is a file: cannot be created
     READ_ONLY = '/proc/qudi_test_server'             # under /proc: cannot be created
+    TEMPLATE = os.path.join(repo, 'custom_config', 'custom_metadata_templates', 'Spinning_Disk_setup.cfg')
 
     def folder(name):
         path = os.path.join(TMP, name)
@@ -970,15 +974,17 @@ def _section_data_folder():
         yaml.safe_dump(content, open(path, 'w'))
         return path
 
-    def scan_task(cls, path):
+    def scan_task(cls, path, template=TEMPLATE):
         rec = Rec()
         stands = {'roi_logic': RoiLogic(rec), 'laser_logic': LaserControlLogic(rec)}
         if cls is rs.RoiScanSDTask:
             stands['trigger_logic'] = TriggerLogic(rec)
         KEEP.append(stands)
-        task = _short.shorten(type(cls.__name__ + 'UnderTest', (cls,), {'user_config_path': path})())
+        task = _short.shorten(type(cls.__name__ + 'UnderTest', (cls,),
+                                   {'user_config_path': path, 'metadata_template': template})())
         task.connect_modules(stands)
-        task.log.addHandler(H())
+        if not any(isinstance(h, H) for h in task.log.handlers):  # tasks of the same class share their logger
+            task.log.addHandler(H())
         return task, rec
 
     def movies(path):
@@ -1049,8 +1055,9 @@ def _section_data_folder():
           (err, result, [m for lvl, m in LOGS if lvl >= logging.WARNING]))
 
     # ------------------------------------------------------------------ (4) local folder not writable, no server
-    for label, local in (('under a file', os.path.join(A_FILE, 'local')), ('on /proc', '/proc/qudi_test_local')):
-        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_local_{label[:4]}', save_path=local))
+    for k, (label, local) in enumerate((('under a file', os.path.join(A_FILE, 'local')),
+                                        ('on /proc', '/proc/qudi_test_local'))):
+        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_local_{k}', save_path=local))
         result, err = run(task, {'start_roi': ''})
         names = [n for n, _ in rec.calls]
         check(f'(4 local folder {label}, no server) error before any hardware call (only the ROI list loaded, no '
@@ -1100,6 +1107,7 @@ def _section_data_folder():
     def him_task(cls, exp, trigger=None):
         task = _short.shorten(cls(), progress_interval_s=0.2)
         task.user_config_path = exp
+        task.metadata_template = TEMPLATE
         task.connect_modules(dict(mods, trigger_logic=trigger) if trigger else dict(mods))
         task.log.addHandler(H())
         return task
@@ -1142,6 +1150,65 @@ def _section_data_folder():
           and movies(run_folder) == [f'scan_001_RT1_{r[4:]}_ROI' for r in ROIS] and not server_boxes(),
           (err, result))
 
+    # ------------------------------------------------------------------ run files: experiment copy and metadata.yml
+    def acquisition(metadata):
+        """Acquisition section of metadata.yml as one mapping."""
+        return {k: v for item in metadata['Acquisition'] for k, v in item.items()}
+
+    template = yaml.safe_load(open(TEMPLATE, encoding='utf-8'))
+    save_path = os.path.join(TMP, 'run_files_data')
+    exp = scan_yaml('run_files', save_path=save_path, imaging_sequence=[[561, 30.0], [488, 50.0]])
+    # (7) ROI scan dummy, 2 ROIs, template set
+    task, rec = scan_task(rs.RoiScanDummyTask, exp)
+    result, err = run(task, {'start_roi': ''})
+    run_folder = os.path.join(save_path, DAY, '001_Scan_SDsample')
+    copy_path = os.path.join(run_folder, 'experiment_config.yaml')
+    meta_path = os.path.join(run_folder, 'metadata.yml')
+    meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else None
+    acq = acquisition(meta) if meta else {}
+    check('(7 run files, template set) experiment_config.yaml byte-identical to the experiment file',
+          err is None and os.path.exists(copy_path) and open(copy_path, 'rb').read() == open(exp, 'rb').read(), err)
+    check('(7 run files, template set) metadata.yml: Time set, sample name, laser lines / powers in sequence order '
+          '(561, 488 / 30, 50), the 2 ROIs with their positions',
+          meta is not None and meta['Time'] and acq['sample_name'] == 'SDsample'
+          and acq['laser_lines'] == [561, 488] and acq['laser_power_(%)'] == [30.0, 50.0]
+          and acq['roi_list_(xyz)'] == [{'ROI_000': [0.0, 0.0, 0.0]}, {'ROI_001': [10.0, 0.0, 0.0]}], acq)
+    check('(7 run files, template set) metadata.yml: sections in template order, fields the task does not know as in '
+          'the template (number_z_planes not in the experiment file)',
+          meta is not None and list(meta) == list(template) and meta['Camera'] == template['Camera']
+          and meta['Fluidics'] == template['Fluidics']
+          and acq['number_z_planes'] == acquisition(template)['number_z_planes']
+          and acq['exposure_time_(s)'] == acquisition(template)['exposure_time_(s)'], meta)
+    params = yaml.safe_load(open(os.path.join(run_folder, 'parameters.yml'))) if os.path.isdir(run_folder) else {}
+    check('(7 run files, template set) parameters.yml and movie_name.txt as before',
+          params == {'Sample name': 'SDsample', 'start_roi': '', 'ROI_000': 'X = 0.0 - Y = 0.0',
+                     'ROI_001': 'X = 10.0 - Y = 0.0'}
+          and movies(run_folder) == [f'scan_001_{r[4:]}_ROI' for r in ROIS], params)
+
+    # (8) template option not set
+    task, rec = scan_task(rs.RoiScanDummyTask, exp, template=None)
+    result, err = run(task, {'start_roi': ''})
+    run_folder = os.path.join(save_path, DAY, '002_Scan_SDsample')
+    warnings = [m for lvl, m in LOGS if lvl == logging.WARNING]
+    check('(8 run files, no template) one warning "no metadata template set - metadata.yml not written", run '
+          'completes, no metadata.yml (experiment_config.yaml still written)',
+          err is None and result.get('imaged_rois') == ROIS and warnings == [run_metadata.NO_TEMPLATE_WARNING]
+          and not os.path.exists(os.path.join(run_folder, 'metadata.yml'))
+          and os.path.exists(os.path.join(run_folder, 'experiment_config.yaml')), (err, warnings))
+
+    # (9) template path wrong / file unreadable
+    bad_yaml = os.path.join(TMP, 'bad_template.cfg')
+    open(bad_yaml, 'w').write('Acquisition: [unclosed\n')
+    for label, path, fragment in (('wrong path', os.path.join(TMP, 'no_template.cfg'), 'is not an existing file'),
+                                  ('unreadable', bad_yaml, 'Could not read metadata_template')):
+        task, rec = scan_task(rs.RoiScanDummyTask, exp, template=path)
+        result, err = run(task, {'start_roi': ''})
+        check(f'(9 run files, template {label}) error "{fragment}" before any hardware call (no roi / laser call, '
+              f'no run folder), cleanup restores nothing',
+              err is not None and fragment in str(err) and rec.calls == []
+              and not os.path.exists(os.path.join(save_path, DAY, '003_Scan_SDsample'))
+              and any('nothing to restore' in m for _, m in LOGS), (err, rec.calls))
+
     ZEN_BOX.stop()
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
@@ -1151,7 +1218,7 @@ SECTIONS = [
     ('progress display', _section_progress),
     ('start ROI', _section_start_roi),
     ('ZEN settings pop-up', _section_zen_popup),
-    ('data folder (server / local)', _section_data_folder),
+    ('run folder and run files', _section_data_folder),
 ]
 
 if __name__ == '__main__':

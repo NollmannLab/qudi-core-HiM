@@ -1,10 +1,12 @@
 """Hi-M task (qudi.tasks.him) on the dummy setup, the SD task with a fake ZEN, the RAMM placeholder.
 
-Usage: QT_QPA_PLATFORM=offscreen python tests/test_him.py [<repo_root>] [quick]
+Usage: QT_QPA_PLATFORM=offscreen python tests/test_him.py [<repo_root>] [quick | metadata]
+(quick: without the interrupt / error / SD / RAMM cases; metadata: only the run files case.)
 Real modules of dummy_config.cfg: fluidics (dummy valve, DaqPumpController pumps, DummyFlowSensor,
 FluidicsFlowLogic, pipetting robot on the dummy stage), roi_logic and laser_control_logic. The task
 runs in its own thread, the modules in the main thread (event loop). Logic calls are recorded.
 Sections:
+  - run files: experiment_config.yaml and metadata.yml in the run folder;
   - Hi-M cycles: full run, progress, interrupt, errors, needle position, needle modes, SD (fake ZEN),
     RAMM placeholder;
   - probe valve read from the injections file (plan, needle, valve, obsolete option).
@@ -143,15 +145,18 @@ def files(injections, name, roi_list=ROI3, save_path=None, extra=None):
 
 
 ENTRY = CFG['logic']['task_runner']['options']['module_tasks']['him_dummy']
-check('dummy_config: him_dummy is HiMDummyTask, options user_config_path only, and the 5 connectors',
-      ENTRY['module.Class'] == 'qudi.tasks.him.HiMDummyTask' and set(ENTRY['options']) == {'user_config_path'}
+check('dummy_config: him_dummy is HiMDummyTask, options user_config_path and metadata_template (a template of the '
+      'repository), and the 5 connectors',
+      ENTRY['module.Class'] == 'qudi.tasks.him.HiMDummyTask'
+      and set(ENTRY['options']) == {'user_config_path', 'metadata_template'}
+      and os.path.isfile(_short.local_options(repo, ENTRY['options'])['metadata_template'])
       and set(ENTRY['connect']) == {'valve_logic', 'flow_logic', 'robot_logic', 'roi_logic', 'laser_logic'})
 MODS = {'valve_logic': valve, 'flow_logic': flow, 'robot_logic': robot, 'roi_logic': roi, 'laser_logic': laser}
 
 
 def make_task(cls=him.HiMDummyTask, user_config_path=None, **attrs):
     task = cls()
-    for k, v in ENTRY['options'].items():
+    for k, v in _short.local_options(repo, ENTRY['options']).items():
         setattr(task, k, v)
     task.user_config_path = user_config_path
     # short settings; live progress every 0.2 s so that the short waits still show their live text
@@ -223,6 +228,46 @@ def end_state_ok(label, t0):
 
 # --- Hi-M cycles: run, progress, interrupt, errors, needle, SD, RAMM ---
 QUICK = 'quick' in sys.argv[1:]
+METADATA_ONLY = 'metadata' in sys.argv[1:]
+
+# --- run files: experiment copy and metadata.yml ---
+# Hi-M dummy, 1 probe, 2 ROIs, metadata_template of dummy_config.cfg (template of the repository)
+meta_inj = copy.deepcopy(EXAMPLE)
+meta_inj['probes'] = {1: 'RT1'}
+meta_exp = files(meta_inj, 'metadata')
+task = make_task(user_config_path=meta_exp)
+t0 = monotonic()
+result, err, _, _ = run(task)
+run_folder = result['directory'] if result else ''
+meta_path = os.path.join(run_folder, 'metadata.yml')
+meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else None
+template = yaml.safe_load(open(task.metadata_template, encoding='utf-8'))
+section = lambda m, name: {k: v for item in m[name] for k, v in item.items()}  # noqa: E731
+acq = section(meta, 'Acquisition') if meta else {}
+fluidics_meta = section(meta, 'Fluidics') if meta else {}
+check('(run files) 1 cycle done; experiment_config.yaml byte-identical to the experiment file',
+      err is None and result and result['cycles_done'] == 1
+      and open(os.path.join(run_folder, 'experiment_config.yaml'), 'rb').read() == open(meta_exp, 'rb').read(),
+      (err, result))
+check('(run files) metadata.yml: Fluidics hybridization / photobleaching = the lists of the injections file',
+      fluidics_meta.get('hybridization') == meta_inj['hybridization list']
+      and fluidics_meta.get('photobleaching') == meta_inj['photobleaching list'], fluidics_meta)
+check(f'(run files) metadata.yml: Time, sample name, laser lines / powers, 5 z planes, the {N} ROIs with their '
+      f'positions; other sections as in the template',
+      meta is not None and meta['Time'] and acq['sample_name'] == 'Mysample' and acq['laser_lines'] == [488, 561]
+      and acq['laser_power_(%)'] == [50.0, 80.0] and acq['number_z_planes'] == 5
+      and acq['roi_list_(xyz)'] == [{n: [float(v) for v in roi.get_roi_position(n)]} for n in NAMES]
+      and list(meta) == list(template) and meta['Camera'] == template['Camera'], acq)
+him_params = yaml.safe_load(open(os.path.join(run_folder, 'HiM_parameters.yml'))) if run_folder else {}
+check('(run files) HiM_parameters.yml as before (global, fluidic, imaging parameters, ROIs) and movie_name.txt',
+      list(him_params) == ['1- global parameters', '2- fluidic parameters', '3- imaging parameters', '4- ROIs']
+      and him_params['2- fluidic parameters']['probes'] == {1: 'RT1'} and list(him_params['4- ROIs']) == NAMES
+      and open(os.path.join(run_folder, 'movie_name.txt')).read().split()
+      == [f'scan_001_RT1_{n[4:]}_ROI' for n in NAMES], him_params)
+end_state_ok('run files', t0)
+if METADATA_ONLY:
+    print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)
+    os._exit(0 if all(ok for _, ok in results) else 1)
 
 # ------------------------------------------------------------------ (1) full 2-probe run (example injections file)
 # incubation long enough for the live countdown checked below

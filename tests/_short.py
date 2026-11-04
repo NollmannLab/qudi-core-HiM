@@ -78,6 +78,16 @@ def speed_up(module):
     return module
 
 
+def local_options(repo, options):
+    """Copy of the options of a task entry of dummy_config.cfg for the tests: metadata_template (an absolute path
+    on the dummy machine) points to the template of the same name in <repo>/custom_config/custom_metadata_templates."""
+    options = dict(options or {})
+    if options.get('metadata_template'):
+        name = os.path.basename(str(options['metadata_template']).replace('\\', '/'))
+        options['metadata_template'] = os.path.join(repo, 'custom_config', 'custom_metadata_templates', name)
+    return options
+
+
 def shorten(task, **extra):
     """Set the short durations of TASK_ATTRIBUTES (and extra attributes) on the task instance.
     Only attributes the task class defines are set. Returns the task."""

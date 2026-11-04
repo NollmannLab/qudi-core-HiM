@@ -86,10 +86,8 @@ class SDImagingMixin:
 
         # handshake with ZEN
         self._check_interrupt()
-        self.log.info('Waiting for ZEN to signal it is ready (select the right experiment block '
-                      'and click "Start Experiment" in ZEN)...')
+        self._report_progress(f'Waiting for ZEN "ready"', log=False)
         self._wait_for_ready()
-        self.log.info('ZEN is ready - starting the ROI scan.')
 
     def _image_roi(self, roi_name: str, file_name: str) -> None:
         """Two start/done handshakes with ZEN (autofocus, then acquisition). Raises on interrupt or

@@ -57,10 +57,12 @@ One suite per component in `tests/`, one section per feature inside a suite (a
   hints (placeholder, tooltip), start / end warning dialogs.
 - `test_photobleaching.py` - photobleaching task: hardware calls, progress display, dialogs.
 - `test_roi_scan.py` - ROI scan task: progress display, start ROI, ZEN settings pop-up of the
-  spinning disk, run folder on the server or local folder (ROI scan and Hi-M).
+  spinning disk, run folder on the server or local folder and run files (experiment copy,
+  metadata.yml) - ROI scan and Hi-M.
 - `test_fluidics.py` - fluidics task: options, sequence, interrupt, validation and hardware
   errors, needle position, probe valve read from the injections file.
-- `test_him.py` - Hi-M task: cycles, progress, interrupt, errors, needle modes, SD (fake ZEN),
+- `test_him.py` - Hi-M task: run files (experiment copy, metadata.yml; `metadata` runs only
+  this case), cycles, progress, interrupt, errors, needle modes, SD (fake ZEN),
   RAMM placeholder, probe valve read from the injections file.
 
 Rule: a change adds or adapts cases in the existing suite of the component it touches; a new file

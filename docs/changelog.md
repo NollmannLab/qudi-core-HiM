@@ -10,6 +10,32 @@ Last updated: 2026-11-04
 
 #### Added
 
+- ROI scan and Hi-M: experiment file copy and microscope metadata in the run folder (2026-11-04).
+  - New `src/qudi/tasks/common/run_metadata.py`: `copy_experiment_file` (byte copy as
+    `experiment_config.yaml`), `load_metadata_template` / `set_metadata_field` (moved from
+    `psf_stack_opm.py`, same behaviour), `write_metadata` (YAML, template key order), `fill_run_metadata`
+    (Time and the Acquisition fields known to the ROI scan / Hi-M), `optional_metadata_template`.
+  - Task option `metadata_template` (optional) on `RoiScanTaskBase` and `HiMTaskBase`: not set -> one
+    warning 'no metadata template set - metadata.yml not written'; missing or unreadable file -> error
+    before any hardware call (Hi-M: reported with the other problems).
+  - ROI scan: with parameters.yml, `experiment_config.yaml` and `metadata.yml` (Time; Acquisition:
+    sample_name, laser_lines, laser_power_(%), number_z_planes when the experiment file has it,
+    roi_list_(xyz) of the ROIs of the run). Hi-M: same, with all ROIs, and Fluidics: hybridization /
+    photobleaching (lists of the injections file). parameters.yml / HiM_parameters.yml unchanged.
+  - PSF task: imports the two moved helpers; its metadata files are unchanged.
+  - Configs: `metadata_template` in the ROI scan and Hi-M entries of `Spinning_disk_config.cfg` (template
+    of the basic imaging GUI), commented in `RAMM_config.cfg`, `dummy_config.cfg` dummy tasks ->
+    `Spinning_Disk_setup.cfg` of the repository. Task docstrings updated.
+  - Tests: `tests/_short.py local_options` points a configured template to the repository's file;
+    `test_roi_scan.py` "run folder and run files" section (template set / not set / wrong or unreadable),
+    `test_him.py` run files case (`metadata` word runs only it); dummy_config entry checks of
+    `test_him.py` and `test_fluidics.py` updated. Fixes in `test_roi_scan.py`: a case label with a
+    slash used in a file name; the log handler added once per logger.
+
+### Tasks
+
+#### Added
+
 - Hi-M on the spinning disk: ZEN settings pop-up before any hardware call, as in the ROI scan (2026-11-04).
   - `common/imaging_steps.py`, `SDImagingMixin._confirm_zen_settings(loops)`: logs the channels (imaging
     sequence order) and the number of acquisition loops, then shows the modal box 'ZEN settings' with the

@@ -142,6 +142,7 @@ from tifffile import TiffWriter
 
 from qudi.core.connector import Connector
 from qudi.core.scripting.moduletask import ModuleTask
+from qudi.tasks.common.run_metadata import load_metadata_template, set_metadata_field
 
 
 class PsfStackTask(ModuleTask):
@@ -204,7 +205,7 @@ class PsfStackTask(ModuleTask):
     def _run(self) -> dict:
         # ---- checks that do not touch any hardware ------------------------------------------
         self._check_setup_options()
-        template = self._load_metadata_template()
+        template = load_metadata_template(self.metadata_template)
         params = self._load_user_config()
         voltages = self._float_steps(params['galvo_start'], params['galvo_stop'],
                                      params['galvo_step'], 'galvo')
@@ -401,15 +402,6 @@ class PsfStackTask(ModuleTask):
             raise RuntimeError(f'metadata_template "{self.metadata_template}" is not an existing '
                                f'file.')
 
-    def _load_metadata_template(self) -> dict:
-        try:
-            with open(self.metadata_template, 'r', encoding='utf-8') as f:
-                template = YAML().load(f)
-        except Exception as err:
-            raise RuntimeError(f'Could not read metadata_template "{self.metadata_template}": '
-                               f'{err}') from err
-        return dict(template or {})
-
     def _load_user_config(self) -> dict:
         """Read and check the experiment-configurator YAML (user_config_path) - no hardware call.
 
@@ -600,23 +592,6 @@ class PsfStackTask(ModuleTask):
                 self.log.error(f'Could not close the TIFF file {name}: {err}')
         self._writers = {}
 
-    @staticmethod
-    def _set_field(metadata: dict, section: str, key: str, value) -> None:
-        """Set metadata[section][key] for the template layout (a section is a list of one-key
-        mappings, or a mapping); the key is added if missing. Other fields are left untouched.
-        """
-        content = metadata.get(section)
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and key in item:
-                    item[key] = value
-                    return
-            content.append({key: value})
-        elif isinstance(content, dict):
-            content[key] = value
-        else:
-            metadata[section] = [{key: value}]
-
     def _write_metadata(self, template: dict, folder: str, index: int, voltage: float,
                         z_focus: float, z_offsets: List[float], lines: List[Tuple[int, float]],
                         exposure: float) -> None:
@@ -632,7 +607,7 @@ class PsfStackTask(ModuleTask):
             'distance_z_planes_(µm)': float(self._z_step_um),
         }
         for key, value in acquisition.items():
-            self._set_field(metadata, 'Acquisition', key, value)
+            set_metadata_field(metadata, 'Acquisition', key, value)
         metadata['PSF'] = [
             {'galvo_voltage_(V)': voltage},
             {'galvo_index': index},

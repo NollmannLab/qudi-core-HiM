@@ -495,9 +495,10 @@ check('Spinning_disk_config: injections_configurator_logic probe_valve_outlet 3;
       cfg('Spinning_disk_config.cfg')['logic']['injections_configurator_logic']['options']['probe_valve_outlet'] == 3
       and lg['injections_configurator_logic']['options']['probe_valve_outlet'] == 7)
 tasks_cfg = lg['task_runner']['options']['module_tasks']
-check('dummy_config task entries: options of fluidics_dummy / him_dummy = user_config_path only',
+check('dummy_config task entries: options of fluidics_dummy = user_config_path only; him_dummy = user_config_path '
+      'and metadata_template',
       set(tasks_cfg['fluidics_dummy']['options']) == {'user_config_path'}
-      and set(tasks_cfg['him_dummy']['options']) == {'user_config_path'})
+      and set(tasks_cfg['him_dummy']['options']) == {'user_config_path', 'metadata_template'})
 tr_err = {}
 for cls in (fluidics.FluidicsDummyTask, fluidics.FluidicsSDTask, fluidics.FluidicsRAMMTask):
     try:
