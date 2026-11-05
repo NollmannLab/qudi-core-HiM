@@ -273,6 +273,7 @@ class ZenTriggerLogic:
 
     def __init__(self, zen, images=None):
         self.zen, self.sent, self.images, self.written, self.acquired = zen, [], images, [], []
+        self.placeholder = False  # True: at "ready", ZEN creates the (empty) image file of the first autofocus block
         self.starts = 0  # start triggers of the current run (counted again for each run, at ZEN "ready")
 
     def send_trigger(self, name):
@@ -296,6 +297,11 @@ class ZenTriggerLogic:
         if name == 'trigger_ZEN_ready':
             self.zen.ready()
             self.starts = 0  # new run: the next start trigger is an autofocus block
+            if self.placeholder and self.zen.created:
+                path = os.path.join(self.zen.created[-1], 'autofocus',
+                                    f'experiment_AcquisitionBlock1_pt{len(self.written) + 1}.czi')
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, 'wb').close()
         return True
 
 
@@ -605,6 +611,22 @@ if selected('sd_zen_folder'):
           (err, rows, scores, lines[-1:]))
     end_state_ok('autofocus abort', t0)
 
+    # autofocus image of the first ROI created (empty) by ZEN before "ready", filled after the trigger
+    zen_trigger.placeholder = True
+    try:
+        task, result, err, t0, *_ = zen_case('af_placeholder')
+    finally:
+        zen_trigger.placeholder = False
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    checks_af = [m for m in msgs if m.startswith('Autofocus check cycle')]
+    check(f'(autofocus image) the image file of the first ROI exists before "ready": run completed, {N} checks '
+          f'passed, the first ROI uses that file',
+          err is None and result and result['cycles_done'] == 1 and len(checks_af) == N
+          and all(m.endswith(' - pass') for m in checks_af)
+          and any(m.startswith(f'Autofocus image of {NAMES[0]}: experiment_AcquisitionBlock1_pt') for m in msgs),
+          (err, checks_af))
+    end_state_ok('autofocus image before ready', t0)
+
     # online transfer: setup check, server reachable, server unreachable, interrupt
     task, result, err, t0, *_ = zen_case('tr_noserver', transfer_data=True, save_network_path='')
     check("(transfer) transfer_data on and save_network_path empty -> error before any hardware call",
@@ -796,7 +818,7 @@ if selected('autofocus'):
     task._check_interrupt = fake_interrupt
     task._AF_POLL_S = 0.05
     try:
-        task._wait_for_autofocus_image()
+        task._wait_for_autofocus_image('ROI_000')
         stopped = None
     except ModuleScriptInterrupted as exc:
         stopped = exc
@@ -806,7 +828,7 @@ if selected('autofocus'):
     _short.write_autofocus_image(task._zen_directory, 2)
     task._check_interrupt = lambda: None
     done = []
-    waiter = threading.Thread(target=lambda: done.append(task._wait_for_autofocus_image()), daemon=True)
+    waiter = threading.Thread(target=lambda: done.append(task._wait_for_autofocus_image('ROI_000')), daemon=True)
     task._af_seen = set()
     waiter.start()
     sleep(0.3)
@@ -815,6 +837,104 @@ if selected('autofocus'):
     waiter.join(2)
     check('(wait loop) two new files -> keeps waiting; exactly one new file -> returns it',
           two_new and done and done[0].endswith('_pt2.czi'), (two_new, done))
+
+    # image file of the first ROI created by ZEN before "ready" (still empty), filled at the end of the autofocus
+    task = af_task(2, 0.5)
+    task._zen_folders_before, task._data_root = set(), tempfile.mkdtemp(dir=TMP)
+    placeholder = os.path.join(task._zen_directory, 'autofocus', 'experiment_AcquisitionBlock1_pt1.czi')
+    os.makedirs(os.path.dirname(placeholder))
+    open(placeholder, 'wb').close()  # ZEN reached the autofocus block of the first ROI
+    task.directory = task._create_data_folder()
+    seen_after_setup = set(task._af_seen)
+    _short.write_autofocus_image(task._zen_directory, 1)  # ZEN writes the image of the first ROI (same file)
+    t0 = monotonic()
+    first = task._wait_for_autofocus_image('ROI_000')
+    _short.write_autofocus_image(task._zen_directory, 2)  # second ROI
+    second = task._wait_for_autofocus_image('ROI_001')
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    check('(autofocus image) the image file already in the ZEN folder when the run folder is created (first ROI) is '
+          'the image of the first ROI after the "done" trigger (snapshot empty at the start); the second ROI gets '
+          'the next image (snapshot kept); wait / found logged',
+          seen_after_setup == set() and first == placeholder and second.endswith('_pt2.czi')
+          and f'Waiting for the autofocus image of ROI_000 ({af.AUTOFOCUS_IMAGE_PATTERN}) in {task._zen_directory}' in msgs
+          and 'Autofocus image of ROI_000: experiment_AcquisitionBlock1_pt1.czi' in msgs
+          and 'Autofocus image of ROI_001: experiment_AcquisitionBlock1_pt2.czi' in msgs, (first, second, msgs))
+
+    # still waiting: a warning every _AF_WAIT_WARNING_S with the new matching files, then the interrupt
+    task = af_task(2, 0.5)
+    _short.write_autofocus_image(task._zen_directory, 1)
+    _short.write_autofocus_image(task._zen_directory, 2)  # two new files: ZEN still writing
+    task._AF_POLL_S, task._AF_WAIT_WARNING_S = 0.05, 0.2
+    polls = []
+
+    wait_start = monotonic()
+
+    def interrupt_late():
+        polls.append(monotonic())
+        if monotonic() - wait_start > 0.65:  # the user clicks Interrupt after about 0.65 s
+            raise ModuleScriptInterrupted()
+
+    task._check_interrupt = interrupt_late
+    t0 = monotonic()
+    try:
+        task._wait_for_autofocus_image('ROI_000')
+        stopped = None
+    except ModuleScriptInterrupted as exc:
+        stopped = exc
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(autofocus image) still waiting: warning every _AF_WAIT_WARNING_S (0.2 s here) "Still waiting for the '
+          'autofocus image of ROI_000 after <t> s: 2 new matching file(s)" with their names; stops on interrupt',
+          stopped is not None and len(warnings) >= 2
+          and all(m.startswith('Still waiting for the autofocus image of ROI_000 after ') for m in warnings)
+          and all(': 2 new matching file(s) (experiment_AcquisitionBlock1_pt1.czi, experiment_AcquisitionBlock1_pt2.czi)'
+                  in m for m in warnings), (stopped, warnings))
+
+    # reading: fails twice then succeeds; always fails
+    calls_read = []
+
+    def flaky(path):
+        calls_read.append(path)
+        if len(calls_read) <= 2:
+            raise OSError('file still being written (test)')
+        return _short.read_npy_image(path)
+
+    task = af_task(2, 0.5)
+    task._AF_READ_RETRY_S = 0.01
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    af.read_autofocus_image = flaky
+    t0 = monotonic()
+    try:
+        task._check_autofocus('ROI_000')
+        read_err = None
+    except Exception as exc:
+        read_err = exc
+    finally:
+        af.read_autofocus_image = _short.read_npy_image
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(autofocus image) read failing twice then working: score computed (pass), two warnings (attempts 1/5, 2/5)',
+          read_err is None and len(calls_read) == 3 and task._af_passed == 1 and not np.isnan(task._af_scores[0, 0])
+          and len(warnings) == 2 and 'attempt 1/5' in warnings[0] and 'attempt 2/5' in warnings[1], (read_err, warnings))
+
+    def broken(path):
+        raise OSError('unreadable file (test)')
+
+    task = af_task(2, 0.5)
+    task._AF_READ_RETRY_S = 0.01
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    af.read_autofocus_image = broken
+    t0 = monotonic()
+    try:
+        task._check_autofocus('ROI_000')
+        read_err = None
+    except OSError as exc:
+        read_err = exc
+    finally:
+        af.read_autofocus_image = _short.read_npy_image
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(autofocus image) read always failing: 4 warnings, then the error of the 5th attempt is raised',
+          read_err is not None and 'unreadable file' in str(read_err) and len(warnings) == 4, (read_err, warnings))
 
 # --- online data transfer: DataTransfer (common/data_transfer.py), small files in temporary folders ---
 if selected('transfer'):

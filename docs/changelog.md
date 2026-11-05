@@ -8,6 +8,26 @@ Last updated: 2026-11-05
 
 ### Tasks
 
+#### Fixed
+
+- Hi-M on the spinning disk: the autofocus check waited for ever on the first ROI (2026-11-05).
+  - Cause: ZEN creates the image file of a block (still empty) as soon as it reaches the block, before the
+    trigger. At the start of the experiment it creates `..._AcquisitionBlock1_pt1.czi`, then reports "ready";
+    `HiMSDTask._create_data_folder` (after "ready") filled the list of seen autofocus images with the folder
+    content, so pt1 was already "seen" and no new image ever appeared for the first ROI.
+  - Fix (legacy rule, `check_for_new_autofocus_images`): the list starts empty; after ZEN's "done" trigger, the
+    single image not in the list is the image of the ROI, and the listing becomes the snapshot for the next
+    check.
+  - Logs: references loaded (number, size, folder), start of each wait, a warning every
+    `_AF_WAIT_WARNING_S` (60 s) while waiting with the number and the names (up to 5) of the new matching
+    files, the file found.
+  - Reading the new image: up to `_AF_READ_ATTEMPTS` (5) attempts, `_AF_READ_RETRY_S` (1 s) apart through
+    `_zen_wait` (interruptible), a warning at each failure, the last error raised.
+  - Tests (`tests/test_him.py`): image file of the first ROI present before "ready" (unit case and a full SD
+    run), two ROIs in a row, "still waiting" warning and interrupt, read retries.
+
+### Tasks
+
 #### Added
 
 - Hi-M on the spinning disk: online data transfer to the server; SD run folders always local (2026-11-05).

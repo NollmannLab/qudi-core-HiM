@@ -800,9 +800,14 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         and they must all have the same shape. correlation_threshold must be in [-1, 1] (values tuned for
         the score of the former qudi-HiM task do not apply), autofocus_min_fraction in [0, 1].
       - Once the ZEN folder is known: copy of the references as autofocus_reference.npy in the metadata
-        folder, list of the autofocus images already in the ZEN folder.
-      - Each check: wait (poll every 0.5 s, no timeout, interruptible) until exactly one new autofocus image
-        appears; score and shift (px) logged. Pass (score >= correlation_threshold): the image becomes the
+        folder; the list of the autofocus images already seen starts EMPTY (as the legacy task): ZEN creates the
+        image file of a block (still empty) as soon as it reaches the block, so the image of the first ROI
+        (..._AcquisitionBlock1_pt1.czi) can already exist when ZEN reports "ready".
+      - Each check, after ZEN's "done" trigger of the autofocus block: wait (poll every 0.5 s, no timeout,
+        interruptible; a warning every _AF_WAIT_WARNING_S with the new matching files) until exactly one
+        autofocus image not seen yet exists (several: ZEN is still writing), then that list becomes the
+        snapshot for the next check. The image is read (first plane; up to _AF_READ_ATTEMPTS attempts,
+        _AF_READ_RETRY_S apart, warning at each failure); score and shift (px) logged. Pass (score >= correlation_threshold): the image becomes the
         reference of the ROI (autofocus_reference.npy saved again). Fail: the reference is kept, warning
         (and a second one if the ROI already failed in the previous cycle).
       - Abort: as soon as (ROIs - failures of the cycle) / ROIs < autofocus_min_fraction, an error gives the
@@ -874,7 +879,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self._transfer = None          # DataTransfer to <save_network_path>/<ZEN folder name>
         self._run_completed = False    # True when _run ended normally (no interrupt, no error)
         self._af_refs = None           # reference image of each ROI (n_rois, H, W)
-        self._af_seen = set()          # autofocus images already in the ZEN folder
+        self._af_seen = set()          # autofocus images already used (empty at the start of the run)
         self._af_scores = None         # correlation.npy: cycles x ROIs
         self._af_failures = 0          # failed checks in the current cycle
         self._af_failed_rois = set()   # ROIs that failed in the current cycle
@@ -919,6 +924,9 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
                     problems.append(f'autofocus reference images: {len(self._af_refs)} reference image(s) in '
                                     f'{self.zen_ref_images_path} for {len(self.roi_names)} ROI(s) - one reference '
                                     f'per ROI is required')
+                h, w = self._af_refs.shape[1:]
+                self.log.info(f'Autofocus references: {len(self._af_refs)} image(s) {h}x{w} loaded from '
+                              f'{self.zen_ref_images_path}')
         return problems
 
     def _prepare_imaging(self) -> None:
@@ -930,12 +938,13 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
 
     def _create_data_folder(self) -> str:
         """<root>/<ZEN folder name>/metadata (create_mirror_folder); self.prefix = folders in zen_saving_path
-        before ZEN started + 1, on 3 digits. Then the autofocus check files: copy of the references, list of the
-        autofocus images already in the ZEN folder, empty score table."""
+        before ZEN started + 1, on 3 digits. Then the autofocus check files: copy of the references, empty list of
+        the autofocus images seen (the image of the first ROI may already exist, still empty), empty score
+        table."""
         self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
         directory = create_mirror_folder(self._data_root, self._zen_directory, self.log)
         np.save(os.path.join(directory, autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
-        self._af_seen = set(self._autofocus_images())
+        self._af_seen = set()  # empty: the image file of the first ROI is created by ZEN before "ready"
         self._af_scores = np.full((len(self._cycles), len(self.roi_names)), np.nan)
         with open(os.path.join(directory, self._AF_CSV), 'w', newline='') as f:
             csv.writer(f).writerow(self._AF_CSV_COLUMNS)
@@ -1086,22 +1095,51 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     _AF_CSV = 'autofocus_scores.csv'
     _AF_CSV_COLUMNS = ('cycle', 'RT', 'roi', 'score', 'shift_y_px', 'shift_x_px', 'passed')
     _AF_POLL_S = 0.5  # poll interval while waiting for the new autofocus image
+    _AF_WAIT_WARNING_S = 60  # warning every _AF_WAIT_WARNING_S while the new autofocus image is not found
+    _AF_READ_ATTEMPTS = 5    # attempts to read the new autofocus image (ZEN may still be writing it)
+    _AF_READ_RETRY_S = 1.0   # pause between two read attempts
 
     def _autofocus_images(self) -> list:
         """Autofocus images (*_AcquisitionBlock1_pt*.czi) of the ZEN data folder, recursive search."""
         return glob(os.path.join(self._zen_directory, '**', autofocus_check.AUTOFOCUS_IMAGE_PATTERN), recursive=True)
 
-    def _wait_for_autofocus_image(self) -> str:
-        """Wait until exactly one new autofocus image appears in the ZEN folder (poll every 0.5 s, no timeout,
-        interruptible); returns its path. Several new files: ZEN is still writing (temporary file)."""
+    def _wait_for_autofocus_image(self, roi_name) -> str:
+        """Called after ZEN's "done" trigger of the autofocus block of roi_name: wait until exactly one autofocus
+        image of the ZEN folder is not in the snapshot self._af_seen (empty at the start of the run, so the image
+        of the first ROI is found even if ZEN created its file before "ready"); several new files: ZEN is still
+        writing, wait. Poll every _AF_POLL_S, no timeout, interruptible; a warning every _AF_WAIT_WARNING_S.
+        The listing becomes the snapshot for the next check; returns the path of the new image."""
+        self.log.info(f'Waiting for the autofocus image of {roi_name} ({autofocus_check.AUTOFOCUS_IMAGE_PATTERN}) '
+                      f'in {self._zen_directory}')
+        start = next_warning = monotonic()
+        next_warning += self._AF_WAIT_WARNING_S
         while True:
             self._check_interrupt()
             current = self._autofocus_images()
             new = sorted(set(current) - self._af_seen)
             if len(new) == 1:
                 self._af_seen = set(current)
+                self.log.info(f'Autofocus image of {roi_name}: {os.path.basename(new[0])}')
                 return new[0]
+            if monotonic() >= next_warning:
+                next_warning += self._AF_WAIT_WARNING_S
+                names = ', '.join(os.path.basename(path) for path in new[:5]) + (', ...' if len(new) > 5 else '')
+                self.log.warning(f'Still waiting for the autofocus image of {roi_name} after {monotonic() - start:.0f} '
+                                 f's: {len(new)} new matching file(s)' + (f' ({names})' if new else ''))
             self._zen_wait(self._AF_POLL_S)
+
+    def _read_autofocus_image(self, path):
+        """First plane of the new autofocus image; up to _AF_READ_ATTEMPTS attempts, _AF_READ_RETRY_S apart
+        (interruptible), a warning at each failure; the last failure is raised."""
+        for attempt in range(1, self._AF_READ_ATTEMPTS + 1):
+            try:
+                return autofocus_check.read_autofocus_image(path)
+            except Exception as err:
+                if attempt == self._AF_READ_ATTEMPTS:
+                    raise
+                self.log.warning(f'Could not read the autofocus image {os.path.basename(path)} (attempt {attempt}/'
+                                 f'{self._AF_READ_ATTEMPTS}): {err!r} - new attempt in {self._AF_READ_RETRY_S:g} s')
+                self._zen_wait(self._AF_READ_RETRY_S)
 
     def _imaging(self, label, rt) -> None:
         """Imaging of the cycle between the start and the end of its autofocus checks; before it, the copies to the
@@ -1134,7 +1172,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         common/autofocus_check.py); see the class docstring for pass / fail and the abort rule."""
         cycle, index, n = self._cycles_done, self.roi_names.index(roi_name), len(self.roi_names)
         # wait for the new autofocus image, read its first plane
-        image = autofocus_check.read_autofocus_image(self._wait_for_autofocus_image())
+        image = self._read_autofocus_image(self._wait_for_autofocus_image(roi_name))
         # score and shift against the reference of this ROI
         score, shift_y, shift_x = autofocus_check.autofocus_score(self._af_refs[index], image)
         passed = score >= self.correlation_threshold
