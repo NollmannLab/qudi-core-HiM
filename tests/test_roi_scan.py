@@ -372,7 +372,7 @@ def _section_start_roi():
     entry = CFG['logic']['task_runner']['options']['module_tasks']['roi_multicolour_scan_dummy']
     # dummy_config entry of roi_multicolour_scan_dummy: checked once, in the progress display section
     user_cfg = os.path.join(TMP, 'roi_scan.yaml')
-    yaml.safe_dump({'sample_name': 'Mysample', 'save_path': os.path.join(TMP, 'data'), 'roi_list_path': roi_list_path,
+    yaml.safe_dump({'sample_tag': 'DAPI', 'sample_name': 'Mysample', 'save_path': os.path.join(TMP, 'data'), 'roi_list_path': roi_list_path,
                     'imaging_sequence': [[488, 50.0], [561, 80.0]]}, open(user_cfg, 'w'))
 
     LOGS = []
@@ -564,7 +564,7 @@ def _section_start_roi():
     # the ZEN settings box of RoiScanSDTask is answered 'Done - continue' (tests/_short.py AutoAnswer)
     ZEN_BOX = _short.AutoAnswer('ZEN settings')
     sd_cfg = os.path.join(TMP, 'roi_scan_sd.yaml')
-    yaml.safe_dump({'sample_name': 'SDsample', 'save_path': os.path.join(TMP, 'sd_data'), 'roi_list_path': '/fake/rois.json',
+    yaml.safe_dump({'sample_tag': 'DAPI', 'sample_name': 'SDsample', 'save_path': os.path.join(TMP, 'sd_data'), 'roi_list_path': '/fake/rois.json',
                     'zen_saving_path': ZEN.root, 'imaging_sequence': [[488, 50.0]]}, open(sd_cfg, 'w'))
     for start, n in (('', 3), ('ROI_002', 2)):
         LOGS.clear()
@@ -606,7 +606,7 @@ def _section_start_roi():
 
 
         user_cfg_stand = os.path.join(TMP, 'roi_scan_stand.yaml')
-        yaml.safe_dump({'sample_name': 'Stand', 'save_path': os.path.join(TMP, 'stand_data'), 'roi_list_path': '/fake/rois.json',
+        yaml.safe_dump({'sample_tag': 'DAPI', 'sample_name': 'Stand', 'save_path': os.path.join(TMP, 'stand_data'), 'roi_list_path': '/fake/rois.json',
                         'imaging_sequence': [[488, 50.0]]}, open(user_cfg_stand, 'w'))
         for label, interrupt_at in (('full run', None), ('interrupt during ROI 2', 0.45)):
             old_calls, old_ok = calls_of(rs_before, {'resume_from_roi': False}, interrupt_at)
@@ -715,7 +715,7 @@ def _section_zen_popup():
 
     def sd_yaml(name, sequence):
         path = os.path.join(TMP, f'{name}.yaml')
-        yaml.safe_dump({'sample_name': 'SDsample', 'save_path': os.path.join(TMP, f'data_{name}'),
+        yaml.safe_dump({'sample_tag': 'DAPI', 'sample_name': 'SDsample', 'save_path': os.path.join(TMP, f'data_{name}'),
                         'roi_list_path': '/fake/rois.json', 'imaging_sequence': sequence,
                         'zen_saving_path': ZEN.root}, open(path, 'w'))
         return path
@@ -889,6 +889,7 @@ def _section_data_folder():
             LOGS.append((r.levelno, r.getMessage()))
 
     ROIS = _short.roi_names()   # ROI_000, ROI_001
+    TAG = 'DAPI'                # sample_tag of the experiment files (names scan_<prefix>_DAPI_<roi>_ROI)
     ZEN_BOX = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box of the ROI scan
     A_FILE = os.path.join(TMP, 'a_file.txt')
     open(A_FILE, 'w').close()
@@ -1008,6 +1009,8 @@ def _section_data_folder():
         path = os.path.join(TMP, f'{name}.yaml')
         content = {'sample_name': 'SDsample', 'roi_list_path': '/fake/rois.json', 'imaging_sequence': [[488, 50.0]],
                    'zen_saving_path': ZEN.root}
+        if not {'sample_tag', 'dapi', 'rna'} & set(values):
+            content['sample_tag'] = TAG  # experiment file of the current format
         content.update(values)
         yaml.safe_dump(content, open(path, 'w'))
         return path
@@ -1060,7 +1063,7 @@ def _section_data_folder():
         zen_folder = ZEN.created[-1] if ZEN.created else ''
         run_folder = mirror(local_sd(local), zen_folder)
         prefix = str(before + 1).zfill(3)
-        expected = [f'scan_{prefix}_{r[4:]}_ROI' for r in ROIS]
+        expected = [f'scan_{prefix}_{TAG}_{r[4:]}_ROI' for r in ROIS]
         check(f'(1 ROI scan SD, run {run_number}) files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata (local '
               f'even with save_network_path set): '
               f'parameters.yml, movie_name.txt, experiment_config.yaml, metadata.yml; prefix {prefix} (folders before '
@@ -1093,7 +1096,7 @@ def _section_data_folder():
         check(f'(2 save_network_path {label}) not used by the SD ROI scan: files under <save_path>/<YYYY-MM-DD>/<ZEN '
               f'folder name>/metadata, scan runs (both ROIs), no pop-up, no warning',
               err is None and result.get('directory') == run_folder and result.get('imaged_rois') == ROIS
-              and movies(run_folder) == [f'scan_{task.prefix}_{r[4:]}_ROI' for r in ROIS] and not server_boxes()
+              and movies(run_folder) == [f'scan_{task.prefix}_{TAG}_{r[4:]}_ROI' for r in ROIS] and not server_boxes()
               and not any(lvl >= logging.WARNING for lvl, _ in LOGS),
               (err, result, [m for lvl, m in LOGS if lvl >= logging.WARNING]))
         close_boxes()
@@ -1135,6 +1138,33 @@ def _section_data_folder():
               err is not None and f'The local data folder {local} cannot be written' in str(err)
               and names == ['load_roi_list'] and any('nothing to restore' in m for _, m in LOGS)
               and not server_boxes(), (err, names))
+
+    # ------------------------------------------------------------------ (5) sample tag (folder and file names)
+    for tag, values, warning in (('DAPI', {'sample_tag': 'DAPI'}, False), ('RT1', {'sample_tag': 'RT1'}, False),
+                                 ('RNA', {'dapi': False, 'rna': True}, True), ('', {'dapi': False, 'rna': False}, True)):
+        local = folder(f'local_5_{tag or "none"}')
+        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_tag_{tag or "none"}', save_path=local, **values))
+        result, err = run(task, {'start_roi': ''})
+        run_folder = mirror(local_sd(local), ZEN.created[-1])
+        middle = f'{tag}_' if tag else ''
+        expected = [f'scan_{task.prefix}_{middle}{r[4:]}_ROI' for r in ROIS]
+        warned = [m for lvl, m in LOGS if lvl == logging.WARNING and "no 'sample_tag'" in m]
+        check(f'(5 SD, experiment file {values or "without sample_tag / dapi / rna"}) tag {tag!r}: movie names '
+              f'{expected}; warning about the former keys: {warning}',
+              err is None and task.sample_tag == tag and movies(run_folder) == expected and bool(warned) == warning,
+              (err, task.sample_tag, movies(run_folder), warned))
+        # run folder of the dummy / RAMM tasks (shared base): <root>/YYYY_MM_DD/NNN_Scan_<sample>[_<tag>]
+        base = folder(f'root_5_{tag or "none"}')
+        task._data_root = base
+        path = rs.RoiScanTaskBase._create_data_folder(task)  # the SD task names its folder after ZEN
+        check(f'(5 run folder, tag {tag!r}) <root>/YYYY_MM_DD/001_Scan_SDsample{"_" + tag if tag else ""}',
+              path == os.path.join(base, DAY, f'001_Scan_SDsample{"_" + tag if tag else ""}') and os.path.isdir(path),
+              path)
+    for bad in ('RT_1', 'RT 1', ''):
+        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml('sd_tag_bad', save_path=folder('local_5_bad'), sample_tag=bad))
+        result, err = run(task, {'start_roi': ''})
+        check(f'(5 invalid sample_tag {bad!r}) clear error before any hardware call (no roi / laser / trigger call)',
+              isinstance(err, ValueError) and 'invalid sample_tag' in str(err) and rec.calls == [], (err, rec.calls))
 
     # ------------------------------------------------------------------ Hi-M (real dummy modules)
     class FakeMain(QtCore.QObject):
@@ -1208,12 +1238,12 @@ def _section_data_folder():
     save_path = os.path.join(TMP, 'dummy_data')
     task, rec = scan_task(rs.RoiScanDummyTask, scan_yaml('dummy', save_path=save_path))
     result, err = run(task, {'start_roi': ''})
-    run_folder = os.path.join(save_path, DAY, '001_Scan_SDsample')
-    check('(6 ROI scan dummy, save_path only) save_path/YYYY_MM_DD/001_Scan_<sample> with parameters.yml and '
-          'movie_name.txt; names scan_001_<roi number>_ROI; no pop-up, no warning',
+    run_folder = os.path.join(save_path, DAY, f'001_Scan_SDsample_{TAG}')
+    check('(6 ROI scan dummy, save_path only) save_path/YYYY_MM_DD/001_Scan_<sample>_<tag> with parameters.yml and '
+          'movie_name.txt; names scan_001_<tag>_<roi number>_ROI; no pop-up, no warning',
           err is None and result.get('directory') == run_folder
           and os.path.exists(os.path.join(run_folder, 'parameters.yml'))
-          and movies(run_folder) == [f'scan_001_{r[4:]}_ROI' for r in ROIS]
+          and movies(run_folder) == [f'scan_001_{TAG}_{r[4:]}_ROI' for r in ROIS]
           and not server_boxes() and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (err, result))
     exp = _short.experiment(TMP, 'him_experiment.yaml', 'him_dummy', injections_path=inj_path)
     result, err = run(him_task(him.HiMDummyTask, exp), timeout=180)
@@ -1236,7 +1266,7 @@ def _section_data_folder():
     # (7) ROI scan dummy, 2 ROIs, template set
     task, rec = scan_task(rs.RoiScanDummyTask, exp)
     result, err = run(task, {'start_roi': ''})
-    run_folder = os.path.join(save_path, DAY, '001_Scan_SDsample')
+    run_folder = os.path.join(save_path, DAY, f'001_Scan_SDsample_{TAG}')
     copy_path = os.path.join(run_folder, 'experiment_config.yaml')
     meta_path = os.path.join(run_folder, 'metadata.yml')
     meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else None
@@ -1258,12 +1288,12 @@ def _section_data_folder():
     check('(7 run files, template set) parameters.yml and movie_name.txt as before',
           params == {'Sample name': 'SDsample', 'start_roi': '', 'ROI_000': 'X = 0.0 - Y = 0.0',
                      'ROI_001': 'X = 10.0 - Y = 0.0'}
-          and movies(run_folder) == [f'scan_001_{r[4:]}_ROI' for r in ROIS], params)
+          and movies(run_folder) == [f'scan_001_{TAG}_{r[4:]}_ROI' for r in ROIS], params)
 
     # (8) template option not set
     task, rec = scan_task(rs.RoiScanDummyTask, exp, template=None)
     result, err = run(task, {'start_roi': ''})
-    run_folder = os.path.join(save_path, DAY, '002_Scan_SDsample')
+    run_folder = os.path.join(save_path, DAY, f'002_Scan_SDsample_{TAG}')
     warnings = [m for lvl, m in LOGS if lvl == logging.WARNING]
     check('(8 run files, no template) one warning "no metadata template set - metadata.yml not written", run '
           'completes, no metadata.yml (experiment_config.yaml still written)',
@@ -1281,7 +1311,7 @@ def _section_data_folder():
         check(f'(9 run files, template {label}) error "{fragment}" before any hardware call (no roi / laser call, '
               f'no run folder), cleanup restores nothing',
               err is not None and fragment in str(err) and rec.calls == []
-              and not os.path.exists(os.path.join(save_path, DAY, '003_Scan_SDsample'))
+              and not os.path.exists(os.path.join(save_path, DAY, f'003_Scan_SDsample_{TAG}'))
               and any('nothing to restore' in m for _, m in LOGS), (err, rec.calls))
 
     ZEN_BOX.stop()

@@ -85,6 +85,7 @@ You should have received a copy of the GNU General Public License along with Qud
 
 import os
 from qtpy import QtCore
+from qtpy import QtGui
 from qtpy import QtWidgets
 from qtpy import uic
 
@@ -163,8 +164,7 @@ class ExpConfiguratorGUI(GuiBase):
 
     FIELD_SECTIONS = {
         "sample_name": "general",
-        "dapi": "general",
-        "rna": "general",
+        "sample_tag": "general",
         "email": "general",
 
         "camera": "camera",
@@ -211,12 +211,10 @@ class ExpConfiguratorGUI(GuiBase):
             "sample_name_LineEdit",
         ),
 
-        "dapi": (
-            "dapi_CheckBox",
-        ),
-
-        "rna": (
-            "rna_CheckBox",
+        "sample_tag": (
+            "sample_tag_label",
+            "sample_tag_comboBox",
+            "sample_tag_lineEdit",
         ),
 
         "email": (
@@ -456,8 +454,15 @@ class ExpConfiguratorGUI(GuiBase):
 
         self._mw.sample_name_LineEdit.textChanged.connect(self._exp_logic.update_sample_name)
         self._mw.mail_LineEdit.textChanged.connect(self._exp_logic.update_mail_address)
-        self._mw.dapi_CheckBox.stateChanged.connect(self._exp_logic.update_is_dapi)
-        self._mw.rna_CheckBox.stateChanged.connect(self._exp_logic.update_is_rna)
+        # sample tag: DAPI / RNA / IF, or Free with a tag typed in the line edit (letters, digits, '-')
+        if self._mw.sample_tag_comboBox.count() == 0:
+            self._mw.sample_tag_comboBox.addItems(list(self._exp_logic.SAMPLE_TAG_ITEMS)
+                                                  + [self._exp_logic.SAMPLE_TAG_FREE])
+        self._mw.sample_tag_lineEdit.setValidator(QtGui.QRegularExpressionValidator(
+            QtCore.QRegularExpression(self._exp_logic.SAMPLE_TAG_PATTERN), self._mw.sample_tag_lineEdit))
+        self._mw.sample_tag_lineEdit.setPlaceholderText('free tag, e.g. RT1')
+        self._mw.sample_tag_comboBox.currentTextChanged.connect(self._sample_tag_changed)
+        self._mw.sample_tag_lineEdit.textChanged.connect(self._sample_tag_changed)
         self._mw.TransferData_checkBox.stateChanged.connect(self._exp_logic.update_data_transfer)
         self._mw.select_camera_comboBox.currentTextChanged.connect(self._exp_logic.update_camera)
         self._mw.exposure_DSpinBox.valueChanged.connect(self._exp_logic.update_exposure)
@@ -715,6 +720,7 @@ class ExpConfiguratorGUI(GuiBase):
 
             self._set_named_widgets_visible(widget_names,True)
 
+        self._update_sample_tag_line_edit()
         self._sync_dock_widgets_visibility()
 
         self._apply_imaging_sequence_definition(fields)
@@ -814,7 +820,7 @@ class ExpConfiguratorGUI(GuiBase):
     def set_visibility_general_settings(self, visible):
         """Show or hide the general section's base widgets.
 
-        Experiment-specific fields such as DAPI, RNA, and email are hidden here by
+        Experiment-specific fields such as the sample tag and email are hidden here by
         default and shown later through ``FIELD_WIDGETS`` when declared by the active
         definition.
         """
@@ -822,9 +828,10 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.sample_name_Label.setVisible(visible)
         self._mw.sample_name_LineEdit.setVisible(visible)
 
-        # the dapi and rna checkboxes are needed only for the ROI Multicolor scan RAMM. Set them invisible as default.
-        self._mw.dapi_CheckBox.setVisible(False)
-        self._mw.rna_CheckBox.setVisible(False)
+        # the sample tag is needed only for the ROI multicolour scans. Set it invisible as default.
+        self._mw.sample_tag_label.setVisible(False)
+        self._mw.sample_tag_comboBox.setVisible(False)
+        self._mw.sample_tag_lineEdit.setVisible(False)
         # same for the mail. It is only required for the HiM tasks
         self._mw.mail_LineEdit.setVisible(False)
         self._mw.mail_Label.setVisible(False)
@@ -1068,19 +1075,53 @@ class ExpConfiguratorGUI(GuiBase):
 
     def load_ref_images_path_clicked(self):
         """Choose the directory containing ZEN autofocus reference images."""
+        start = self._dialog_start_folder(self._mw.reference_images_lineEdit.text(), self._exp_logic.default_zen_path)
         this_dir = QtWidgets.QFileDialog.getExistingDirectory(self._mw,
                                                           'Open directory where reference images are saved',
-                                                          r'W:')  # to be changed using a correct path stem
+                                                          start)
         if this_dir:
             self._mw.reference_images_lineEdit.setText(this_dir)
 
     def load_zen_saving_path_clicked(self):
         """Choose the directory in which ZEN should save experiment data."""
+        start = self._dialog_start_folder(self._mw.Zen_saving_folder_lineEdit.text(), self._exp_logic.default_zen_path)
         this_dir = QtWidgets.QFileDialog.getExistingDirectory(self._mw,
                                                           'Open directory where data are saved',
-                                                          r"W:")  # to be changed using a correct path stem
+                                                          start)
         if this_dir:
             self._mw.Zen_saving_folder_lineEdit.setText(this_dir)
+
+    def _update_sample_tag_line_edit(self) -> None:
+        """The free-tag line edit is enabled, and visible with the other sample tag widgets, only when 'Free' is
+        selected."""
+        free = self._mw.sample_tag_comboBox.currentText() == self._exp_logic.SAMPLE_TAG_FREE
+        self._mw.sample_tag_lineEdit.setEnabled(free)
+        self._mw.sample_tag_lineEdit.setVisible(free and not self._mw.sample_tag_comboBox.isHidden())
+
+    def _sample_tag_changed(self, *_args) -> None:
+        """Selected item (DAPI / RNA / IF), or the free tag of the line edit for 'Free', sent to the logic."""
+        self._update_sample_tag_line_edit()
+        tag = self._mw.sample_tag_comboBox.currentText()
+        if tag == self._exp_logic.SAMPLE_TAG_FREE:
+            tag = self._mw.sample_tag_lineEdit.text()
+        self._exp_logic.update_sample_tag(tag)
+
+    def _show_sample_tag(self, tag) -> None:
+        """Display a sample tag: DAPI / RNA / IF select their item, any other value selects 'Free' and fills the
+        line edit. Nothing changes when the configuration has no sample tag."""
+        if tag is None:
+            return
+        tag = str(tag)
+        free = self._exp_logic.SAMPLE_TAG_FREE
+        if self._mw.sample_tag_comboBox.currentText() == free and self._mw.sample_tag_lineEdit.text() == tag:
+            pass  # free tag being typed (e.g. 'DAPI-2' passes through 'DAPI'): keep 'Free' selected
+        elif tag in self._exp_logic.SAMPLE_TAG_ITEMS:
+            self._mw.sample_tag_comboBox.setCurrentText(tag)
+        else:
+            self._mw.sample_tag_comboBox.setCurrentText(free)
+            if self._mw.sample_tag_lineEdit.text() != tag:
+                self._mw.sample_tag_lineEdit.setText(tag)
+        self._update_sample_tag_line_edit()
 
     @staticmethod
     def _dialog_start_folder(current, default) -> str:
@@ -1129,6 +1170,7 @@ class ExpConfiguratorGUI(GuiBase):
         try:
             config = self._exp_logic.config_dict
             self._mw.sample_name_LineEdit.setText(self._exp_logic.config_dict.get('sample_name', ''))
+            self._show_sample_tag(config.get('sample_tag'))
             self._select_camera_entry(self._exp_logic.config_dict.get('camera'))
             self._mw.exposure_DSpinBox.setValue(self._exp_logic.config_dict.get('exposure', 0.0))
             self._mw.gain_SpinBox.setValue(self._exp_logic.config_dict.get('gain', 0))
@@ -1242,8 +1284,8 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.sample_name_LineEdit,
             self._mw.select_camera_comboBox,
             self._mw.mail_LineEdit,
-            self._mw.dapi_CheckBox,
-            self._mw.rna_CheckBox,
+            self._mw.sample_tag_comboBox,
+            self._mw.sample_tag_lineEdit,
             self._mw.TransferData_checkBox,
             self._mw.exposure_DSpinBox,
             self._mw.gain_SpinBox,

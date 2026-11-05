@@ -6,6 +6,35 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Experiment configurator and ROI scan
+
+#### Changed
+
+- Sample tag instead of the DAPI / RNA checkboxes (2026-11-05).
+  - Experiment key `sample_tag` (string: DAPI, RNA, IF or a free tag of letters, digits and '-') replaces the
+    booleans `dapi` / `rna` in the ROI multicolour scan definitions (spinning_disk, ramm, dummy and the two
+    copies in yet_to_be_used/): `required: true`, `default: "DAPI"`.
+  - Configurator: `sample_tag_label` / `sample_tag_comboBox` / `sample_tag_lineEdit` (Qt Designer) replace
+    `dapi_CheckBox` / `rna_CheckBox` in FIELD_SECTIONS / FIELD_WIDGETS, the visibility function, the connections
+    and the input widget list; combo items DAPI, RNA, IF, Free added in the code (the .ui has none); line edit
+    enabled and visible only with Free, QRegularExpressionValidator `^[A-Za-z0-9-]+$`. Logic
+    `update_sample_tag(tag)` replaces `update_is_dapi` / `update_is_rna`; saving is refused (log error
+    "Experiment configuration not saved. ...", no file) when the tag is empty (missing required field) or invalid.
+    Loading: DAPI / RNA / IF select their item, any other value selects Free and fills the line edit; former
+    files with dapi / rna and no sample_tag: dapi -> DAPI, rna -> RNA, otherwise DAPI, with a warning.
+  - `RoiScanTaskBase`: `sample_tag` read and checked before any hardware call (ValueError for an invalid tag;
+    former files: dapi -> DAPI, rna -> RNA, otherwise no tag, with a warning); run folder
+    `<root>/YYYY_MM_DD/NNN_Scan_<sample>_<tag>` and file names `scan_<prefix>_<tag>_<roi number>_ROI` (no tag
+    part when the tag is empty); `is_dapi` / `is_rna` removed.
+  - Tests: configurator section "sample tag and ZEN folder dialogs" in tests/test_logic_helpers.py; sample tag
+    cases (5) in the run-folder section of tests/test_roi_scan.py; the test experiment files of test_roi_scan
+    (and tests/data/roi_scan_experiment.yaml) use `sample_tag: DAPI`.
+- Start folder of the two ZEN folder dialogs (2026-11-05): `load_ref_images_path_clicked` /
+  `load_zen_saving_path_clicked` start in the folder of their field when it exists, otherwise in the new
+  configurator logic option `default zen path` (ConfigOption `default_zen_path`, default ''), otherwise in the
+  home folder (`_dialog_start_folder`), instead of the hardcoded "W:". custom_config/Spinning_disk_config.cfg:
+  `default zen path: '/mnt/Experiments'`.
+
 ### Tasks
 
 #### Added

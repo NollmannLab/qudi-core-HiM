@@ -1,6 +1,6 @@
 """Logic helpers: data folders defined in the logic modules (ROI lists, injections files), the random
 ROI list command-line helper (qudi.util.make_random_roi_list) and the local / server folder buttons of the
-experiment configurator, and the autofocus report of Hi-M runs (qudi.util.autofocus_report).
+experiment configurator, its sample tag and ZEN folder dialogs, and the autofocus report of Hi-M runs (qudi.util.autofocus_report).
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_logic_helpers.py [<repo_root>]
 Short settings: tests/_short.py (docs/TESTING.md).
@@ -494,6 +494,158 @@ def _section_folder_buttons():
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 
+# --- configurator: sample tag and ZEN folder dialogs ---
+def _section_sample_tag():
+    """Experiment configurator: sample tag of the ROI scan (combo box DAPI / RNA / IF / Free, free tag in the line
+    edit with a validator, save / load, former dapi / rna keys) and start folder of the two ZEN folder dialogs
+    (option 'default zen path'). Folder dialog replaced by a recorder; SD definitions of the repository."""
+    import os, weakref, importlib, tempfile, logging
+    from qtpy import QtCore, QtGui, QtWidgets
+    import yaml
+    from qudi.core.connector import Connector
+
+    results = []
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond))); print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+    LOGS = []
+    class H(logging.Handler):
+        def emit(self, r): LOGS.append((r.levelno, r.getMessage()))
+    handler = H(); logging.getLogger().addHandler(handler)
+    class FakeMain(QtCore.QObject): pass
+    MAIN = FakeMain()
+    CFG = yaml.safe_load(open(os.path.join(repo, 'custom_config/dummy_config.cfg')))
+    TMP = tempfile.mkdtemp()
+    ZEN_DEF, REF, ZEN = (os.path.join(TMP, n) for n in ('zen_default', 'references', 'zen_saving'))
+    for d in (ZEN_DEF, REF, ZEN): os.makedirs(d)
+    DIALOGS = []
+    def fake(parent, caption='', directory='', *a, **k):
+        DIALOGS.append((caption, directory)); return ''
+    ORIGINAL_DIALOG = QtWidgets.QFileDialog.getExistingDirectory
+    QtWidgets.QFileDialog.getExistingDirectory = staticmethod(fake)
+    MODS = {}
+    def build(name):
+        if name in MODS: return MODS[name]
+        base = next(b for b in ('hardware', 'logic', 'gui') if name in (CFG.get(b) or {}))
+        entry = CFG[base][name]; mod, cls = entry['module.Class'].rsplit('.', 1)
+        klass = getattr(importlib.import_module(f'qudi.{base}.{mod}'), cls)
+        opts = _short.module_options(name, entry.get('options'))
+        if name == 'experiments_configurator_logic':
+            opts['experiment_definitions_directory'] = os.path.join(repo, 'custom_config/custom_experiments_config/spinning_disk') + '/'
+            opts['experiments'] = ['roi_multicolour_scan.yaml', 'him_epi.yaml']
+            opts['default zen path'] = ZEN_DEF
+        m = klass(qudi_main_weakref=weakref.ref(MAIN), name=name, config=opts)
+        by_name = {c.name: c for k in dir(klass) if isinstance(c := getattr(klass, k, None), Connector)}
+        for key, target in (entry.get('connect') or {}).items():
+            m._meta['connectors'][next(k for k in m._meta['connectors'] if by_name[key] is getattr(klass, k))].connect(build(target))
+        m.module_state.activate(); MODS[name] = m; return m
+    gui = build('experiments_configurator_gui'); app.processEvents()
+    mw, logic = gui._mw, gui._exp_logic
+    combo, edit = mw.sample_tag_comboBox, mw.sample_tag_lineEdit
+    def shown(w): return not w.isHidden()
+
+    # ------------------------------------------------------------------ ZEN folder dialogs
+    sd_cfg = yaml.safe_load(open(os.path.join(repo, 'custom_config/Spinning_disk_config.cfg')))
+    check("option 'default zen path' read by the logic; SD configuration sets /mnt/Experiments",
+          logic.default_zen_path == ZEN_DEF
+          and sd_cfg['logic']['experiments_configurator_logic']['options'].get('default zen path') == '/mnt/Experiments',
+          logic.default_zen_path)
+    home = os.path.expanduser('~')
+    check('_dialog_start_folder: existing field folder, else existing default, else home',
+          gui._dialog_start_folder(REF, ZEN_DEF) == REF
+          and gui._dialog_start_folder(os.path.join(TMP, 'missing'), ZEN_DEF) == ZEN_DEF
+          and gui._dialog_start_folder('', ZEN_DEF) == ZEN_DEF
+          and gui._dialog_start_folder('', os.path.join(TMP, 'none')) == home
+          and gui._dialog_start_folder('', '') == home)
+    for click, field, folder in ((gui.load_ref_images_path_clicked, mw.reference_images_lineEdit, REF),
+                                 (gui.load_zen_saving_path_clicked, mw.Zen_saving_folder_lineEdit, ZEN)):
+        starts = []
+        for text in (folder, os.path.join(TMP, 'missing'), ''):
+            field.setText(text); DIALOGS.clear(); click(); starts.append(DIALOGS[-1][1] if DIALOGS else None)
+        logic.default_zen_path = os.path.join(TMP, 'none'); field.setText(''); DIALOGS.clear(); click()
+        starts.append(DIALOGS[-1][1] if DIALOGS else None); logic.default_zen_path = ZEN_DEF
+        check(f'({click.__name__}) start folder: field folder, default zen path (missing / empty field), home',
+              starts == [folder, ZEN_DEF, ZEN_DEF, home], starts)
+    QtWidgets.QFileDialog.getExistingDirectory = ORIGINAL_DIALOG
+
+    # ------------------------------------------------------------------ sample tag in the GUI
+    gui.start_new_experiment_config('roi_multicolor_scan'); app.processEvents()
+    check('(roi_multicolor_scan) items DAPI, RNA, IF, Free; default DAPI in the combo and the configuration; label and '
+          'combo shown, line edit hidden and disabled',
+          [combo.itemText(k) for k in range(combo.count())] == ['DAPI', 'RNA', 'IF', 'Free']
+          and combo.currentText() == 'DAPI' and logic.config_dict.get('sample_tag') == 'DAPI'
+          and shown(mw.sample_tag_label) and shown(combo) and not shown(edit) and not edit.isEnabled(),
+          (combo.currentText(), logic.config_dict.get('sample_tag'), shown(edit), edit.isEnabled()))
+    combo.setCurrentText('Free'); app.processEvents()
+    free_on = shown(edit) and edit.isEnabled()
+    edit.setText('RT1'); app.processEvents()
+    check('Free: line edit shown and enabled; typed tag stored in the configuration',
+          free_on and logic.config_dict.get('sample_tag') == 'RT1' and combo.currentText() == 'Free',
+          logic.config_dict.get('sample_tag'))
+    edit.setText('DAPI-2'); app.processEvents()
+    check("free tag 'DAPI-2' typed letter by letter keeps 'Free' selected",
+          combo.currentText() == 'Free' and edit.text() == 'DAPI-2' and logic.config_dict.get('sample_tag') == 'DAPI-2')
+    combo.setCurrentText('IF'); app.processEvents()
+    check('IF: stored, line edit hidden and disabled',
+          logic.config_dict.get('sample_tag') == 'IF' and not shown(edit) and not edit.isEnabled())
+    validator = edit.validator()
+    accept = QtGui.QValidator.State.Acceptable
+    states = {t: validator.validate(t, 0)[0] for t in ('RT 1', 'RT_1', 'RT1', 'IF-2')}
+    check("validator: rejects 'RT 1' and 'RT_1', accepts 'RT1' and 'IF-2'",
+          states['RT 1'] != accept and states['RT_1'] != accept and states['RT1'] == accept and states['IF-2'] == accept,
+          states)
+    logic.update_sample_tag('RNA')
+    check('logic update_sample_tag stores the tag; GUI follows', logic.config_dict.get('sample_tag') == 'RNA'
+          and combo.currentText() == 'RNA')
+
+    # ------------------------------------------------------------------ save
+    out = os.path.join(TMP, 'out')
+    # other required fields filled: only the sample tag decides
+    for required in ('sample_name', 'roi_list_path', 'zen_saving_path', 'save_path'):
+        logic.config_dict[required] = logic.config_dict.get(required) or TMP
+    logic.config_dict['imaging_sequence'] = logic.config_dict.get('imaging_sequence') or [['488 nm', 10.0]]
+    for bad in ('', 'RT_1', 'RT 1'):
+        LOGS.clear(); logic.update_sample_tag(bad)
+        logic.save_to_exp_config_file(out, 'roi_multicolor_scan', filename='bad.yml')
+        errors = [m for lvl, m in LOGS if lvl >= logging.ERROR and 'not saved' in m]
+        check(f'save refused with sample_tag {bad!r} (log error, no file)',
+              errors and 'sample_tag' in errors[-1] and not os.path.exists(os.path.join(out, 'bad.yml')), errors)
+    logic.update_sample_tag('RT1'); LOGS.clear()
+    logic.save_to_exp_config_file(out, 'roi_multicolor_scan', filename='good.yml')
+    saved = yaml.safe_load(open(os.path.join(out, 'good.yml'))) if os.path.exists(os.path.join(out, 'good.yml')) else {}
+    check('save with a valid free tag writes sample_tag, no dapi / rna key',
+          saved.get('sample_tag') == 'RT1' and 'dapi' not in saved and 'rna' not in saved,
+          (saved, [m for _, m in LOGS]))
+
+    # ------------------------------------------------------------------ load
+    def load(name, **values):
+        data = dict(saved); data.pop('sample_tag', None); data.update(values)
+        path = os.path.join(TMP, name); yaml.safe_dump(data, open(path, 'w')); LOGS.clear()
+        logic.load_config_file(path); app.processEvents()
+    load('free.yml', sample_tag='RT1')
+    check("load sample_tag 'RT1': Free selected, line edit 'RT1' shown and enabled",
+          combo.currentText() == 'Free' and edit.text() == 'RT1' and shown(edit) and edit.isEnabled()
+          and logic.config_dict.get('sample_tag') == 'RT1')
+    load('rna.yml', sample_tag='RNA')
+    check("load sample_tag 'RNA': item RNA, line edit hidden", combo.currentText() == 'RNA' and not shown(edit))
+    for fname_old, values, expected in (('old_dapi.yml', {'dapi': True, 'rna': False}, 'DAPI'),
+                                         ('old_rna.yml', {'dapi': False, 'rna': True}, 'RNA'),
+                                         ('old_none.yml', {'dapi': False, 'rna': False}, 'DAPI')):
+        if expected == 'DAPI' and fname_old == 'old_none.yml':
+            combo.setCurrentText('IF'); app.processEvents()
+        load(fname_old, **values)
+        warned = [m for lvl, m in LOGS if lvl == logging.WARNING and 'dapi / rna' in m]
+        check(f'load former file {values}: {expected}, warning in the log, dapi / rna dropped',
+              combo.currentText() == expected and logic.config_dict.get('sample_tag') == expected and warned
+              and 'dapi' not in logic.config_dict and 'rna' not in logic.config_dict,
+              (combo.currentText(), logic.config_dict.get('sample_tag'), warned))
+
+    gui.start_new_experiment_config('him_epi_sd'); app.processEvents()
+    check('(him_epi_sd, no sample_tag) sample tag widgets hidden',
+          not shown(mw.sample_tag_label) and not shown(combo) and not shown(edit))
+    logging.getLogger().removeHandler(handler)
+    KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
+    return results
+
 # --- autofocus report (qudi.util.autofocus_report) ---
 def _section_autofocus_report():
     """Autofocus report of Hi-M runs (qudi.util.autofocus_report): synthetic metadata folders (4 ROIs x 3 cycles) of
@@ -654,6 +806,7 @@ SECTIONS = [
     ('data folders in the logic', _section_data_folders),
     ('random ROI list helper', _section_random_roi_list),
     ('configurator: local / server folder buttons', _section_folder_buttons),
+    ('configurator: sample tag and ZEN folder dialogs', _section_sample_tag),
     ('autofocus report', _section_autofocus_report),
 ]
 

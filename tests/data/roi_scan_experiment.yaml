@@ -1,5 +1,6 @@
 # Experiment template of the ROI scan task tests (tests/_short.py experiment()); save_path is set per test.
 sample_name: Mysample
+sample_tag: DAPI
 roi_list_path: rois_2.json
 imaging_sequence: [[488, 50.0], [561, 80.0]]
 save_path: null

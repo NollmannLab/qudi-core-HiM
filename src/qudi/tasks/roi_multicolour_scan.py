@@ -41,6 +41,7 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 import os
+import re
 import yaml
 
 from qudi.core.connector import Connector
@@ -49,6 +50,8 @@ from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metad
                                             write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
+
+SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9-]+$'  # sample_tag: letters, digits and '-'
 
 
 class RoiScanTaskBase(ProgressModuleTask):
@@ -65,8 +68,9 @@ class RoiScanTaskBase(ProgressModuleTask):
 
     User config file (user_config_path) expected keys:
         sample_name: 'Mysample'
-        dapi: False            # optional, default False - affects only folder/file naming
-        rna: False             # optional, default False - affects only folder/file naming
+        sample_tag: 'DAPI'     # DAPI, RNA, IF or a free tag (letters, digits and '-') - folder/file naming only;
+                               # former files with dapi / rna (no sample_tag): dapi -> DAPI, rna -> RNA,
+                               # otherwise no tag (warning in the log)
         save_path: '/path/to/data'            # local folder (required)
         save_network_path: '/server/data'     # server folder (optional, empty = local folder only)
         roi_list_path: 'pathstem/qudi_roi_lists/roilist_20260101.json'
@@ -79,7 +83,7 @@ class RoiScanTaskBase(ProgressModuleTask):
                     the ROI list, before any hardware call. The scan runs from that ROI to the end
                     of the list, in list order.
 
-    Data (all setups): qudi creates the run folder <root>/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA]/
+    Data (all setups): qudi creates the run folder <root>/YYYY_MM_DD/NNN_Scan_<sample>[_<sample_tag>]/
     (NNN: self.prefix, tasks/common/data_folders.py create_run_folder) and writes there parameters.yml
     (sample name, start_roi and the positions of the ROIs scanned in this run) and movie_name.txt (one
     file name per imaged ROI), experiment_config.yaml (byte copy of the experiment file) and, with a
@@ -122,8 +126,7 @@ class RoiScanTaskBase(ProgressModuleTask):
         self._trigger_logic = None
         self._laser_logic = None
         self.sample_name = None
-        self.is_dapi = False
-        self.is_rna = False
+        self.sample_tag = ''
         self.save_path = None
         self.save_network_path = None
         self._data_root = None
@@ -177,8 +180,9 @@ class RoiScanTaskBase(ProgressModuleTask):
 
     def _create_data_folder(self) -> str:
         """Run folder, created after _prepare_imaging() under the root chosen before any hardware call:
-        <root>/YYYY_MM_DD/NNN_Scan_<sample>[_DAPI|_RNA]; sets self.prefix = NNN."""
-        suffix = '_DAPI' if self.is_dapi else '_RNA' if self.is_rna else ''
+        <root>/YYYY_MM_DD/NNN_Scan_<sample>_<sample_tag> (no '_<sample_tag>' when the tag is empty); sets
+        self.prefix = NNN."""
+        suffix = f'_{self.sample_tag}' if self.sample_tag else ''
         path, self.prefix = create_run_folder(self._data_root, 'Scan', self.sample_name, suffix)
         return path
 
@@ -335,8 +339,7 @@ class RoiScanTaskBase(ProgressModuleTask):
             user_param_dict = yaml.safe_load(stream)
 
         self.sample_name = user_param_dict['sample_name']
-        self.is_dapi = user_param_dict.get('dapi', False)
-        self.is_rna = user_param_dict.get('rna', False)
+        self.sample_tag = self._read_sample_tag(user_param_dict)
         self.roi_list_path = user_param_dict['roi_list_path']
         self.imaging_sequence = user_param_dict['imaging_sequence']
         self._user_params = user_param_dict
@@ -345,18 +348,33 @@ class RoiScanTaskBase(ProgressModuleTask):
         self._roi_logic.load_roi_list(self.roi_list_path)
         self.roi_names = list(self._roi_logic.roi_names)
 
+    def _read_sample_tag(self, user_param_dict) -> str:
+        """Sample tag of the folder and file names (experiment key sample_tag), checked before any hardware call:
+        letters, digits and '-' only (no space, no '_': separator of the file names). Former experiment files
+        without sample_tag: dapi True -> 'DAPI', rna True -> 'RNA', otherwise no tag (warning in the log).
+        Raises ValueError for an invalid tag."""
+        if 'sample_tag' not in user_param_dict:
+            tag = 'DAPI' if user_param_dict.get('dapi') else 'RNA' if user_param_dict.get('rna') else ''
+            self.log.warning(f"Experiment file {self.user_config_path} has no 'sample_tag' (former keys dapi / rna): "
+                             f"sample tag {tag!r}. Save the experiment again with the configurator to update it.")
+            return tag
+        tag = user_param_dict['sample_tag']
+        tag = '' if tag is None else str(tag)
+        if re.fullmatch(SAMPLE_TAG_PATTERN, tag) is None:
+            raise ValueError(f"Experiment file {self.user_config_path}: invalid sample_tag {tag!r} - only letters, "
+                             f"digits and '-' are allowed (no space, no '_').")
+        return tag
+
     # ======================================================================================
     # File path handling
     # ======================================================================================
 
     def _file_name(self, roi_name: str) -> str:
+        """scan_<prefix>_<sample_tag>_<roi number>_ROI (scan_<prefix>_<roi number>_ROI when the tag is empty)."""
         roi_number_inv = roi_name.strip('ROI_') + '_ROI'
-        if self.is_dapi:
-            return f'scan_{self.prefix}_DAPI_{roi_number_inv}'
-        elif self.is_rna:
-            return f'scan_{self.prefix}_RNA_{roi_number_inv}'
-        else:
-            return f'scan_{self.prefix}_{roi_number_inv}'
+        if self.sample_tag:
+            return f'scan_{self.prefix}_{self.sample_tag}_{roi_number_inv}'
+        return f'scan_{self.prefix}_{roi_number_inv}'
 
     def _append_movie_name(self, movie_name: str) -> None:
         with open(os.path.join(self.directory, 'movie_name.txt'), 'a+') as outfile:
@@ -417,7 +435,7 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     metadata_<HHMMSS> if that folder already holds files) - always local - and writes there
     parameters.yml, movie_name.txt, experiment_config.yaml and metadata.yml. Nothing is written in the ZEN
     folder. self.prefix is the number of folders that were in zen_saving_path before ZEN started + 1, on 3
-    digits; movie names scan_<prefix>_<roi number>_ROI (scan_<prefix>_DAPI_... / scan_<prefix>_RNA_...).
+    digits; movie names scan_<prefix>_<sample_tag>_<roi number>_ROI (scan_<prefix>_<roi number>_ROI without tag).
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
