@@ -6,6 +6,39 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Run files: autofocus subfolder, one score CSV, no experiment copy
+
+#### Changed
+
+- Autofocus files of the Hi-M SD task in `<metadata folder>/autofocus/` (2026-11-05):
+  `autofocus_check.AUTOFOCUS_SUBFOLDER = 'autofocus'`, created with the metadata folder; autofocus_reference.npy,
+  reference_images_<RT>.npy, correlation.npy, the score CSV, autofocus_correlation_heatmap.png and
+  autofocus_drift.png go there. The server copy (cleanup transfer and copy_metadata_to_server) is recursive and
+  includes the subfolder.
+- One score CSV written as the run goes (Hi-M SD): `ROI_probe_autofocus_summary.csv` replaces
+  autofocus_scores.csv (header at creation, one row per check, also after an abort), columns
+  `experiment_folder, roi_name, probe_name, correlation, cycle, shift_y_px, shift_x_px, passed`
+  (`autofocus_check.SCORES_COLUMNS`; experiment_folder = ZEN folder name, probe_name = RT, correlation empty when
+  the image could not be read).
+- `qudi.util.autofocus_report`: autofocus files read from / report written to `<metadata>/autofocus/` when it
+  exists, otherwise the metadata folder (previous qudi-core and legacy runs); HiM_parameters.yml still read from
+  the metadata folder. Current runs: probe labels and drift from the task's CSV, no second CSV written; previous
+  runs (autofocus_scores.csv) and legacy runs: as before (ROI_probe_autofocus_summary.csv written).
+  `summarize_folder` finds both layouts. New `autofocus_folder(metadata_folder)`.
+- `qudi.util.autofocus_calibration`: output CSV with the same columns (experiment_folder = name of the --images
+  folder, probe_name empty); default output name autofocus_calibration_scores.csv.
+- experiment_config.yaml no longer written (Hi-M and ROI scan, all setups): HiM_parameters.yml
+  '1- global parameters' holds every key of the experiment file (it already did: the whole file content was
+  written; the order is now explicit: _EXPERIMENT_KEYS first, then the other keys in file order); the ROI scan
+  parameters.yml gets every key under 'experiment parameters' (written without key sorting). `copy_experiment_file`
+  is kept in run_metadata.py but no task calls it any more (the OPM PSF stack task writes its own
+  experiment_config.yaml, unchanged).
+- Tests updated / added in tests/test_him.py, tests/test_roi_scan.py and tests/test_logic_helpers.py.
+- tests/test_roi_path.py, ROI GUI close test: `RoiGUI.on_deactivate()` is called directly instead of deactivating
+  the ROI logic / GUI modules, which saved their status variables (the test ROI list) in qudi's appdata folder
+  (status-RoiLogic_logic_roi_logic.cfg), restored by the next activation of a module named roi_logic (other test
+  suites, and qudi itself on the same computer).
+
 ### ROI GUI: error when closing qudi
 
 #### Fixed

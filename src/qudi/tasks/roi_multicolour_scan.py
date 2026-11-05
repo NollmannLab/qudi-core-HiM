@@ -47,7 +47,7 @@ import yaml
 from qudi.core.connector import Connector
 from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder, local_dated_root
 from qudi.tasks.common.data_transfer import copy_metadata_to_server
-from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
+from qudi.tasks.common.run_metadata import (fill_run_metadata, optional_metadata_template,
                                             write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
@@ -90,8 +90,9 @@ class RoiScanTaskBase(ProgressModuleTask):
 
     Data (all setups): qudi creates the run folder <root>/YYYY_MM_DD/NNN_Scan_<sample>[_<sample_tag>]/
     (NNN: self.prefix, tasks/common/data_folders.py create_run_folder) and writes there parameters.yml
-    (sample name, start_roi and the positions of the ROIs scanned in this run) and movie_name.txt (one
-    file name per imaged ROI), experiment_config.yaml (byte copy of the experiment file) and, with a
+    (sample name, start_roi, the positions of the ROIs scanned in this run and, under 'experiment parameters',
+    every key of the experiment file - the file itself is not copied) and movie_name.txt (one
+    file name per imaged ROI) and, with a
     metadata template, metadata.yml (the template with Time and the Acquisition fields sample_name,
     laser_lines, laser_power_(%), number_z_planes when the experiment file has it, roi_list_(xyz): the ROIs
     of this run with their positions; other fields as in the template). With a sample file (key sample_file):
@@ -246,7 +247,7 @@ class RoiScanTaskBase(ProgressModuleTask):
         self._report_progress(f'0/{total}', 'Preparing imaging')
         self._prepare_imaging()
 
-        # 6. new data folder (hook), parameters.yml, experiment file copy and metadata.yml
+        # 6. new data folder (hook), parameters.yml (with the experiment keys) and metadata.yml
         self.directory = self._create_data_folder()
         self._save_metadata_file()
         self._save_run_files()
@@ -396,24 +397,26 @@ class RoiScanTaskBase(ProgressModuleTask):
     # ======================================================================================
 
     def _save_metadata_file(self) -> None:
-        """Write a small sidecar file with the sample name, start_roi and the stage position of each
-        ROI scanned in this run (purely descriptive, not used by the task).
+        """Write parameters.yml: the sample name, start_roi, the stage position of each ROI scanned in this run and,
+        under 'experiment parameters', every key of the experiment file with its value as read (the experiment
+        file itself is not copied into the run folder). Purely descriptive, not used by the task.
         """
         metadata = {'Sample name': self.sample_name, 'start_roi': self.start_roi}
         for roi in self._scan_rois:
             pos = self._roi_logic.get_roi_position(roi)
             metadata[roi] = f'X = {pos[0]} - Y = {pos[1]}'
+        # every key of the experiment file, in file order
+        metadata['experiment parameters'] = dict(self._user_params)
 
         path = os.path.join(self.directory, 'parameters.yml')
         with open(path, 'w') as outfile:
-            yaml.safe_dump(metadata, outfile, default_flow_style=False)
+            yaml.safe_dump(metadata, outfile, default_flow_style=False, sort_keys=False)
         self.log.info(f'Saved metadata to {path}')
 
     def _save_run_files(self) -> None:
-        """experiment_config.yaml (byte copy of the experiment file), with a sample file sample.yml, and, with a
-        metadata template, metadata.yml (with the 'Sample' section when there is a sample file) in the run
-        folder."""
-        copy_experiment_file(self.user_config_path, self.directory)
+        """With a sample file sample.yml, and, with a metadata template, metadata.yml (with the 'Sample' section when
+        there is a sample file) in the run folder. The experiment file is not copied: its keys are in
+        parameters.yml."""
         metadata = None
         if self._metadata_template is not None:
             positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self._scan_rois}
@@ -448,7 +451,7 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     runs as usual). qudi creates <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata (local_dated_root,
     created and write-tested before any hardware call, YYYY-MM-DD = start of the task; create_mirror_folder,
     metadata_<HHMMSS> if that folder already holds files) - always local - and writes there
-    parameters.yml, movie_name.txt, experiment_config.yaml, metadata.yml and, with a sample file, sample.yml
+    parameters.yml, movie_name.txt, metadata.yml and, with a sample file, sample.yml
     (metadata.yml then has the 'Sample' section). Nothing is written in the ZEN folder. self.prefix is the number of folders that were in zen_saving_path before ZEN started + 1, on 3
     digits; movie names scan_<prefix>_<sample_tag>_<roi number>_ROI (scan_<prefix>_<roi number>_ROI without tag).
 

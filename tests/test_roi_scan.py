@@ -853,7 +853,8 @@ def _section_zen_popup():
 def _section_data_folder():
     """Run folder created by qudi (tasks/common/data_folders.py) for the ROI scan and the Hi-M task: on the
     server folder (save_network_path) when it is writable, otherwise in the local folder (save_path); files
-    written there besides the data (tasks/common/run_metadata.py): experiment_config.yaml and metadata.yml
+    written there besides the data (tasks/common/run_metadata.py): metadata.yml and parameters.yml (with every key of the
+    experiment file; the experiment file is no longer copied)
     (option metadata_template; the repository's Spinning_Disk_setup.cfg unless a case changes it).
 
     Temporary "server" and "local" folders; unreachable folders are paths under a regular file or under
@@ -1066,12 +1067,11 @@ def _section_data_folder():
         expected = [f'scan_{prefix}_{TAG}_{r[4:]}_ROI' for r in ROIS]
         check(f'(1 ROI scan SD, run {run_number}) files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata (local '
               f'even with save_network_path set): '
-              f'parameters.yml, movie_name.txt, experiment_config.yaml, metadata.yml; prefix {prefix} (folders before '
+              f'parameters.yml, movie_name.txt, metadata.yml (no experiment_config.yaml); prefix {prefix} (folders before '
               f'+ 1); names {expected}; no HiM_task.log',
               err is None and result.get('directory') == run_folder and result.get('imaged_rois') == ROIS
               and task.prefix == prefix and movies(run_folder) == expected
-              and sorted(os.listdir(run_folder)) == ['experiment_config.yaml', 'metadata.yml', 'movie_name.txt',
-                                                     'parameters.yml'],
+              and sorted(os.listdir(run_folder)) == ['metadata.yml', 'movie_name.txt', 'parameters.yml'],
               (err, result, task.prefix, os.listdir(run_folder) if os.path.isdir(run_folder) else None))
         check(f'(1 ROI scan SD, run {run_number}) nothing created or modified in the ZEN saving folder (only the folder '
               f'ZEN created, still empty); no pop-up, no warning',
@@ -1088,7 +1088,7 @@ def _section_data_folder():
               and all(open(os.path.join(server_copy, n), 'rb').read() == open(os.path.join(run_folder, n), 'rb').read()
                       for n in os.listdir(run_folder))
               and f'Metadata will also be copied to {server_copy} at the end of the run' in msgs
-              and any(m.startswith('Metadata copy: 4 file(s) sent') for m in msgs),
+              and any(m.startswith(f'Metadata copy: {len(os.listdir(run_folder))} file(s) sent') for m in msgs),
               (os.listdir(server_copy) if os.path.isdir(server_copy) else None, msgs[-3:]))
     # metadata folder already holding files -> metadata_<HHMMSS>
     other = data_folders.create_mirror_folder(local_sd(local), zen_folder, task.log)
@@ -1125,7 +1125,8 @@ def _section_data_folder():
         result, err = run(task, {'start_roi': ''})
         run_folder = mirror(local_sd(local), ZEN.created[-1])
         warnings = [m for lvl, m in LOGS if lvl >= logging.WARNING]
-        expected_warning = (f'Metadata copy: 4 of 4 file(s) not sent to '
+        n_files = len(os.listdir(run_folder)) if os.path.isdir(run_folder) else -1
+        expected_warning = (f'Metadata copy: {n_files} of {n_files} file(s) not sent to '
                             f'{os.path.join(server, os.path.basename(ZEN.created[-1]), "metadata")} - they are in {run_folder}')
         check(f'(2 save_network_path {label}) files under <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata, scan '
               f'runs (both ROIs), no pop-up; ' + ('server down: no exception, warning with the files not sent and the '
@@ -1304,8 +1305,8 @@ def _section_data_folder():
           f'save_network_path set, no transfer_data: only the metadata folder (with HiM_task.log) copied to '
           f'<server>/<ZEN folder name>/metadata, no image; nothing written by qudi in the ZEN folder',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == run_folder
-          and {'HiM_parameters.yml', 'injections.yml', 'HiM_task.log', 'experiment_config.yaml',
-               'metadata.yml'} <= set(os.listdir(run_folder))
+          and {'HiM_parameters.yml', 'injections.yml', 'HiM_task.log', 'metadata.yml', 'autofocus'}
+          <= set(os.listdir(run_folder)) and 'experiment_config.yaml' not in os.listdir(run_folder)
           and names == [f'scan_{prefix}_RT1_{r[4:]}_ROI' for r in ROIS]
           and os.listdir(server) == [os.path.basename(ZEN.created[-1])]
           and sorted(os.listdir(mirror(server, ZEN.created[-1]))) == sorted(os.listdir(run_folder))
@@ -1348,8 +1349,8 @@ def _section_data_folder():
     meta_path = os.path.join(run_folder, 'metadata.yml')
     meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else None
     acq = acquisition(meta) if meta else {}
-    check('(7 run files, template set) experiment_config.yaml byte-identical to the experiment file',
-          err is None and os.path.exists(copy_path) and open(copy_path, 'rb').read() == open(exp, 'rb').read(), err)
+    check('(7 run files, template set) no experiment_config.yaml written',
+          err is None and os.path.isdir(run_folder) and not os.path.exists(copy_path), err)
     check('(7 run files, template set) metadata.yml: Time set, sample name, laser lines / powers in sequence order '
           '(561, 488 / 30, 50), the 2 ROIs with their positions',
           meta is not None and meta['Time'] and acq['sample_name'] == 'SDsample'
@@ -1362,9 +1363,15 @@ def _section_data_folder():
           and acq['number_z_planes'] == acquisition(template)['number_z_planes']
           and acq['exposure_time_(s)'] == acquisition(template)['exposure_time_(s)'], meta)
     params = yaml.safe_load(open(os.path.join(run_folder, 'parameters.yml'))) if os.path.isdir(run_folder) else {}
-    check('(7 run files, template set) parameters.yml and movie_name.txt as before',
-          params == {'Sample name': 'SDsample', 'start_roi': '', 'ROI_000': 'X = 0.0 - Y = 0.0',
-                     'ROI_001': 'X = 10.0 - Y = 0.0'}
+    exp_content = yaml.safe_load(open(exp))
+    check('(7 run files, template set) parameters.yml: sample name, start_roi and ROI positions as before, plus '
+          '"experiment parameters" = every key of the experiment file in file order (e.g. imaging_sequence); '
+          'movie_name.txt as before',
+          {k: v for k, v in params.items() if k != 'experiment parameters'}
+          == {'Sample name': 'SDsample', 'start_roi': '', 'ROI_000': 'X = 0.0 - Y = 0.0', 'ROI_001': 'X = 10.0 - Y = 0.0'}
+          and params.get('experiment parameters') == exp_content
+          and list(params['experiment parameters']) == list(exp_content)
+          and params['experiment parameters']['imaging_sequence'] == [[561, 30.0], [488, 50.0]]
           and movies(run_folder) == [f'scan_001_{TAG}_{r[4:]}_ROI' for r in ROIS], params)
 
     # (8) template option not set
@@ -1373,10 +1380,11 @@ def _section_data_folder():
     run_folder = os.path.join(save_path, DAY, f'002_Scan_SDsample_{TAG}')
     warnings = [m for lvl, m in LOGS if lvl == logging.WARNING]
     check('(8 run files, no template) one warning "no metadata template set - metadata.yml not written", run '
-          'completes, no metadata.yml (experiment_config.yaml still written)',
+          'completes, no metadata.yml (parameters.yml still written, no experiment_config.yaml)',
           err is None and result.get('imaged_rois') == ROIS and warnings == [run_metadata.NO_TEMPLATE_WARNING]
           and not os.path.exists(os.path.join(run_folder, 'metadata.yml'))
-          and os.path.exists(os.path.join(run_folder, 'experiment_config.yaml')), (err, warnings))
+          and os.path.exists(os.path.join(run_folder, 'parameters.yml'))
+          and not os.path.exists(os.path.join(run_folder, 'experiment_config.yaml')), (err, warnings))
 
     # (9) template path wrong / file unreadable
     bad_yaml = os.path.join(TMP, 'bad_template.cfg')

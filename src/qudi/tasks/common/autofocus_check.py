@@ -4,7 +4,8 @@ qudi-core-HiM: autofocus quality check of the spinning disk - comparison of the 
 saves at the end of its autofocus block with the reference image of the same ROI.
 
 Pure functions (numpy / scipy only, no qudi or ZEN dependency), shared by the Hi-M task (HiMSDTask) and the
-calibration script (qudi.util.autofocus_calibration):
+calibration script (qudi.util.autofocus_calibration). Files of a Hi-M run: <metadata folder>/AUTOFOCUS_SUBFOLDER/,
+the score file SCORES_FILE_NAME with the columns SCORES_COLUMNS (also the columns of the calibration script output).
 
   - load_reference_images(folder) -> (n, H, W) array: autofocus_reference.npy if the folder has it,
     otherwise every *.czi of the folder in acquisition order (last number of the file name), first plane.
@@ -41,6 +42,7 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 __all__ = ['BIN_FACTOR', 'BACKGROUND_SIGMA', 'TEMPLATE_FRACTION', 'REFERENCE_FILE_NAME', 'AUTOFOCUS_IMAGE_PATTERN',
+           'AUTOFOCUS_SUBFOLDER', 'SCORES_FILE_NAME', 'SCORES_COLUMNS',
            'load_reference_images', 'read_autofocus_image', 'single_thread_read_form', 'reader_versions',
            'read_and_score', 'sort_czi_paths', 'preprocess', 'autofocus_score']
 
@@ -58,6 +60,10 @@ BIN_FACTOR = 2            # binning of both images before the comparison (speed,
 BACKGROUND_SIGMA = 10     # sigma (binned pixels) of the gaussian blur subtracted as background
 TEMPLATE_FRACTION = 500 / 1024  # central part of the reference used as template (1024 binned px -> [262:762])
 REFERENCE_FILE_NAME = 'autofocus_reference.npy'  # reference images of all the ROIs, in ROI order
+AUTOFOCUS_SUBFOLDER = 'autofocus'  # <metadata folder>/autofocus/: every file of the autofocus check of a Hi-M run
+SCORES_FILE_NAME = 'ROI_probe_autofocus_summary.csv'  # one row per check, written as the run goes
+SCORES_COLUMNS = ('experiment_folder', 'roi_name', 'probe_name', 'correlation', 'cycle', 'shift_y_px', 'shift_x_px',
+                  'passed')  # experiment_folder: ZEN folder name; probe_name: RT; correlation: score (empty: not read)
 AUTOFOCUS_IMAGE_PATTERN = '*_AcquisitionBlock1_pt*.czi'  # image saved by ZEN at the end of the autofocus block
 
 

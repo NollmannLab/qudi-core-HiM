@@ -869,8 +869,10 @@ def _section_sample_file():
 # --- autofocus report (qudi.util.autofocus_report) ---
 def _section_autofocus_report():
     """Autofocus report of Hi-M runs (qudi.util.autofocus_report): synthetic metadata folders (4 ROIs x 3 cycles) of
-    the qudi-core task (correlation.npy cycles x ROIs + autofocus_scores.csv) and of the legacy software (probes x
-    ROIs, no CSV), one run (report_run) and several runs (summarize_folder)."""
+    the current qudi-core task (metadata/autofocus/ with correlation.npy and ROI_probe_autofocus_summary.csv written
+    during the run), of the previous qudi-core task (correlation.npy cycles x ROIs + autofocus_scores.csv in
+    metadata/) and of the legacy software (probes x ROIs, no CSV), one run (report_run) and several runs
+    (summarize_folder)."""
     import csv, logging, os, tempfile
     import numpy as np
     import yaml
@@ -912,6 +914,25 @@ def _section_autofocus_report():
                 writer.writerows(scores)
         return folder
 
+    def current_run_folder(name, probes, corr, threshold, rows):
+        """<TMP>/<name>/metadata with HiM_parameters.yml, and metadata/autofocus/ with correlation.npy and the score
+        file of the current task (rows: experiment_folder, roi_name, probe_name, correlation, cycle, shift_y_px,
+        shift_x_px, passed)."""
+        folder = os.path.join(TMP, name, 'metadata')
+        af_folder = os.path.join(folder, 'autofocus')
+        os.makedirs(af_folder)
+        params = {'1- global parameters': {'sample_name': 'S', 'correlation_threshold': threshold},
+                  '2- fluidic parameters': {'probes': probes},
+                  '4- ROIs': {roi: f'X={k} - Y=0 - Z=None' for k, roi in enumerate(ROIS)}}
+        yaml.safe_dump(params, open(os.path.join(folder, 'HiM_parameters.yml'), 'w'), sort_keys=False)
+        np.save(os.path.join(af_folder, 'correlation.npy'), np.asarray(corr, dtype=float))
+        with open(os.path.join(af_folder, ar.SUMMARY_NAME), 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['experiment_folder', 'roi_name', 'probe_name', 'correlation', 'cycle', 'shift_y_px',
+                             'shift_x_px', 'passed'])
+            writer.writerows(rows)
+        return folder
+
     def summary_rows(path):
         return list(csv.DictReader(open(path, newline='')))
 
@@ -936,7 +957,8 @@ def _section_autofocus_report():
         ar._heatmap = original_heatmap
     names = sorted(os.path.basename(p) for p in written)
     rows = summary_rows(os.path.join(new, ar.SUMMARY_NAME))
-    check('(report_run, qudi-core run) writes the heatmap, the CSV and the drift figure in the metadata folder',
+    check('(report_run, previous qudi-core layout: autofocus_scores.csv in metadata/) writes the heatmap, the CSV and '
+          'the drift figure in the metadata folder (as before)',
           names == sorted([ar.HEATMAP_NAME, ar.SUMMARY_NAME, ar.DRIFT_NAME])
           and all(os.path.getsize(p) > 0 for p in written), names)
     check('(report_run) probe labels from the RT column of autofocus_scores.csv (RT3, RT1, RT2), not the probes dict '
@@ -949,6 +971,36 @@ def _section_autofocus_report():
           and rows[0]['roi_name'] == 'ROI_000' and rows[0]['probe_name'] == 'RT3'
           and abs(float(rows[0]['correlation']) - corr_new[0, 0]) < 1e-12
           and rows[0]['experiment_folder'] == os.path.join(TMP, 'new_run'), rows[:2])
+
+    # current qudi-core layout: metadata/autofocus/ with the score file written by the task (one check not read)
+    corr_cur = corr_new.copy()
+    corr_cur[1, 3] = np.nan
+    live_rows = [('2026-11-05_HiM_x', roi, cycle_rt[c], '' if (c, k) == (2, 3) else f'{corr_cur[c - 1, k]:.6f}', c,
+                  '' if (c, k) == (2, 3) else 2 * k, '' if (c, k) == (2, 3) else c, (c, k) != (2, 3))
+                 for c in (1, 2, 3) for k, roi in enumerate(ROIS)]
+    current = current_run_folder('current_run', {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8, live_rows)
+    live_csv = os.path.join(current, 'autofocus', ar.SUMMARY_NAME)
+    live_before = open(live_csv, 'rb').read()
+    seen.clear()
+    ar._heatmap = spy_heatmap
+    try:
+        written = ar.report_run(current, log=log)
+        cur_err = None
+    except Exception as err:
+        written, cur_err = [], err
+    finally:
+        ar._heatmap = original_heatmap
+    check('(report_run, current layout: metadata/autofocus/ + ROI_probe_autofocus_summary.csv with a cycle column) '
+          'heatmap and drift figure written in metadata/autofocus/, no second CSV (the score file of the task is '
+          'unchanged), nothing written in metadata/; probe labels from probe_name per cycle (RT3, RT1, RT2); a check '
+          'without score / shift does not break the drift figure',
+          cur_err is None
+          and sorted(written) == sorted([os.path.join(current, 'autofocus', ar.HEATMAP_NAME),
+                                         os.path.join(current, 'autofocus', ar.DRIFT_NAME)])
+          and all(os.path.getsize(p) > 0 for p in written) and open(live_csv, 'rb').read() == live_before
+          and sorted(os.listdir(current)) == ['HiM_parameters.yml', 'autofocus']
+          and seen.get('labels') == ['RT3', 'RT1', 'RT2'] and seen.get('threshold') == 0.8,
+          (cur_err, written, seen))
 
     # legacy run: probes x ROIs, no autofocus_scores.csv
     LOGS.clear()
@@ -1008,6 +1060,18 @@ def _section_autofocus_report():
     ar.summarize_folder(root, log=log)
     check('(summarize_folder) runs with and without autofocus_scores.csv -> warning: the scores are not on the same scale',
           any(lvl == logging.WARNING and 'not on the same scale' in m for lvl, m in LOGS), LOGS)
+    # both qudi-core layouts in one folder: correlation.npy in metadata/ (previous) and in metadata/autofocus/ (current)
+    mixed = os.path.join(TMP, 'mixed_experiment')
+    run_folder(os.path.join('mixed_experiment', 'previous'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_new, 0.8, scores)
+    current_run_folder(os.path.join('mixed_experiment', 'current'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8,
+                       live_rows)
+    LOGS.clear()
+    written = ar.summarize_folder(mixed, log=log)
+    rows = summary_rows(os.path.join(mixed, ar.SUMMARY_NAME))
+    check('(summarize_folder) finds the runs of both layouts (2 runs x 3 probes x 4 ROIs in the global CSV); no warning '
+          '(both have a per-check file)',
+          len(rows) == 2 * 3 * 4 and {os.path.basename(r['experiment_folder']) for r in rows} == {'previous', 'current'}
+          and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (len(rows), LOGS))
     other = os.path.join(TMP, 'other_experiment')
     run_folder(os.path.join('other_experiment', 'a'), {1: 'RT1'}, rng.uniform(0.6, 1.0, (1, 4)))
     run_folder(os.path.join('other_experiment', 'b'), {1: 'RT1'}, rng.uniform(0.6, 1.0, (1, 3)), rois=ROIS[:3])

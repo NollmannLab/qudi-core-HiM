@@ -1,28 +1,41 @@
 # -*- coding: utf-8 -*-
 """
 Summary of the autofocus scores of Hi-M runs on the spinning disk: ROI x probe heatmap and CSV, plus the drift of
-the autofocus images per ROI and cycle when the run has autofocus_scores.csv (qudi-core Hi-M task).
+the autofocus images per ROI and cycle when the run has a per-check score file (qudi-core Hi-M task).
 
 Works on one run (one metadata folder) or on several past experiments found under a folder, including runs of the
 legacy qudi-HiM software. No GUI backend: the figures are built with matplotlib.figure.Figure (no pyplot, no
 window), so the module runs in a qudi task thread and on a computer without a display.
 
-Inputs of one run (metadata folder):
+Layouts of one run:
+  - current qudi-core task: HiM_parameters.yml in the metadata folder, the autofocus files in
+    <metadata folder>/autofocus/: correlation.npy and ROI_probe_autofocus_summary.csv written by the task as the
+    run goes (columns experiment_folder, roi_name, probe_name, correlation, cycle, shift_y_px, shift_x_px,
+    passed - qudi.tasks.common.autofocus_check.SCORES_COLUMNS);
+  - previous qudi-core task: everything in the metadata folder, autofocus_scores.csv (columns cycle, RT, roi,
+    score, shift_y_px, shift_x_px, passed);
+  - legacy qudi-HiM: HiM_parameters.yml and correlation.npy in the metadata folder, no per-check file.
+The autofocus files are read from (and the report written to) <metadata folder>/autofocus/ when that subfolder
+exists, otherwise the metadata folder itself.
+Inputs:
   - HiM_parameters.yml: ROI names ('4- ROIs'), probes ('2- fluidic parameters' -> 'probes') and
     correlation_threshold ('1- global parameters'), when present;
   - correlation.npy: cycles x ROIs (qudi-core task) or probes x ROIs (legacy), transposed to ROIs x probes when
     needed; NaN = check not done (aborted run);
-  - autofocus_scores.csv (qudi-core task; columns cycle, RT, roi, score, shift_y_px, shift_x_px, passed), when
-    present: probe label of each cycle (RT column) and drift (shift_y_px / shift_x_px).
-Probe labels: the rows of correlation.npy follow the cycle order. With autofocus_scores.csv, cycle -> RT;
+  - the per-check file (ROI_probe_autofocus_summary.csv with a 'cycle' column, or autofocus_scores.csv), when
+    present: probe label of each cycle and drift (shift_y_px / shift_x_px; empty for a check whose image could
+    not be read).
+Probe labels: the rows of correlation.npy follow the cycle order. With a per-check file, cycle -> probe;
 otherwise (legacy) the probes sorted by their key (tube number), a note says that this order is assumed.
 
-  - report_run(metadata_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) -> list of written paths, in the
-    metadata folder: autofocus_correlation_heatmap.png, ROI_probe_autofocus_summary.csv and, with
-    autofocus_scores.csv, autofocus_drift.png.
+  - report_run(metadata_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) -> list of written paths:
+    autofocus_correlation_heatmap.png, autofocus_drift.png (with a per-check file) and, for the previous
+    qudi-core and the legacy layouts only, ROI_probe_autofocus_summary.csv (one row per ROI / probe) - a run of
+    the current task already has that file.
   - summarize_folder(root_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) -> list of written paths: every
-    metadata folder under root_folder with HiM_parameters.yml and correlation.npy (same ROIs required), probes
-    concatenated as "<probe> | <experiment folder>", global heatmap and CSV in root_folder.
+    metadata folder under root_folder with HiM_parameters.yml and correlation.npy (in the folder or in its
+    autofocus/ subfolder; same ROIs required), probes concatenated as "<probe> | <experiment folder>", global
+    heatmap and CSV in root_folder.
 threshold: correlation_threshold of the run when present, otherwise DEFAULT_THRESHOLD; ROIs whose mean score is
 below it are highlighted in red. vmin / vmax: colour scale of the score.
 
@@ -47,8 +60,8 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-__all__ = ['DEFAULT_THRESHOLD', 'HEATMAP_NAME', 'SUMMARY_NAME', 'DRIFT_NAME', 'load_run', 'report_run',
-           'summarize_folder', 'main']
+__all__ = ['DEFAULT_THRESHOLD', 'HEATMAP_NAME', 'SUMMARY_NAME', 'DRIFT_NAME', 'autofocus_folder', 'load_run',
+           'report_run', 'summarize_folder', 'main']
 
 import argparse
 import csv
@@ -61,9 +74,11 @@ import numpy as np
 import yaml
 from matplotlib.figure import Figure
 
+from qudi.tasks.common.autofocus_check import AUTOFOCUS_SUBFOLDER, SCORES_FILE_NAME
+
 DEFAULT_THRESHOLD = 0.7   # threshold when the run has no correlation_threshold
 HEATMAP_NAME = 'autofocus_correlation_heatmap.png'
-SUMMARY_NAME = 'ROI_probe_autofocus_summary.csv'
+SUMMARY_NAME = SCORES_FILE_NAME  # 'ROI_probe_autofocus_summary.csv'
 DRIFT_NAME = 'autofocus_drift.png'
 PARAMETERS_NAME = 'HiM_parameters.yml'
 CORRELATION_NAME = 'correlation.npy'
@@ -82,18 +97,43 @@ def _read_scores_csv(path) -> list:
         return list(csv.DictReader(f))
 
 
+def autofocus_folder(metadata_folder) -> Path:
+    """<metadata_folder>/autofocus when that subfolder exists (current qudi-core task), else metadata_folder."""
+    folder = Path(metadata_folder)
+    return folder / AUTOFOCUS_SUBFOLDER if (folder / AUTOFOCUS_SUBFOLDER).is_dir() else folder
+
+
+def _per_check_rows(data_folder):
+    """(rows, source) of the per-check file, rows as dicts cycle / RT / roi / shift_y_px / shift_x_px:
+    source 'live' (ROI_probe_autofocus_summary.csv with a 'cycle' column, written by the task), 'scores'
+    (autofocus_scores.csv of the previous task) or (None, None)."""
+    live = data_folder / SUMMARY_NAME
+    if live.is_file():
+        rows = _read_scores_csv(live)
+        with open(live, newline='', encoding='utf-8') as f:
+            header = next(csv.reader(f), [])
+        if 'cycle' in header:
+            return [{'cycle': row['cycle'], 'RT': row['probe_name'], 'roi': row['roi_name'],
+                     'shift_y_px': row['shift_y_px'], 'shift_x_px': row['shift_x_px']} for row in rows], 'live'
+    if (data_folder / SCORES_NAME).is_file():
+        return _read_scores_csv(data_folder / SCORES_NAME), 'scores'
+    return None, None
+
+
 def load_run(metadata_folder, log=None) -> dict:
-    """Content of one metadata folder: roi_names, probe_names (cycle order), corr (ROIs x probes), threshold (None
-    when the run has none), scores (rows of autofocus_scores.csv or None), experiment_folder, metadata_folder."""
+    """Content of one run: roi_names, probe_names (cycle order), corr (ROIs x probes), threshold (None when the run
+    has none), scores (per-check rows or None), scores_source ('live', 'scores' or None), experiment_folder,
+    metadata_folder, data_folder (where the autofocus files are)."""
     log = log or _log
     folder = Path(metadata_folder)
+    data_folder = autofocus_folder(folder)
     with open(folder / PARAMETERS_NAME, 'r', encoding='utf-8') as f:
         params = yaml.safe_load(f) or {}
     roi_names = list((params.get('4- ROIs') or {}).keys())
     probes = (params.get('2- fluidic parameters') or {}).get('probes') or {}
     threshold = (params.get('1- global parameters') or {}).get('correlation_threshold')
-    corr = np.asarray(np.load(folder / CORRELATION_NAME), dtype=float)
-    scores = _read_scores_csv(folder / SCORES_NAME) if (folder / SCORES_NAME).is_file() else None
+    corr = np.asarray(np.load(data_folder / CORRELATION_NAME), dtype=float)
+    scores, scores_source = _per_check_rows(data_folder)
 
     n_rois = len(roi_names)
     # rows of correlation.npy = cycles (qudi-core) or probes (legacy), in cycle order
@@ -119,7 +159,7 @@ def load_run(metadata_folder, log=None) -> dict:
             # cycles without any check (aborted run): label from the probes in tube order when it fits
             ordered = [probes[k] for k in sorted(probes, key=lambda x: int(x))]
             if len(ordered) != n_cycles:
-                raise ValueError(f'{folder}: {SCORES_NAME} has no RT for cycle(s) {missing} and the {len(ordered)} '
+                raise ValueError(f'{folder}: the per-check file has no probe for cycle(s) {missing} and the {len(ordered)} '
                                  f'probe(s) of {PARAMETERS_NAME} do not match the {n_cycles} cycle(s) of '
                                  f'{CORRELATION_NAME}.')
             for c in missing:
@@ -127,13 +167,15 @@ def load_run(metadata_folder, log=None) -> dict:
         probe_names = [rt_of_cycle[c] for c in range(1, n_cycles + 1)]
     else:
         probe_names = [probes[k] for k in sorted(probes, key=lambda x: int(x))]
-        log.info(f'{folder}: no {SCORES_NAME} - probe order assumed to be the order of the probe keys (tube number)')
+        log.info(f'{folder}: no per-check file ({SUMMARY_NAME} / {SCORES_NAME}) - probe order assumed to be the '
+                 f'order of the probe keys (tube number)')
     if len(probe_names) != n_cycles:
         raise ValueError(f'{folder}: {len(probe_names)} probe label(s) for the {n_cycles} cycle(s) of '
                          f'{CORRELATION_NAME} ({cycles_x_rois.shape}).')
 
-    return {'metadata_folder': str(folder), 'experiment_folder': str(folder.parent), 'roi_names': roi_names,
-            'probe_names': probe_names, 'corr': cycles_x_rois.T, 'threshold': threshold, 'scores': scores}
+    return {'metadata_folder': str(folder), 'experiment_folder': str(folder.parent), 'data_folder': str(data_folder),
+            'roi_names': roi_names, 'probe_names': probe_names, 'corr': cycles_x_rois.T, 'threshold': threshold,
+            'scores': scores, 'scores_source': scores_source}
 
 
 # ======================================================================================================================
@@ -183,8 +225,11 @@ def _drift_figure(run, path):
     drift = np.full((len(roi_names), n_cycles), np.nan)
     for row in run['scores']:
         if row['roi'] in roi_names and 1 <= int(row['cycle']) <= n_cycles:
-            drift[roi_names.index(row['roi']), int(row['cycle']) - 1] = np.hypot(float(row['shift_y_px']),
-                                                                             float(row['shift_x_px']))
+            try:
+                shift = np.hypot(float(row['shift_y_px']), float(row['shift_x_px']))
+            except (TypeError, ValueError):
+                continue  # check whose image could not be read: no shift
+            drift[roi_names.index(row['roi']), int(row['cycle']) - 1] = shift
     cycles = np.arange(1, n_cycles + 1)
     fig = Figure(figsize=(max(10, n_cycles * 0.5 + 6), max(5, len(roi_names) * 0.3)))
     ax1, ax2 = fig.add_subplot(121), fig.add_subplot(122)
@@ -215,16 +260,19 @@ def _drift_figure(run, path):
 # ======================================================================================================================
 
 def report_run(metadata_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) -> list:
-    """Heatmap and CSV (and the drift figure when autofocus_scores.csv exists) of one run, written in its metadata
-    folder; returns the written paths."""
+    """Heatmap, drift figure (with a per-check file) and, for the previous qudi-core and legacy layouts, the summary
+    CSV of one run, written where its autofocus files are (<metadata_folder>/autofocus/ or metadata_folder);
+    returns the written paths."""
     run = load_run(metadata_folder, log)
-    folder = run['metadata_folder']
+    folder = run['data_folder']
     thr = threshold if threshold is not None else (run['threshold'] if run['threshold'] is not None
                                                    else DEFAULT_THRESHOLD)
-    written = [os.path.join(folder, HEATMAP_NAME), os.path.join(folder, SUMMARY_NAME)]
+    written = [os.path.join(folder, HEATMAP_NAME)]
     _heatmap(run['corr'], run['roi_names'], run['probe_names'], written[0], vmin, vmax, thr,
              f'Autofocus score - {os.path.basename(run["experiment_folder"])} (threshold {thr:g})')
-    _summary_csv([run], written[1])
+    if run['scores_source'] != 'live':  # the current task writes ROI_probe_autofocus_summary.csv itself
+        written.append(os.path.join(folder, SUMMARY_NAME))
+        _summary_csv([run], written[-1])
     if run['scores']:
         written.append(os.path.join(folder, DRIFT_NAME))
         _drift_figure(run, written[-1])
@@ -232,11 +280,12 @@ def report_run(metadata_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) ->
 
 
 def summarize_folder(root_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) -> list:
-    """Every metadata folder under root_folder with HiM_parameters.yml and correlation.npy (same ROIs required):
-    global heatmap and CSV in root_folder; returns the written paths."""
+    """Every metadata folder under root_folder with HiM_parameters.yml and correlation.npy (in the folder or in its
+    autofocus/ subfolder; same ROIs required): global heatmap and CSV in root_folder; returns the written paths."""
     log = log or _log
     root = Path(root_folder)
-    folders = sorted({p.parent for p in root.rglob(PARAMETERS_NAME) if (p.parent / CORRELATION_NAME).is_file()})
+    folders = sorted({p.parent for p in root.rglob(PARAMETERS_NAME)
+                      if (autofocus_folder(p.parent) / CORRELATION_NAME).is_file()})
     for p in sorted({p.parent for p in root.rglob(PARAMETERS_NAME)} - set(folders)):
         log.warning(f'Missing {CORRELATION_NAME} in {p}')
     if not folders:
@@ -248,7 +297,7 @@ def summarize_folder(root_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) 
                              f'of {runs[0]["metadata_folder"]}.')
     with_csv = [run for run in runs if run['scores']]
     if with_csv and len(with_csv) < len(runs):
-        log.warning(f'{len(with_csv)} run(s) with {SCORES_NAME} (qudi-core ZNCC score) and {len(runs) - len(with_csv)} '
+        log.warning(f'{len(with_csv)} run(s) with a per-check file (qudi-core ZNCC score) and {len(runs) - len(with_csv)} '
                     f'without (legacy score): the two scores are not on the same scale.')
     labels = [f'{probe} | {os.path.basename(run["experiment_folder"])}' for run in runs for probe in run['probe_names']]
     thresholds = {run['threshold'] for run in runs if run['threshold'] is not None}

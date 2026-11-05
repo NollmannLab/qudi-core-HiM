@@ -10,8 +10,10 @@ versions are printed at the start): image k is checked against the reference of 
 cycle k // n_rois + 1, with the same rolling update as the task (a passed image becomes the reference of its
 ROI). The score is the one of the task: qudi.tasks.common.autofocus_check.autofocus_score (ZNCC, -1..1).
 
-Output: a CSV with the columns of the task's autofocus_scores.csv (cycle, RT, roi, score, shift_y_px,
-shift_x_px, passed; RT is empty, roi is ROI_<index in the reference list>), a summary (min / median / max of
+Output: a CSV with the columns of the task's ROI_probe_autofocus_summary.csv (experiment_folder, roi_name,
+probe_name, correlation, cycle, shift_y_px, shift_x_px, passed - autofocus_check.SCORES_COLUMNS; experiment_folder
+is the name of the --images folder, probe_name is empty, roi_name is ROI_<index in the reference list>,
+correlation is the score), a summary (min / median / max of
 the score, fraction of passed ROIs per cycle for the given threshold) and, with --plot, a PNG of the score per
 image (one colour per cycle).
 
@@ -48,11 +50,12 @@ from glob import glob
 
 import numpy as np
 
-from qudi.tasks.common.autofocus_check import (AUTOFOCUS_IMAGE_PATTERN, autofocus_score, load_reference_images,
+from qudi.tasks.common.autofocus_check import (AUTOFOCUS_IMAGE_PATTERN, SCORES_COLUMNS, autofocus_score,
+                                               load_reference_images,
                                                read_autofocus_image, reader_versions, single_thread_read_form,
                                                sort_czi_paths)
 
-CSV_COLUMNS = ('cycle', 'RT', 'roi', 'score', 'shift_y_px', 'shift_x_px', 'passed')  # as autofocus_scores.csv
+CSV_COLUMNS = SCORES_COLUMNS  # as the task's ROI_probe_autofocus_summary.csv
 
 
 def find_autofocus_images(folder) -> list:
@@ -60,7 +63,7 @@ def find_autofocus_images(folder) -> list:
     return sort_czi_paths(glob(os.path.join(folder, '**', AUTOFOCUS_IMAGE_PATTERN), recursive=True))
 
 
-def replay(references, image_paths, threshold, read=read_autofocus_image) -> list:
+def replay(references, image_paths, threshold, read=read_autofocus_image, experiment_folder='') -> list:
     """One row per image (dict with the CSV_COLUMNS keys): image k against the reference of ROI k mod n, rolling
     update of the reference when the check passes (as HiMSDTask)."""
     refs = np.array(references, copy=True)
@@ -73,14 +76,15 @@ def replay(references, image_paths, threshold, read=read_autofocus_image) -> lis
         passed = score >= threshold
         if passed:
             refs[index] = image
-        rows.append({'cycle': k // n + 1, 'RT': '', 'roi': f'ROI_{index:03d}', 'score': score,
-                     'shift_y_px': shift_y, 'shift_x_px': shift_x, 'passed': passed})
+        rows.append({'experiment_folder': experiment_folder, 'roi_name': f'ROI_{index:03d}', 'probe_name': '',
+                     'correlation': score, 'cycle': k // n + 1, 'shift_y_px': shift_y, 'shift_x_px': shift_x,
+                     'passed': passed})
     return rows
 
 
 def summary(rows, n_rois) -> str:
     """Min / median / max of the score and the fraction of passed ROIs per cycle."""
-    scores = np.array([row['score'] for row in rows])
+    scores = np.array([row['correlation'] for row in rows])
     lines = [f'{len(rows)} image(s), {n_rois} ROI(s): score min {scores.min():.3f}, median {np.median(scores):.3f}, '
              f'max {scores.max():.3f}']
     for cycle in sorted({row['cycle'] for row in rows}):
@@ -96,7 +100,7 @@ def _plot(rows, path, threshold) -> None:
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(8, 4))
     for cycle in sorted({row['cycle'] for row in rows}):
-        points = [(k, row['score']) for k, row in enumerate(rows) if row['cycle'] == cycle]
+        points = [(k, row['correlation']) for k, row in enumerate(rows) if row['cycle'] == cycle]
         ax.plot(*zip(*points), 'o-', label=f'cycle {cycle}')
     ax.axhline(threshold, color='k', linestyle='--', linewidth=1, label=f'threshold {threshold:g}')
     ax.set_xlabel('image index (acquisition order)')
@@ -110,11 +114,13 @@ def _plot(rows, path, threshold) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description='Replay the Hi-M autofocus check on a past ZEN experiment.')
     parser.add_argument('--reference', required=True,
-                        help='folder of the reference images (autofocus_reference.npy or *.czi)')
+                        help='folder of the reference images (autofocus_reference.npy or *.czi; for a run of the '
+                             'Hi-M task: its <metadata folder>/autofocus)')
     parser.add_argument('--images', required=True, help='folder of a past ZEN experiment (searched recursively)')
     parser.add_argument('--threshold', type=float, default=0.5,
                         help='threshold of the rolling reference update and of the pass / fail (default 0.5)')
-    parser.add_argument('--out', default='autofocus_scores.csv', help='CSV file written (default autofocus_scores.csv)')
+    parser.add_argument('--out', default='autofocus_calibration_scores.csv',
+                        help='CSV file written (default autofocus_calibration_scores.csv)')
     parser.add_argument('--plot', action='store_true', help='also save a PNG of the scores next to the CSV')
     args = parser.parse_args(argv)
 
@@ -125,7 +131,8 @@ def main(argv=None) -> int:
     if not paths:
         print(f'No {AUTOFOCUS_IMAGE_PATTERN} image in {args.images}.', file=sys.stderr)
         return 1
-    rows = replay(references, paths, args.threshold)
+    rows = replay(references, paths, args.threshold,
+                  experiment_folder=os.path.basename(os.path.normpath(args.images)))
     with open(args.out, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()

@@ -554,10 +554,11 @@ def _section_optimize():
     old_hook = sys.excepthook
     sys.excepthook = lambda *exc: close_errors.append(exc[1])  # error of a Python override called by Qt
     try:
-        gui.module_state.deactivate()
+        # on_deactivate called directly: deactivating the modules through module_state would save their status
+        # variables (the test ROI list) in qudi's appdata folder, restored by the next activation
+        gui.on_deactivate()
         app.processEvents()
         closed_by_deactivate = not mw.isVisible()
-        roi.module_state.deactivate()
         gui._roi_logic = None  # connector of a deactivated module
         QtWidgets.QApplication.closeAllWindows()
         mw.close()  # a second close of the window: no side effect

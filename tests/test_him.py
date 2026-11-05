@@ -9,7 +9,7 @@ runs in its own thread, the modules in the main thread (event loop). Logic calls
 Sections:
   - online data transfer (common/data_transfer.py DataTransfer; Hi-M SD cases in the ZEN folder block);
   - autofocus check of the SD (common/autofocus_check.py, HiMSDTask): score, abort rule, wait loop;
-  - run files: experiment_config.yaml and metadata.yml in the run folder;
+  - run files: metadata.yml and HiM_parameters.yml (every key of the experiment file) in the run folder;
   - number of z planes: not used by the SD task, still required by the dummy;
   - Hi-M cycles: full run, progress, interrupt, errors, needle position, needle modes, SD (fake ZEN),
     RAMM placeholder;
@@ -331,7 +331,7 @@ if selected('metadata'):
     # Hi-M dummy, 1 probe, 2 ROIs, metadata_template of dummy_config.cfg (template of the repository)
     meta_inj = copy.deepcopy(EXAMPLE)
     meta_inj['probes'] = {1: 'RT1'}
-    meta_exp = files(meta_inj, 'metadata')
+    meta_exp = files(meta_inj, 'metadata', extra={'operator_note': 'kept in HiM_parameters.yml'})
     task = make_task(user_config_path=meta_exp)
     t0 = monotonic()
     result, err, _, _ = run(task)
@@ -342,10 +342,16 @@ if selected('metadata'):
     section = lambda m, name: {k: v for item in m[name] for k, v in item.items()}  # noqa: E731
     acq = section(meta, 'Acquisition') if meta else {}
     fluidics_meta = section(meta, 'Fluidics') if meta else {}
-    check('(run files) 1 cycle done; experiment_config.yaml byte-identical to the experiment file',
+    exp_content = yaml.safe_load(open(meta_exp))
+    him_global = (yaml.safe_load(open(os.path.join(run_folder, 'HiM_parameters.yml'))) or {}).get(
+        '1- global parameters', {}) if run_folder else {}
+    check('(run files) 1 cycle done; no experiment_config.yaml; HiM_parameters.yml "1- global parameters" = every key '
+          'of the experiment file with its value (incl. operator_note, not in _EXPERIMENT_KEYS), known keys first',
           err is None and result and result['cycles_done'] == 1
-          and open(os.path.join(run_folder, 'experiment_config.yaml'), 'rb').read() == open(meta_exp, 'rb').read(),
-          (err, result))
+          and not os.path.exists(os.path.join(run_folder, 'experiment_config.yaml'))
+          and him_global == exp_content and him_global.get('operator_note') == 'kept in HiM_parameters.yml'
+          and list(him_global)[:len(task._EXPERIMENT_KEYS)] == list(task._EXPERIMENT_KEYS)
+          and list(him_global)[-1] == 'operator_note', (err, result, list(him_global)))
     check('(run files) metadata.yml: Fluidics hybridization / photobleaching = the lists of the injections file',
           fluidics_meta.get('hybridization') == meta_inj['hybridization list']
           and fluidics_meta.get('photobleaching') == meta_inj['photobleaching list'], fluidics_meta)
@@ -518,14 +524,15 @@ if selected('sd_zen_folder'):
     names = open(os.path.join(folder, 'movie_name.txt')).read().split() if os.path.isdir(folder) else []
     check(f'(ZEN folder) Hi-M SD, 1 probe, {N} ROIs: files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata '
           f'(local, save_network_path set, no transfer): HiM_parameters.yml, '
-          f'movie_name.txt, experiment_config.yaml, injections.yml (copy of the injections file), metadata.yml, '
-          f'HiM_task.log; prefix {prefix} (folders before + 1), names scan_{prefix}_RT1_<roi>_ROI',
+          f'movie_name.txt, injections.yml (copy of the injections file), metadata.yml, HiM_task.log (no '
+          f'experiment_config.yaml) and autofocus/ with every autofocus file (no autofocus_scores.csv); prefix '
+          f'{prefix} (folders before + 1), names scan_{prefix}_RT1_<roi>_ROI',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == folder
-          and sorted(os.listdir(folder)) == sorted(['HiM_parameters.yml', 'HiM_task.log', 'autofocus_reference.npy',
-                                                    'autofocus_scores.csv', 'correlation.npy', 'experiment_config.yaml',
-                                                    'injections.yml', 'metadata.yml', 'movie_name.txt',
-                                                    'reference_images_RT1.npy', 'ROI_probe_autofocus_summary.csv',
-                                                    'autofocus_correlation_heatmap.png', 'autofocus_drift.png'])
+          and sorted(os.listdir(folder)) == sorted(['HiM_parameters.yml', 'HiM_task.log', 'autofocus',
+                                                    'injections.yml', 'metadata.yml', 'movie_name.txt'])
+          and sorted(os.listdir(os.path.join(folder, 'autofocus'))) == sorted(
+              ['autofocus_reference.npy', 'correlation.npy', 'reference_images_RT1.npy',
+               'ROI_probe_autofocus_summary.csv', 'autofocus_correlation_heatmap.png', 'autofocus_drift.png'])
           and open(os.path.join(folder, 'injections.yml'), 'rb').read() == open(task.injections_path, 'rb').read()
           and task.prefix == prefix and names == [f'scan_{prefix}_RT1_{n[4:]}_ROI' for n in NAMES],
           (err, result, os.listdir(folder) if os.path.isdir(folder) else None, names))
@@ -540,6 +547,8 @@ if selected('sd_zen_folder'):
           and len(zen_files) == 2 * N and os.listdir(server) == [zen_name]
           and os.listdir(os.path.join(server, zen_name)) == ['metadata']
           and sorted(os.listdir(os.path.join(server, zen_name, 'metadata'))) == sorted(os.listdir(folder))
+          and sorted(os.listdir(os.path.join(server, zen_name, 'metadata', 'autofocus')))
+          == sorted(os.listdir(os.path.join(folder, 'autofocus')))  # the autofocus/ subfolder is copied too
           and open(os.path.join(server, zen_name, 'metadata', 'HiM_task.log'), 'rb').read()
           == open(os.path.join(folder, 'HiM_task.log'), 'rb').read(), (zen.tree(), os.listdir(server)))
     lines = log_lines(folder)
@@ -630,10 +639,10 @@ if selected('sd_zen_folder'):
           t_int is not None and result is None and not task.success and lines
           and lines[-1].endswith(' - Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
           (t_int, result, lines[-1:], run_log_handlers()))
-    check('(autofocus report) not made after an interrupt (no heatmap / summary / drift in the metadata folder)',
-          not any(os.path.exists(os.path.join(folder, n)) for n in ('autofocus_correlation_heatmap.png',
-                                                                   'ROI_probe_autofocus_summary.csv',
-                                                                   'autofocus_drift.png')), os.listdir(folder))
+    check('(autofocus report) not made after an interrupt (no heatmap / drift figure in metadata/autofocus/)',
+          not any(os.path.exists(os.path.join(folder, 'autofocus', n)) for n in ('autofocus_correlation_heatmap.png',
+                                                                                'autofocus_drift.png')),
+          os.listdir(os.path.join(folder, 'autofocus')) if os.path.isdir(os.path.join(folder, 'autofocus')) else None)
     end_state_ok('interrupt during hybridization (ZEN folder)', t0)
 
     # autofocus: reference count != ROI count -> the task stops before any hardware call, clear message
@@ -651,29 +660,35 @@ if selected('sd_zen_folder'):
         zen_trigger.images = None
     folder = sd_folder(local, zen.created[-1])
     msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
-    rows = list(csv.reader(open(os.path.join(folder, 'autofocus_scores.csv')))) if os.path.isdir(folder) else []
-    scores = np.load(os.path.join(folder, 'correlation.npy')) if os.path.isdir(folder) else None
+    af_folder = os.path.join(folder, 'autofocus')
+    rows = list(csv.reader(open(os.path.join(af_folder, 'ROI_probe_autofocus_summary.csv')))) \
+        if os.path.isdir(af_folder) else []
+    scores = np.load(os.path.join(af_folder, 'correlation.npy')) if os.path.isdir(af_folder) else None
     lines = log_lines(folder)
     check(f'(autofocus abort) {N} ROIs, min fraction 0.9, the first check fails -> warning "Autofocus check failed for '
-          f'{NAMES[0]}", error with the counts, experiment stopped before the next ROI; autofocus_scores.csv (1 row) '
-          f'and correlation.npy (NaN for {NAMES[1]}) kept; log file closed',
+          f'{NAMES[0]}", error with the counts, experiment stopped before the next ROI; autofocus/'
+          f'ROI_probe_autofocus_summary.csv (new columns, 1 row, written by the task and not rewritten by the report) '
+          f'and correlation.npy (NaN for {NAMES[1]}) kept; no autofocus_scores.csv; log file closed',
           err is not None and 'Autofocus check: 1 of 2 ROI(s) failed in cycle 1' in str(err)
           and any(lvl == logging.WARNING and m.startswith(f'Autofocus check failed for {NAMES[0]} (score ')
                   for lvl, m in msgs)
           and any(lvl == logging.ERROR and 'below the minimum fraction 90%' in m for lvl, m in msgs)
           and sum(m.startswith('Autofocus check cycle') for _, m in msgs) == 1
           and not any('Triggering ZEN acquisition' in m for _, m in msgs)
-          and rows[0] == ['cycle', 'RT', 'roi', 'score', 'shift_y_px', 'shift_x_px', 'passed'] and len(rows) == 2
-          and rows[1][:3] == ['1', 'RT1', NAMES[0]] and rows[1][-1] == 'False'
+          and rows[0] == ['experiment_folder', 'roi_name', 'probe_name', 'correlation', 'cycle', 'shift_y_px',
+                          'shift_x_px', 'passed'] and len(rows) == 2
+          and rows[1][:3] == [os.path.basename(zen.created[-1]), NAMES[0], 'RT1'] and rows[1][4] == '1'
+          and float(rows[1][3]) < 0.9 and rows[1][-1] == 'False'
+          and not glob.glob(os.path.join(folder, '**', 'autofocus_scores.csv'), recursive=True)
           and scores is not None and scores.shape == (1, N) and not np.isnan(scores[0, 0]) and np.isnan(scores[0, 1])
           and lines and lines[-1].endswith('Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
           (err, rows, scores, lines[-1:]))
-    check('(autofocus report) made after an autofocus abort: heatmap, summary and drift figure in the metadata folder; '
-          'listed in the log',
-          all(os.path.isfile(os.path.join(folder, n)) for n in ('autofocus_correlation_heatmap.png',
-                                                               'ROI_probe_autofocus_summary.csv', 'autofocus_drift.png'))
-          and any(m.startswith('Autofocus report: autofocus_correlation_heatmap.png') for _, m in msgs),
-          os.listdir(folder) if os.path.isdir(folder) else None)
+    check('(autofocus report) made after an autofocus abort: heatmap and drift figure in metadata/autofocus/, no second '
+          'CSV; listed in the log',
+          all(os.path.isfile(os.path.join(af_folder, n)) for n in ('autofocus_correlation_heatmap.png',
+                                                                  'autofocus_drift.png'))
+          and any(m == 'Autofocus report: autofocus_correlation_heatmap.png, autofocus_drift.png' for _, m in msgs),
+          (os.listdir(af_folder) if os.path.isdir(af_folder) else None, [m for _, m in msgs if 'report' in m]))
     end_state_ok('autofocus abort', t0)
 
     # autofocus report failing: warning only, the cleanup goes on
@@ -730,12 +745,14 @@ if selected('sd_zen_folder'):
     folder = sd_folder(local, zen.created[-1])
     on_server = server_files(server)
     acquired = [os.path.join(zen_name, os.path.relpath(p, zen.created[-1])) for p in zen_trigger.acquired[acquired_before:]]
-    metadata = sorted(os.path.join(zen_name, 'metadata', n) for n in os.listdir(folder))
+    metadata = sorted(os.path.join(zen_name, 'metadata', f) for f in server_files(folder))  # recursive
     check(f'(transfer, server reachable) metadata folder local (<save_path>/<YYYY-MM-DD>/...); on the server '
           f'<save_network_path>/<ZEN folder name>/: the {N} *_AcquisitionBlock3_pt*.czi with their relative path, '
-          f'every metadata file and HiM_task.log (metadata/...), no autofocus image (Block1), no .part file',
+          f'every metadata file incl. metadata/autofocus/ and HiM_task.log (metadata/...), no autofocus image '
+          f'(Block1), no .part file',
           err is None and result and result['directory'] == folder and len(acquired) == N
           and on_server == sorted(acquired + metadata) and os.path.join(zen_name, 'metadata', 'HiM_task.log') in on_server
+          and os.path.join(zen_name, 'metadata', 'autofocus', 'correlation.npy') in on_server
           and not any('AcquisitionBlock1' in f or f.endswith('.part') for f in on_server),
           (err, on_server, acquired, metadata))
     check('(transfer, server reachable) the copies are identical to the local files',
@@ -839,7 +856,7 @@ if selected('autofocus'):
         task._af_refs = np.stack([base] * n_rois)
         task._af_scores = np.full((n_cycles, n_rois), np.nan)
         task._af_failed_rois = set()
-        with open(os.path.join(task.directory, task._AF_CSV), 'w', newline='') as f:
+        with open(task._af_path(task._AF_CSV), 'w', newline='') as f:  # <directory>/autofocus/
             csv.writer(f).writerow(task._AF_CSV_COLUMNS)
         task._af_seen = set()
         task.FILE_STABLE_PERIOD_S = 0.05  # short settings
@@ -883,14 +900,20 @@ if selected('autofocus'):
           and any(lvl == logging.ERROR and '4 of 10 ROI(s) failed' in m for lvl, m in msgs)
           and sum(lvl == logging.WARNING and 'in the previous cycle too' in m for lvl, m in msgs) == 3
           and np.isnan(task._af_scores[1, 5:]).all(), (err, checked))
-    refs_file = np.load(os.path.join(task.directory, af.REFERENCE_FILE_NAME))
+    refs_file = np.load(os.path.join(task.directory, 'autofocus', af.REFERENCE_FILE_NAME))
     check('(abort rule) pass: the new image replaced the reference and autofocus_reference.npy was saved again; '
           'fail: reference kept; reference_images_RT1.npy written at the end of cycle 1',
           np.array_equal(refs_file[1], base) and np.array_equal(task._af_refs[0], base)
-          and os.path.isfile(os.path.join(task.directory, 'reference_images_RT1.npy')))
-    rows = list(csv.reader(open(os.path.join(task.directory, task._AF_CSV))))
-    check('(abort rule) autofocus_scores.csv: one row per check as they happen (10 + 5)',
-          len(rows) == 1 + 15 and rows[1][:3] == ['1', 'RT1', 'ROI_000'] and rows[-1][:3] == ['2', 'RT2', 'ROI_004'],
+          and os.path.isfile(os.path.join(task.directory, 'autofocus', 'reference_images_RT1.npy'))
+          and not os.path.exists(os.path.join(task.directory, af.REFERENCE_FILE_NAME)))
+    rows = list(csv.reader(open(os.path.join(task.directory, 'autofocus', 'ROI_probe_autofocus_summary.csv'))))
+    zen_name = os.path.basename(task._zen_directory)
+    check('(abort rule) autofocus/ROI_probe_autofocus_summary.csv: header experiment_folder, roi_name, probe_name, '
+          'correlation, cycle, shift_y_px, shift_x_px, passed; one row per check as they happen (10 + 5, incl. the '
+          'check that aborted)',
+          rows[0] == list(af.SCORES_COLUMNS) and len(rows) == 1 + 15
+          and rows[1][:3] == [zen_name, 'ROI_000', 'RT1'] and rows[1][4] == '1'
+          and rows[-1][:3] == [zen_name, 'ROI_004', 'RT2'] and rows[-1][4] == '2' and rows[-1][-1] == 'False',
           rows[-1])
 
     # wait loop: no new image -> polls until an interrupt is requested
@@ -1109,7 +1132,7 @@ if selected('autofocus'):
           (task._af_scores[0, 0], in_process))
 
     def af_rows(task):
-        return list(csv.reader(open(os.path.join(task.directory, task._AF_CSV))))[1:]
+        return list(csv.reader(open(task._af_path(task._AF_CSV))))[1:]
 
     # crash once: error, new pool, second attempt works
     task = with_worker(af_task(2, 0.5), _short.helper_exit_once)
@@ -1143,7 +1166,7 @@ if selected('autofocus'):
           '(the image could not be read)"',
           crash_err is None and len(errors) == 3 and 'failed twice' in errors[2] and task._af_failures == 1
           and np.isnan(task._af_scores[0, 0]) and np.array_equal(task._af_refs[0], base)
-          and af_rows(task) == [['1', 'RT1', 'ROI_000', '', '', '', 'False']]
+          and af_rows(task) == [[os.path.basename(task._zen_directory), 'ROI_000', 'RT1', '', '1', '', '', 'False']]
           and 'Autofocus check failed for ROI_000 (the image could not be read)' in warnings,
           (crash_err, errors, af_rows(task)))
     del task._af_worker  # back to the class worker (read_and_score_npy): the next ROI is checked normally

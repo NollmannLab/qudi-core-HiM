@@ -63,7 +63,7 @@ from qudi.tasks.common.data_transfer import DataTransfer
 from qudi.tasks.common.popups import show_warning_popup
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
 from qudi.util import autofocus_report
-from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
+from qudi.tasks.common.run_metadata import (fill_run_metadata, optional_metadata_template,
                                             set_metadata_field, write_metadata)
 from qudi.tasks.common.sample_info import add_sample_to_run, optional_sample
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
@@ -133,7 +133,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     (tasks/common/data_folders.py); self.prefix = NNN. <root> is chosen before any hardware call
     (choose_data_root): save_network_path when it is set and writable, otherwise save_path (a server
     folder that is not reachable gives a warning in the log and a non-modal pop-up). qudi writes
-    HiM_parameters.yml, movie_name.txt, experiment_config.yaml (byte copy of the experiment file) and, with
+    HiM_parameters.yml (with every key of the experiment file, which is not copied), movie_name.txt and, with
     a metadata template, metadata.yml there: the template with Time, the Acquisition fields sample_name,
     laser_lines, laser_power_(%), number_z_planes and roi_list_(xyz) (all ROIs with their positions), and
     Fluidics: hybridization and photobleaching (the lists of the injections file); other fields as in the
@@ -696,15 +696,19 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
             self.log.info(f'    step {number}/{len(pb_steps)}: {self._describe(step)}')
 
     def _save_parameters(self, params, injections) -> None:
-        """Write HiM_parameters.yml in self.directory: experiment parameters, probes, hybridization and
-        photobleaching lists, imaging parameters, ROI positions."""
+        """Write HiM_parameters.yml in self.directory: every key of the experiment file ('1- global parameters'),
+        probes, hybridization and photobleaching lists, imaging parameters, ROI positions."""
         _, probes, hyb_list, pb_list, needle_mode = injections
         rois = {}
         for roi_name in self.roi_names:
             pos = list(self._roi_logic.get_roi_position(roi_name))
             z = pos[2] if len(pos) > 2 else None
             rois[roi_name] = f'X={pos[0]} - Y={pos[1]} - Z={z}'
-        param = {'1- global parameters': params,
+        # every key of the experiment file, values as read: the known keys first (_EXPERIMENT_KEYS order), then the
+        # others in file order (the experiment file itself is not copied into the run folder)
+        global_parameters = {key: params[key] for key in self._EXPERIMENT_KEYS if key in params}
+        global_parameters.update({key: value for key, value in params.items() if key not in global_parameters})
+        param = {'1- global parameters': global_parameters,
                  '2- fluidic parameters': {'probes': probes,
                                            'probe_needle_mode': needle_mode,
                                            'hybridization list': hyb_list,
@@ -724,10 +728,9 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         return 'num_z_planes' in self._EXPERIMENT_KEYS
 
     def _save_run_files(self, injections) -> None:
-        """experiment_config.yaml (byte copy of the experiment file), with a sample file sample.yml, and, with a
-        metadata template, metadata.yml (with the 'Sample' section when there is a sample file) in
-        self.directory."""
-        copy_experiment_file(self.user_config_path, self.directory)
+        """With a sample file sample.yml, and, with a metadata template, metadata.yml (with the 'Sample' section when
+        there is a sample file) in self.directory. The experiment file is not copied: its keys are in
+        HiM_parameters.yml."""
         metadata = None
         if self._metadata_template is not None:
             _, _, hyb_list, pb_list, _ = injections
@@ -817,7 +820,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     usual). qudi creates <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata, always local (local_dated_root,
     created and write-tested before any hardware call, YYYY-MM-DD = start of the task; create_mirror_folder,
     metadata_<HHMMSS> if that folder already holds files), and writes there HiM_parameters.yml, movie_name.txt,
-    experiment_config.yaml, injections.yml (byte copy of the injections file), metadata.yml, HiM_task.log and,
+    injections.yml (byte copy of the injections file), metadata.yml, HiM_task.log, the autofocus/ subfolder and,
     with a sample file (key sample_file, required by the SD definitions), sample.yml - metadata.yml then has the
     'Sample' section with its content. Nothing is written in the ZEN folder. self.prefix is the number of folders that were in
     zen_saving_path before ZEN started + 1, on 3 digits; file names scan_<prefix>_<RT>_<roi number>_ROI.
@@ -852,13 +855,16 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         (and a second one if the ROI already failed in the previous cycle).
       - Abort: as soon as (ROIs - failures of the cycle) / ROIs < autofocus_min_fraction, an error gives the
         counts and the experiment stops (error, cleanup as usual). The counter restarts at each cycle.
-      - Files (metadata folder): autofocus_scores.csv (one row per check, written as the run goes),
+      - Files (<metadata folder>/autofocus/, created with the metadata folder; copied to the server with it):
+        autofocus_reference.npy, ROI_probe_autofocus_summary.csv (header at creation, one row per check written as
+        the run goes: experiment_folder (ZEN folder name), roi_name, probe_name (RT), correlation (score, empty
+        when the image could not be read), cycle, shift_y_px, shift_x_px, passed),
         reference_images_<RT>.npy (end of each cycle), correlation.npy (cycles x ROIs, written by the
         cleanup; NaN for the checks not done). Report (qudi.util.autofocus_report, written by the cleanup
         after a normal end or an autofocus abort, not after an interrupt or another error; before the copy of
-        the metadata to the server): autofocus_correlation_heatmap.png (ROIs x probes),
-        ROI_probe_autofocus_summary.csv (one row per ROI / probe) and autofocus_drift.png (drift of the
-        autofocus images per ROI and cycle). An error while making the report is logged as a warning only.
+        the metadata to the server), in autofocus/: autofocus_correlation_heatmap.png (ROIs x probes) and
+        autofocus_drift.png (drift of the autofocus images per ROI and cycle); no second CSV. An error while
+        making the report is logged as a warning only.
 
     Copy of the metadata to the server: whenever save_network_path is set (with or without transfer_data), the
     metadata folder is copied to <save_network_path>/<ZEN folder name>/metadata by the cleanup, after the
@@ -992,20 +998,23 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self._zen_directory = self._find_new_zen_folder(self._zen_folders_before)
 
     def _create_data_folder(self) -> str:
-        """<root>/<ZEN folder name>/metadata (create_mirror_folder); self.prefix = folders in zen_saving_path
-        before ZEN started + 1, on 3 digits. Then the autofocus check files: copy of the references, empty list of
-        the autofocus images seen (the image of the first ROI may already exist, still empty), empty score
-        table."""
+        """<root>/<ZEN folder name>/metadata (create_mirror_folder) and its autofocus/ subfolder; self.prefix =
+        folders in zen_saving_path before ZEN started + 1, on 3 digits. Then the autofocus check files, in
+        autofocus/: copy of the references, the score file with its header; empty list of the autofocus images seen
+        (the image of the first ROI may already exist, still empty), empty score table."""
         self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
         directory = create_mirror_folder(self._data_root, self._zen_directory, self.log)
         # server copy of the metadata announced now that the ZEN folder name is known
         if getattr(self, 'save_network_path', ''):
             self.log.info(f'Metadata will also be copied to '
                           f'{os.path.join(self.save_network_path, self._server_path("metadata"))} at the end of the run')
-        np.save(os.path.join(directory, autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
+        # autofocus check files: <metadata folder>/autofocus/
+        os.makedirs(os.path.join(directory, autofocus_check.AUTOFOCUS_SUBFOLDER), exist_ok=True)
+        np.save(os.path.join(directory, autofocus_check.AUTOFOCUS_SUBFOLDER, autofocus_check.REFERENCE_FILE_NAME),
+                self._af_refs)
         self._af_seen = set()  # empty: the image file of the first ROI is created by ZEN before "ready"
         self._af_scores = np.full((len(self._cycles), len(self.roi_names)), np.nan)
-        with open(os.path.join(directory, self._AF_CSV), 'w', newline='') as f:
+        with open(os.path.join(directory, autofocus_check.AUTOFOCUS_SUBFOLDER, self._AF_CSV), 'w', newline='') as f:
             csv.writer(f).writerow(self._AF_CSV_COLUMNS)
         return directory
 
@@ -1130,7 +1139,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             self.log.error(f'Cleanup: transfer of the metadata: {err}')
 
     def _make_autofocus_report(self) -> None:
-        """Autofocus report in the metadata folder (qudi.util.autofocus_report.report_run) after a normal end or an
+        """Autofocus report in <metadata folder>/autofocus/ (qudi.util.autofocus_report.report_run) after a normal end or an
         autofocus abort; any error is logged as a warning only."""
         if not (getattr(self, '_run_completed', False) or getattr(self, '_af_aborted', False)) \
                 or not getattr(self, 'directory', None):
@@ -1174,8 +1183,8 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     # Autofocus check
     # ----------------------------------------------------------------------------------------------
 
-    _AF_CSV = 'autofocus_scores.csv'
-    _AF_CSV_COLUMNS = ('cycle', 'RT', 'roi', 'score', 'shift_y_px', 'shift_x_px', 'passed')
+    _AF_CSV = autofocus_check.SCORES_FILE_NAME           # ROI_probe_autofocus_summary.csv, in autofocus/
+    _AF_CSV_COLUMNS = autofocus_check.SCORES_COLUMNS
     _AF_POLL_S = 0.5  # poll interval while waiting for the new autofocus image
     _AF_WAIT_WARNING_S = 60  # warning every _AF_WAIT_WARNING_S while the new autofocus image is not found
     _AF_READ_ATTEMPTS = 5    # attempts to read the new autofocus image (ZEN may still be writing it)
@@ -1224,6 +1233,21 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
                     process.join(timeout=1.0)
             except Exception as err:
                 self.log.error(f'Autofocus check: could not stop the image reader process: {err!r}')
+
+    def _af_path(self, name) -> str:
+        """<metadata folder>/autofocus/<name> (the subfolder is created when missing)."""
+        folder = os.path.join(self.directory, autofocus_check.AUTOFOCUS_SUBFOLDER)
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, name)
+
+    def _af_row(self, cycle, roi_name, score, shift_y, shift_x, passed) -> None:
+        """One row of the score file (columns autofocus_check.SCORES_COLUMNS), appended at once (kept after an
+        abort); score None: image not read (empty score and shifts)."""
+        experiment = os.path.basename(os.path.normpath(self._zen_directory)) if self._zen_directory else ''
+        row = (experiment, roi_name, self._af_rt, '' if score is None else f'{score:.6f}', cycle + 1,
+               '' if score is None else shift_y, '' if score is None else shift_x, passed)
+        with open(self._af_path(self._AF_CSV), 'a', newline='') as f:
+            csv.writer(f).writerow(row)
 
     def _autofocus_images(self) -> list:
         """Autofocus images (*_AcquisitionBlock1_pt*.czi) of the ZEN data folder, recursive search."""
@@ -1349,7 +1373,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
 
     def _end_autofocus_cycle(self, rt) -> None:
         """References at the end of the cycle (reference_images_<RT>.npy) and fraction of passed checks."""
-        np.save(os.path.join(self.directory, f'reference_images_{rt}.npy'), self._af_refs)
+        np.save(self._af_path(f'reference_images_{rt}.npy'), self._af_refs)
         n = len(self.roi_names)
         self.log.info(f'Autofocus check {rt}: {self._af_passed}/{n} ROI(s) passed ({self._af_passed / n:.0%})')
 
@@ -1365,8 +1389,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         result = self._read_and_score(path, self._af_refs[index], roi_name)
         if result is None:
             # reader process failed twice: failed check (reference kept, empty score, NaN in correlation.npy)
-            with open(os.path.join(self.directory, self._AF_CSV), 'a', newline='') as f:
-                csv.writer(f).writerow((cycle + 1, self._af_rt, roi_name, '', '', '', False))
+            self._af_row(cycle, roi_name, None, None, None, False)
             self._autofocus_failed(roi_name, cycle, n, 'the image could not be read')
             return
         score, shift_y, shift_x, image = result
@@ -1375,13 +1398,12 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self.log.info(f'Autofocus check cycle {cycle + 1}/{len(self._cycles)} - {self._af_rt} - {roi_name}: score '
                       f'{score:.3f}, shift (y, x) = ({shift_y}, {shift_x}) px - {"pass" if passed else "FAIL"}')
         # one row per check, written at once (kept after an abort)
-        with open(os.path.join(self.directory, self._AF_CSV), 'a', newline='') as f:
-            csv.writer(f).writerow((cycle + 1, self._af_rt, roi_name, f'{score:.6f}', shift_y, shift_x, passed))
+        self._af_row(cycle, roi_name, score, shift_y, shift_x, passed)
         if passed:
             # pass: the new image becomes the reference of this ROI
             self._af_passed += 1
             self._af_refs[index] = image
-            np.save(os.path.join(self.directory, autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
+            np.save(self._af_path(autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
             return
         self._autofocus_failed(roi_name, cycle, n, f'score {score:.3f} < threshold {self.correlation_threshold}')
 
@@ -1405,14 +1427,14 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
 
     def _cleanup(self) -> None:
         """Helper process of the autofocus check stopped, correlation.npy (cycles x ROIs, NaN for the checks not done)
-        in the metadata folder, then the cleanup of all setups."""
+        in <metadata folder>/autofocus/, then the cleanup of all setups."""
         try:
             self._stop_af_pool()
         except Exception as err:
             self.log.error(f'Cleanup: could not stop the autofocus image reader process: {err!r}')
         if getattr(self, '_af_scores', None) is not None and getattr(self, 'directory', None):
             try:
-                np.save(os.path.join(self.directory, 'correlation.npy'), self._af_scores)
+                np.save(self._af_path('correlation.npy'), self._af_scores)
             except Exception as err:
                 self.log.error(f'Cleanup: could not save correlation.npy: {err}')
         super()._cleanup()
