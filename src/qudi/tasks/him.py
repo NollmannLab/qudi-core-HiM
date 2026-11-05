@@ -59,6 +59,7 @@ from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
 from qudi.util import autofocus_report
 from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
                                             set_metadata_field, write_metadata)
+from qudi.tasks.common.sample_info import add_sample_to_run, optional_sample
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
 from qudi.tasks.fluidics import FluidicsSDTask, FluidicsRAMMTask
@@ -115,8 +116,10 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     Experiment YAML (user_config_path): sample_name, roi_list_path, injections_path,
     imaging_sequence ([[wavelength, intensity %], ...]), num_z_planes, save_path (local data folder),
-    save_network_path (server data folder, optional), and the keys read by the subclass
-    (_read_microscope_parameters).
+    save_network_path (server data folder, optional), sample_file (optional; required by the SD definitions:
+    YAML describing the sample, tasks/common/sample_info.py; read before any hardware call, a missing or
+    unreadable file is reported with the other problems; absent or empty: no sample file), and the keys read
+    by the subclass (_read_microscope_parameters).
 
     Data folder (all setups): <root>/YYYY_MM_DD/NNN_HiM_<sample_name>, created by qudi
     (tasks/common/data_folders.py); self.prefix = NNN. <root> is chosen before any hardware call
@@ -126,7 +129,9 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     a metadata template, metadata.yml there: the template with Time, the Acquisition fields sample_name,
     laser_lines, laser_power_(%), number_z_planes and roi_list_(xyz) (all ROIs with their positions), and
     Fluidics: hybridization and photobleaching (the lists of the injections file); other fields as in the
-    template.
+    template. With a sample file: sample.yml (exact copy of the file read before the run) and its content as
+    the 'Sample' section of metadata.yml (appended after the template sections, or filled in the template's
+    'Sample' section).
     Injections file (injections configurator): buffer {outlet: name}, probes {tube: name},
     hybridization list, photobleaching list, probe_needle_mode 'next' | 'same' (missing -> 'next').
 
@@ -216,6 +221,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.save_network_path = ''
         self._data_root = None
         self._metadata_template = None
+        self._sample = None  # sample file of the run (sample_info.SampleFile; None: no sample file)
         self.imaging_sequence = None
         self.num_z_planes = None
         self._valve = self._flow = self._robot = None
@@ -252,6 +258,11 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.num_z_planes = params.get('num_z_planes') if self._uses_z_planes() else None
         self.save_path = params.get('save_path')
         self.save_network_path = params.get('save_network_path') or ''
+        # sample file (optional key sample_file): read before any hardware call, copied with the run files
+        try:
+            self._sample = optional_sample(params.get('sample_file'))
+        except RuntimeError as err:
+            problems.append(str(err))
         self._read_microscope_parameters(params)
 
         # injections file; the probe valve is its 'Probe' buffer entry (None: no probe injection)
@@ -699,19 +710,23 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         return 'num_z_planes' in self._EXPERIMENT_KEYS
 
     def _save_run_files(self, injections) -> None:
-        """experiment_config.yaml (byte copy of the experiment file) and, with a metadata template, metadata.yml
-        in self.directory."""
+        """experiment_config.yaml (byte copy of the experiment file), with a sample file sample.yml, and, with a
+        metadata template, metadata.yml (with the 'Sample' section when there is a sample file) in
+        self.directory."""
         copy_experiment_file(self.user_config_path, self.directory)
-        if self._metadata_template is None:
-            return
-        _, _, hyb_list, pb_list, _ = injections
-        positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self.roi_names}
-        metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
-                                     self.num_z_planes)
-        set_metadata_field(metadata, 'Fluidics', 'hybridization', hyb_list)
-        set_metadata_field(metadata, 'Fluidics', 'photobleaching', pb_list)
-        path = write_metadata(self.directory, metadata)
-        self.log.info(f'Saved the microscope metadata to {path}')
+        metadata = None
+        if self._metadata_template is not None:
+            _, _, hyb_list, pb_list, _ = injections
+            positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self.roi_names}
+            metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
+                                         self.num_z_planes)
+            set_metadata_field(metadata, 'Fluidics', 'hybridization', hyb_list)
+            set_metadata_field(metadata, 'Fluidics', 'photobleaching', pb_list)
+        # sample file: copied as sample.yml, its content added as the 'Sample' section of metadata.yml
+        add_sample_to_run(self.directory, self._sample, metadata)
+        if metadata is not None:
+            path = write_metadata(self.directory, metadata)
+            self.log.info(f'Saved the microscope metadata to {path}')
 
     def _append_movie_name(self, movie_name: str) -> None:
         with open(os.path.join(self.directory, 'movie_name.txt'), 'a+') as outfile:
@@ -788,8 +803,9 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     usual). qudi creates <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata, always local (local_dated_root,
     created and write-tested before any hardware call, YYYY-MM-DD = start of the task; create_mirror_folder,
     metadata_<HHMMSS> if that folder already holds files), and writes there HiM_parameters.yml, movie_name.txt,
-    experiment_config.yaml, injections.yml (byte copy of the injections file), metadata.yml and
-    HiM_task.log. Nothing is written in the ZEN folder. self.prefix is the number of folders that were in
+    experiment_config.yaml, injections.yml (byte copy of the injections file), metadata.yml, HiM_task.log and,
+    with a sample file (key sample_file, required by the SD definitions), sample.yml - metadata.yml then has the
+    'Sample' section with its content. Nothing is written in the ZEN folder. self.prefix is the number of folders that were in
     zen_saving_path before ZEN started + 1, on 3 digits; file names scan_<prefix>_<RT>_<roi number>_ROI.
 
     Autofocus check (common/autofocus_check.py): after the ZEN autofocus block of each ROI, the brightfield

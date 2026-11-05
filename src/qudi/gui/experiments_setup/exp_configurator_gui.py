@@ -50,6 +50,9 @@ GUI modules::
           - npy
         default path imagedata: /path/to/local/data
         default network path: /path/to/network/data
+        default zen path: /path/to/zen/folders            # start folder of the ZEN folder dialogs
+        default sample path: /path/to/sample/files        # start folder of the sample file dialogs
+        sample template: /path/to/sample_template.yml     # fields of the sample file dialog
 
     experiments_configurator_gui:
       module.Class: experiments_setup.exp_configurator_gui.ExpConfiguratorGUI
@@ -63,6 +66,14 @@ The ROI list and injections file dialogs start in the folders of the logic modul
 roi_logic and injections_logic of experiments_configurator_logic). Fallback: the former GUI options
 default_roi_path / default_injections_path (one warning each at activation if they are still set), then
 default_path.
+
+Sample file (field ``sample_file``): sample_prep_lineEdit holds the path of a YAML file describing the
+biological sample; sample_prep_load_pushButton selects an existing file (*.yml, start folder: the folder of the
+field, else the logic option ``default sample path``, else home); sample_prep_edit_pushButton opens the sample
+dialog (sample_dialog.SampleDialog) generated from the logic option ``sample template``, filled from the file of
+the field when it exists, otherwise empty (new sample). Without a valid template, "Edit" shows a warning and the
+dialog does not open; the file can still be selected. The widgets are shown only for the experiments whose
+definition declares sample_file.
 
 The ``experiments`` list above contains definition filenames. The human-readable experiment names shown in the
 combo box come from the ``experiment`` key inside those files.
@@ -92,6 +103,8 @@ from qtpy import uic
 from qudi.core.module import GuiBase
 from qudi.core.connector import Connector
 from qudi.core.configoption import ConfigOption
+from qudi.gui.experiments_setup.sample_dialog import SampleDialog
+from qudi.tasks.common.sample_info import load_sample_file, load_sample_template
 
 
 class ExpConfiguratorWindow(QtWidgets.QMainWindow):
@@ -165,6 +178,7 @@ class ExpConfiguratorGUI(GuiBase):
     FIELD_SECTIONS = {
         "sample_name": "general",
         "sample_tag": "general",
+        "sample_file": "general",
         "email": "general",
 
         "camera": "camera",
@@ -215,6 +229,13 @@ class ExpConfiguratorGUI(GuiBase):
             "sample_tag_label",
             "sample_tag_comboBox",
             "sample_tag_lineEdit",
+        ),
+
+        "sample_file": (
+            "sample_prep_label",
+            "sample_prep_lineEdit",
+            "sample_prep_load_pushButton",
+            "sample_prep_edit_pushButton",
         ),
 
         "email": (
@@ -463,6 +484,13 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.sample_tag_lineEdit.setPlaceholderText('free tag, e.g. RT1')
         self._mw.sample_tag_comboBox.currentTextChanged.connect(self._sample_tag_changed)
         self._mw.sample_tag_lineEdit.textChanged.connect(self._sample_tag_changed)
+        # sample file: path in the line edit, selected with "Load" or written by the sample dialog ("Edit")
+        self._mw.sample_prep_lineEdit.textChanged.connect(self._exp_logic.update_sample_file)
+        self._mw.sample_prep_load_pushButton.clicked.connect(self.load_sample_file_clicked)
+        self._mw.sample_prep_edit_pushButton.clicked.connect(self.edit_sample_file_clicked)
+        self._mw.sample_prep_load_pushButton.setToolTip('Select an existing sample file (*.yml)')
+        self._mw.sample_prep_edit_pushButton.setToolTip('Create or edit the sample file')
+        self._sample_dialog = None
         self._mw.TransferData_checkBox.stateChanged.connect(self._exp_logic.update_data_transfer)
         self._mw.select_camera_comboBox.currentTextChanged.connect(self._exp_logic.update_camera)
         self._mw.exposure_DSpinBox.valueChanged.connect(self._exp_logic.update_exposure)
@@ -832,6 +860,10 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.sample_tag_label.setVisible(False)
         self._mw.sample_tag_comboBox.setVisible(False)
         self._mw.sample_tag_lineEdit.setVisible(False)
+        # the sample file is needed only by the experiments that declare sample_file. Invisible as default.
+        for name in ('sample_prep_label', 'sample_prep_lineEdit', 'sample_prep_load_pushButton',
+                     'sample_prep_edit_pushButton'):
+            getattr(self._mw, name).setVisible(False)
         # same for the mail. It is only required for the HiM tasks
         self._mw.mail_LineEdit.setVisible(False)
         self._mw.mail_Label.setVisible(False)
@@ -1123,6 +1155,52 @@ class ExpConfiguratorGUI(GuiBase):
                 self._mw.sample_tag_lineEdit.setText(tag)
         self._update_sample_tag_line_edit()
 
+    def load_sample_file_clicked(self):
+        """Select an existing sample file (*.yml): the dialog starts in the folder of the file of the field, else
+        in the logic option default sample path, else in the home folder."""
+        current = self._mw.sample_prep_lineEdit.text().strip()
+        start = self._dialog_start_folder(os.path.dirname(current) if current else '', self._exp_logic.default_sample_path)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self._mw, 'Select the sample file', start,
+                                                        'Sample files (*.yml)')
+        if path:
+            self._mw.sample_prep_lineEdit.setText(path)
+
+    def _sample_template(self):
+        """Fields of the sample dialog (logic option sample template); None, with a warning box, when the option
+        is not set or the template is invalid."""
+        path = str(self._exp_logic.sample_template_path or '').strip()
+        if not path:
+            text = "No sample template set (option 'sample template' of the configurator logic)."
+        else:
+            try:
+                return load_sample_template(path)
+            except ValueError as err:
+                text = str(err)
+        self.log.warning(text)
+        QtWidgets.QMessageBox.warning(self._mw, 'Sample template', f'{text}\nThe sample file can still be loaded.')
+        return None
+
+    def edit_sample_file_clicked(self):
+        """Open the sample dialog: filled from the file of the field when it exists, otherwise empty (new sample).
+        After a save, the field shows the saved file."""
+        template = self._sample_template()
+        if template is None:
+            return
+        path = self._mw.sample_prep_lineEdit.text().strip()
+        values = {}
+        if path and os.path.isfile(path):
+            try:
+                values = load_sample_file(path)
+            except RuntimeError as err:
+                self.log.warning(str(err))
+                QtWidgets.QMessageBox.warning(self._mw, 'Sample file', str(err))
+                return
+        else:
+            path = ''  # new sample
+        self._sample_dialog = SampleDialog(template, values, path, self._exp_logic.default_sample_path, parent=self._mw)
+        if self._sample_dialog.exec() and self._sample_dialog.saved_path:
+            self._mw.sample_prep_lineEdit.setText(self._sample_dialog.saved_path)
+
     @staticmethod
     def _dialog_start_folder(current, default) -> str:
         """Start folder of a folder dialog: the folder in the field if it exists, otherwise the default folder of
@@ -1171,6 +1249,7 @@ class ExpConfiguratorGUI(GuiBase):
             config = self._exp_logic.config_dict
             self._mw.sample_name_LineEdit.setText(self._exp_logic.config_dict.get('sample_name', ''))
             self._show_sample_tag(config.get('sample_tag'))
+            self._mw.sample_prep_lineEdit.setText(config.get('sample_file') or '')
             self._select_camera_entry(self._exp_logic.config_dict.get('camera'))
             self._mw.exposure_DSpinBox.setValue(self._exp_logic.config_dict.get('exposure', 0.0))
             self._mw.gain_SpinBox.setValue(self._exp_logic.config_dict.get('gain', 0))
@@ -1286,6 +1365,7 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.mail_LineEdit,
             self._mw.sample_tag_comboBox,
             self._mw.sample_tag_lineEdit,
+            self._mw.sample_prep_lineEdit,
             self._mw.TransferData_checkBox,
             self._mw.exposure_DSpinBox,
             self._mw.gain_SpinBox,

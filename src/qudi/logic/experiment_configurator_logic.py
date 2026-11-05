@@ -68,6 +68,9 @@ Adding a new experiment
            default path imagedata: /path/to/local/data
            default network path: /path/to/network/data
            default zen path: /path/to/zen/folders    # optional: start folder of the ZEN folder dialogs
+           default sample path: /path/to/sample/files    # optional: start folder of the sample file dialogs
+           sample template: /path/to/custom_metadata_templates/sample_template.yml   # optional: fields of the
+                                                         # sample file dialog (without it, "Edit" is disabled)
 
    The hardware connectors are optional and may be omitted when the setup does not provide the corresponding module.
 
@@ -231,6 +234,8 @@ class ExpConfigLogic(LogicBase):
     default_path_imagedata = ConfigOption('default path imagedata')
     default_network_path = ConfigOption('default network path')
     default_zen_path = ConfigOption('default zen path', default='')  # start folder of the ZEN folder dialogs
+    default_sample_path = ConfigOption('default sample path', default='')  # start folder of the sample file dialogs
+    sample_template_path = ConfigOption('sample template', default='')  # fields of the sample file dialog
 
     # sample tag of the ROI scan (experiment key sample_tag): one of these items, or a free tag
     SAMPLE_TAG_ITEMS = ('DAPI', 'RNA', 'IF')
@@ -840,6 +845,13 @@ class ExpConfigLogic(LogicBase):
     def update_dapi_path(self, path):
         """Set the DAPI-data path and notify configuration listeners."""
         self.config_dict['dapi_path'] = path
+        self.sigConfigDictUpdated.emit()
+
+    @QtCore.Slot(str)
+    def update_sample_file(self, path):
+        """Set the path of the sample file (experiment key sample_file, a YAML file describing the sample, see
+        qudi.tasks.common.sample_info) and notify configuration listeners."""
+        self.config_dict['sample_file'] = path
         self.sigConfigDictUpdated.emit()
 
     @QtCore.Slot(str)

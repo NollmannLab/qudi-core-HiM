@@ -21,6 +21,12 @@ fields:
     required: true
     default: ""
 
+  # sample file (YAML describing the biological sample, edited from the configurator): copied as sample.yml
+  # into the metadata folder of the run and added as the 'Sample' section of metadata.yml
+  sample_file:
+    required: true
+    default: ""
+
   injections_path:
     required: true
     default: ""

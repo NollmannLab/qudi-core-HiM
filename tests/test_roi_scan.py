@@ -1166,6 +1166,44 @@ def _section_data_folder():
         check(f'(5 invalid sample_tag {bad!r}) clear error before any hardware call (no roi / laser / trigger call)',
               isinstance(err, ValueError) and 'invalid sample_tag' in str(err) and rec.calls == [], (err, rec.calls))
 
+    # ------------------------------------------------------------------ (5b) sample file (optional key sample_file)
+    from qudi.tasks.common import sample_info
+    sample_path = os.path.join(TMP, 'sample_5b.yml')
+    sample_info.save_sample_file(sample_path, {'experiment_type': 'DNA-FISH', 'organism': 'Drosophila melanogaster',
+                                               'formamide_percent': 50, 'experimenter': 'X'})
+    local = folder('local_5b')
+    task, rec = scan_task(rs.RoiScanSDTask, scan_yaml('sd_sample', save_path=local, sample_file=sample_path))
+    result, err = run(task, {'start_roi': ''})
+    run_folder = mirror(local_sd(local), ZEN.created[-1])
+    meta_path = os.path.join(run_folder, 'metadata.yml')
+    meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else {}
+    template_sections = list(yaml.safe_load(open(TEMPLATE, encoding='utf-8')))
+    check('(5b SD, sample_file set) sample.yml (exact copy) in the metadata folder; metadata.yml: template sections '
+          'then a Sample section with the values of the file, in order',
+          err is None and os.path.exists(os.path.join(run_folder, 'sample.yml'))
+          and open(os.path.join(run_folder, 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
+          and list(meta) == template_sections + ['Sample']
+          and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Drosophila melanogaster'},
+                                 {'formamide_percent': 50}, {'experimenter': 'X'}],
+          (err, os.listdir(run_folder) if os.path.isdir(run_folder) else None, meta.get('Sample')))
+    for label, value in (('missing', os.path.join(TMP, 'no_sample.yml')), ('not a mapping', A_FILE + '.yml')):
+        if label == 'not a mapping':
+            open(value, 'w').write('- a\n- b\n')
+        task, rec = scan_task(rs.RoiScanSDTask, scan_yaml('sd_sample_bad', save_path=folder('local_5b_bad'),
+                                                          sample_file=value))
+        result, err = run(task, {'start_roi': ''})
+        check(f'(5b sample file {label}) clear error before any hardware call (no roi / laser / trigger call)',
+              err is not None and value in str(err) and rec.calls == [], (err, rec.calls))
+    for label, values in (('empty', {'sample_file': ''}), ('absent', {})):
+        local = folder(f'local_5b_{label}')
+        task, rec = scan_task(rs.RoiScanDummyTask, scan_yaml(f'dummy_sample_{label}', save_path=local, **values))
+        result, err = run(task, {'start_roi': ''})
+        folder_run = result.get('directory') if result else ''
+        meta = yaml.safe_load(open(os.path.join(folder_run, 'metadata.yml'), encoding='utf-8')) if folder_run else {}
+        check(f'(5b dummy, sample_file {label}) no change: no sample.yml, no Sample section, no warning',
+              err is None and 'sample.yml' not in os.listdir(folder_run) and 'Sample' not in meta
+              and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (err, os.listdir(folder_run) if folder_run else None))
+
     # ------------------------------------------------------------------ Hi-M (real dummy modules)
     class FakeMain(QtCore.QObject):
         pass

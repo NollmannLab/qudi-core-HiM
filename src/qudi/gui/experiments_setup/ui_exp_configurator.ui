@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1262</width>
-    <height>1356</height>
+    <height>1387</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -814,6 +814,30 @@
        <item row="2" column="3">
         <widget class="QComboBox" name="sample_tag_comboBox"/>
        </item>
+       <item row="3" column="1">
+        <widget class="QLabel" name="sample_prep_label">
+         <property name="text">
+          <string>Sample preparation details</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="3">
+        <widget class="QLineEdit" name="sample_prep_lineEdit"/>
+       </item>
+       <item row="3" column="4">
+        <widget class="QPushButton" name="sample_prep_load_pushButton">
+         <property name="text">
+          <string>Load sample details</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="5">
+        <widget class="QPushButton" name="sample_prep_edit_pushButton">
+         <property name="text">
+          <string>Edit sample edit</string>
+         </property>
+        </widget>
+       </item>
       </layout>
      </widget>
     </item>
@@ -880,11 +904,4 @@
  </widget>
  <resources/>
  <connections/>
- <buttongroups>
-  <buttongroup name="buttonGroup">
-   <property name="exclusive">
-    <bool>false</bool>
-   </property>
-  </buttongroup>
- </buttongroups>
 </ui>

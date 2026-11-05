@@ -50,6 +50,7 @@ from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metad
                                             write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
+from qudi.tasks.common.sample_info import add_sample_to_run, optional_sample
 
 SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9-]+$'  # sample_tag: letters, digits and '-'
 
@@ -75,6 +76,9 @@ class RoiScanTaskBase(ProgressModuleTask):
         save_network_path: '/server/data'     # server folder (optional, empty = local folder only)
         roi_list_path: 'pathstem/qudi_roi_lists/roilist_20260101.json'
         imaging_sequence: [[488, 50.0], [561, 80.0]]   # [wavelength (nm), intensity (%)]
+        sample_file: '/path/to/sample.yml'    # optional (required by the SD definition): YAML describing the
+                                              # sample (tasks/common/sample_info.py); read before any hardware
+                                              # call (missing / unreadable -> error); absent or empty -> none
 
     Call parameter (Task Runner):
         start_roi   first ROI to scan: a ROI name of the loaded list (e.g. 'ROI_005'); empty =
@@ -89,7 +93,9 @@ class RoiScanTaskBase(ProgressModuleTask):
     file name per imaged ROI), experiment_config.yaml (byte copy of the experiment file) and, with a
     metadata template, metadata.yml (the template with Time and the Acquisition fields sample_name,
     laser_lines, laser_power_(%), number_z_planes when the experiment file has it, roi_list_(xyz): the ROIs
-    of this run with their positions; other fields as in the template). <root> is chosen before any hardware call, after the confirmation hook
+    of this run with their positions; other fields as in the template). With a sample file (key sample_file):
+    sample.yml (exact copy of the sample file, read before the run) and its content as the 'Sample' section of
+    metadata.yml (appended after the template sections, or filled in the template's 'Sample' section). <root> is chosen before any hardware call, after the confirmation hook
     (hook _choose_data_root; default choose_data_root): save_network_path (server) when it is set and
     writable, otherwise save_path (local; a server folder that is not reachable gives a warning in the log
     and a non-modal pop-up). The spinning-disk task keeps its run folder local (RoiScanSDTask).
@@ -127,6 +133,7 @@ class RoiScanTaskBase(ProgressModuleTask):
         self._laser_logic = None
         self.sample_name = None
         self.sample_tag = ''
+        self._sample = None       # sample file of the run (sample_info.SampleFile; None: no sample file)
         self.save_path = None
         self.save_network_path = None
         self._data_root = None
@@ -340,6 +347,8 @@ class RoiScanTaskBase(ProgressModuleTask):
 
         self.sample_name = user_param_dict['sample_name']
         self.sample_tag = self._read_sample_tag(user_param_dict)
+        # sample file (optional key sample_file): read now, before any hardware call; copied with the run files
+        self._sample = optional_sample(user_param_dict.get('sample_file'))
         self.roi_list_path = user_param_dict['roi_list_path']
         self.imaging_sequence = user_param_dict['imaging_sequence']
         self._user_params = user_param_dict
@@ -400,16 +409,20 @@ class RoiScanTaskBase(ProgressModuleTask):
         self.log.info(f'Saved metadata to {path}')
 
     def _save_run_files(self) -> None:
-        """experiment_config.yaml (byte copy of the experiment file) and, with a metadata template, metadata.yml
-        in the run folder."""
+        """experiment_config.yaml (byte copy of the experiment file), with a sample file sample.yml, and, with a
+        metadata template, metadata.yml (with the 'Sample' section when there is a sample file) in the run
+        folder."""
         copy_experiment_file(self.user_config_path, self.directory)
-        if self._metadata_template is None:
-            return
-        positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self._scan_rois}
-        metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
-                                     self._user_params.get('num_z_planes'))
-        path = write_metadata(self.directory, metadata)
-        self.log.info(f'Saved the microscope metadata to {path}')
+        metadata = None
+        if self._metadata_template is not None:
+            positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self._scan_rois}
+            metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
+                                         self._user_params.get('num_z_planes'))
+        # sample file: copied as sample.yml, its content added as the 'Sample' section of metadata.yml
+        add_sample_to_run(self.directory, self._sample, metadata)
+        if metadata is not None:
+            path = write_metadata(self.directory, metadata)
+            self.log.info(f'Saved the microscope metadata to {path}')
 
 
 class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
@@ -433,8 +446,8 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     runs as usual). qudi creates <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata (local_dated_root,
     created and write-tested before any hardware call, YYYY-MM-DD = start of the task; create_mirror_folder,
     metadata_<HHMMSS> if that folder already holds files) - always local - and writes there
-    parameters.yml, movie_name.txt, experiment_config.yaml and metadata.yml. Nothing is written in the ZEN
-    folder. self.prefix is the number of folders that were in zen_saving_path before ZEN started + 1, on 3
+    parameters.yml, movie_name.txt, experiment_config.yaml, metadata.yml and, with a sample file, sample.yml
+    (metadata.yml then has the 'Sample' section). Nothing is written in the ZEN folder. self.prefix is the number of folders that were in zen_saving_path before ZEN started + 1, on 3
     digits; movie names scan_<prefix>_<sample_tag>_<roi number>_ROI (scan_<prefix>_<roi number>_ROI without tag).
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):

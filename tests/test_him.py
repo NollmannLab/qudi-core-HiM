@@ -539,6 +539,30 @@ if selected('sd_zen_folder'):
           and not run_log_handlers(), (lines[:2], lines[-1:], run_log_handlers()))
     end_state_ok('ZEN folder', t0)
 
+    # (3) sample file (sample_file): sample.yml and the Sample section of metadata.yml; missing file -> error
+    from qudi.tasks.common import sample_info
+    sample_path = os.path.join(TMP, 'sample_him.yml')
+    sample_info.save_sample_file(sample_path, {'experiment_type': 'DNA-FISH', 'organism': 'Mus musculus',
+                                               'experimenter': 'X', 'old_field': 'kept'})
+    task, result, err, t0, _, server, local, *_ = zen_case('zen_sample', sample_file=sample_path)
+    folder = sd_folder(local, zen.created[-1]) if zen.created else ''
+    meta_path = os.path.join(folder, 'metadata.yml')
+    meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else {}
+    check('(sample file) Hi-M SD: sample.yml (exact copy) in the metadata folder; metadata.yml ends with a Sample '
+          'section holding the values of the file (field not in the template included)',
+          err is None and result and result['cycles_done'] == 1
+          and open(os.path.join(folder, 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
+          and list(meta)[-1] == 'Sample'
+          and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Mus musculus'}, {'experimenter': 'X'},
+                                 {'old_field': 'kept'}],
+          (err, result, os.listdir(folder) if os.path.isdir(folder) else None, meta.get('Sample')))
+    end_state_ok('sample file', t0)
+    missing_sample = os.path.join(TMP, 'no_sample_him.yml')
+    task, result, err, t0, *_ = zen_case('zen_sample_missing', sample_file=missing_sample)
+    check('(sample file missing) reported with the other problems, before any hardware call',
+          err is not None and 'Hi-M task not started' in str(err) and missing_sample in str(err)
+          and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+
     # (4) zen_saving_path missing / not a folder -> error before any hardware call
     for label, value, fragment in (('missing', None, "'zen_saving_path' missing"),
                                    ('not a folder', os.path.join(TMP, 'nowhere_zen'), 'is not an existing folder')):

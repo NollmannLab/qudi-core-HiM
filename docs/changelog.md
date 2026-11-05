@@ -6,6 +6,42 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Sample file
+
+#### Added
+
+- Sample file: one small YAML file per biological sample, attached to every Hi-M and ROI multicolour scan
+  run (2026-11-05).
+  - `custom_config/custom_metadata_templates/sample_template.yml`: the fields of the sample file (type
+    text | choice | number, choices, min / max, required), in dialog order; fields can be added, removed or
+    reordered without code change.
+  - `src/qudi/tasks/common/sample_info.py` (no Qt): `load_sample_template` (ValueError for an unknown type,
+    choices that are not a list, min > max, an unknown key), `load_sample_file` (RuntimeError if missing or not
+    a mapping), `save_sample_file` (order kept, UTF-8, unicode), `missing_required`, `read_sample` /
+    `optional_sample` (read once before the run, bytes kept) and `add_sample_to_run(folder, sample, metadata)`
+    (`sample.yml` + 'Sample' section). Values of fields not in the template are kept.
+  - Configurator logic: options `default sample path` (`default_sample_path`) and `sample template`
+    (`sample_template_path`), both default ''; field `sample_file` with `update_sample_file(path)`.
+  - Configurator GUI: `sample_prep_label` / `sample_prep_lineEdit` / `sample_prep_load_pushButton` /
+    `sample_prep_edit_pushButton` (Qt Designer) mapped to `sample_file`, shown only when the definition declares
+    it; Load: file dialog (*.yml) starting in the folder of the field, else `default sample path`, else home;
+    Edit: `src/qudi/gui/experiments_setup/sample_dialog.py` (`SampleDialog`, QFormLayout generated from the
+    template: QLineEdit / editable QComboBox with an empty first entry / QDoubleSpinBox whose empty state is
+    one step below the minimum, shown as '-'; '*' on required fields; Save (disabled for a new sample),
+    Save as... ('.yml' added), Cancel; saving refused while a required field is empty). Without a valid
+    template, Edit shows a warning and the dialog does not open.
+  - Experiment definitions (SD only): `sample_file` (required, default "") in spinning_disk/him_epi.yaml,
+    him_confocal.yaml and roi_multicolour_scan.yaml.
+  - Tasks (`HiMTaskBase`, `RoiScanTaskBase`; key optional, so RAMM / dummy / OPM runs are unchanged): a
+    non-empty `sample_file` is read before any hardware call (missing / unreadable file: error, with the other
+    problems for Hi-M); `sample.yml` (exact copy) written with the run files in the metadata folder, and its
+    content added to metadata.yml as a top-level 'Sample' section after the template sections (the metadata
+    templates have no such section; one in a template would be filled in place).
+  - custom_config/Spinning_disk_config.cfg: `default sample path` and `sample template`.
+  - Tests: section "sample file" in tests/test_logic_helpers.py (helper, configurator, dialog); (5b) in the
+    run-folder section of tests/test_roi_scan.py; "(sample file)" cases in the sd_zen_folder block of
+    tests/test_him.py.
+
 ### Experiment configurator and ROI scan
 
 #### Changed

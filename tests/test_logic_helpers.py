@@ -1,6 +1,6 @@
 """Logic helpers: data folders defined in the logic modules (ROI lists, injections files), the random
 ROI list command-line helper (qudi.util.make_random_roi_list) and the local / server folder buttons of the
-experiment configurator, its sample tag and ZEN folder dialogs, and the autofocus report of Hi-M runs (qudi.util.autofocus_report).
+experiment configurator, its sample tag and ZEN folder dialogs, the sample file (helper, configurator, dialog), and the autofocus report of Hi-M runs (qudi.util.autofocus_report).
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_logic_helpers.py [<repo_root>]
 Short settings: tests/_short.py (docs/TESTING.md).
@@ -646,6 +646,194 @@ def _section_sample_tag():
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 
+# --- sample file: helper, configurator, sample dialog ---
+def _section_sample_file():
+    """Sample file (qudi.tasks.common.sample_info): repository template, template validation, required fields,
+    save / load; configurator options 'default sample path' / 'sample template', field sample_file and its
+    widgets; sample dialog (qudi.gui.experiments_setup.sample_dialog). File / message dialogs replaced by
+    recorders."""
+    import os, weakref, importlib, tempfile, logging
+    from qtpy import QtCore, QtWidgets
+    import yaml
+    from qudi.core.connector import Connector
+    from qudi.tasks.common import sample_info as si
+    from qudi.gui.experiments_setup import sample_dialog as sd
+
+    results = []
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond))); print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+    TMP = tempfile.mkdtemp()
+    TEMPLATE = os.path.join(repo, 'custom_config', 'custom_metadata_templates', 'sample_template.yml')
+
+    # ------------------------------------------------------------------ helper
+    template = si.load_sample_template(TEMPLATE)
+    names = [f['name'] for f in template]
+    check('repository template: 20 fields in file order; types / choices / min-max / required as written',
+          len(template) == 20 and names[:3] == ['experiment_type', 'organism', 'sample_type'] and names[-1] == 'project'
+          and template[8] == {'name': 'formamide_percent', 'type': 'number', 'choices': [], 'min': 0, 'max': 100,
+                              'required': False}
+          and [f['name'] for f in template if f['required']] == ['experiment_type', 'organism', 'sample_type',
+                                                                  'experimenter']
+          and template[7]['choices'] == ['4% PFA'], names)
+    bad_cases = {'unknown type': 'a: {type: date}\n', 'min > max': 'a: {type: number, min: 5, max: 1}\n',
+                 'choices not a list': 'a: {type: choice, choices: DAPI}\n', 'unknown key': 'a: {type: text, size: 3}\n',
+                 'not a mapping': '- a\n- b\n'}
+    errors = {}
+    for label, text in bad_cases.items():
+        path = os.path.join(TMP, f'bad_{len(errors)}.yml'); open(path, 'w').write(text)
+        try:
+            si.load_sample_template(path); errors[label] = None
+        except ValueError as err:
+            errors[label] = str(err)
+    check('invalid templates -> ValueError with a clear message (unknown type, min > max, choices, key, layout)',
+          all(errors.values()) and 'date' in errors['unknown type'] and 'min (5)' in errors['min > max'], errors)
+    values = {'experiment_type': 'DNA-FISH', 'organism': '', 'sample_type': None, 'experimenter': 'X'}
+    check('missing_required: empty / absent required fields, in template order',
+          si.missing_required(template, values) == ['organism', 'sample_type'], si.missing_required(template, values))
+    path = os.path.join(TMP, 'sample.yml')
+    saved = {'organism': 'Mus musculus', 'experiment_type': 'RNA-FISH', 'formamide_percent': 50,
+             'old_field': 'kept', 'genotype': 'yw; +/+ é'}
+    si.save_sample_file(path, saved)
+    loaded = si.load_sample_file(path)
+    check('save then load: same values, same order, field not in the template kept, unicode kept',
+          loaded == saved and list(loaded) == list(saved) and 'é' in open(path, encoding='utf-8').read(), loaded)
+    errs = []
+    for p, text in ((os.path.join(TMP, 'none.yml'), None), (os.path.join(TMP, 'list.yml'), '- a\n')):
+        if text is not None:
+            open(p, 'w').write(text)
+        try:
+            si.load_sample_file(p); errs.append(None)
+        except RuntimeError as err:
+            errs.append(str(err))
+    check('load_sample_file: missing file / not a mapping -> RuntimeError', all(errs) and 'does not exist' in errs[0], errs)
+
+    # ------------------------------------------------------------------ configurator
+    LOGS = []
+    class H(logging.Handler):
+        def emit(self, r): LOGS.append((r.levelno, r.getMessage()))
+    handler = H(); logging.getLogger().addHandler(handler)
+    class FakeMain(QtCore.QObject): pass
+    MAIN = FakeMain()
+    CFG = yaml.safe_load(open(os.path.join(repo, 'custom_config/dummy_config.cfg')))
+    DEF_SAMPLE = os.path.join(TMP, 'samples'); os.makedirs(DEF_SAMPLE)
+    MODS = {}
+    def build(name):
+        if name in MODS: return MODS[name]
+        base = next(b for b in ('hardware', 'logic', 'gui') if name in (CFG.get(b) or {}))
+        entry = CFG[base][name]; mod, cls = entry['module.Class'].rsplit('.', 1)
+        klass = getattr(importlib.import_module(f'qudi.{base}.{mod}'), cls)
+        opts = _short.module_options(name, entry.get('options'))
+        if name == 'experiments_configurator_logic':
+            opts['experiment_definitions_directory'] = os.path.join(repo, 'custom_config/custom_experiments_config/spinning_disk') + '/'
+            opts['experiments'] = ['roi_multicolour_scan.yaml', 'him_epi.yaml', 'photobleaching.yaml']
+            opts['default sample path'] = DEF_SAMPLE; opts['sample template'] = TEMPLATE
+        m = klass(qudi_main_weakref=weakref.ref(MAIN), name=name, config=opts)
+        by_name = {c.name: c for k in dir(klass) if isinstance(c := getattr(klass, k, None), Connector)}
+        for key, target in (entry.get('connect') or {}).items():
+            m._meta['connectors'][next(k for k in m._meta['connectors'] if by_name[key] is getattr(klass, k))].connect(build(target))
+        m.module_state.activate(); MODS[name] = m; return m
+    gui = build('experiments_configurator_gui'); app.processEvents()
+    mw, logic = gui._mw, gui._exp_logic
+    sd_cfg = yaml.safe_load(open(os.path.join(repo, 'custom_config/Spinning_disk_config.cfg')))
+    sd_opts = sd_cfg['logic']['experiments_configurator_logic']['options']
+    check("options 'default sample path' / 'sample template' read; SD configuration sets both",
+          logic.default_sample_path == DEF_SAMPLE and logic.sample_template_path == TEMPLATE
+          and sd_opts.get('default sample path') == '/home/him_spinning/qudi/qudi_sample_preparation/'
+          and sd_opts.get('sample template', '').endswith('custom_config/custom_metadata_templates/sample_template.yml'))
+    widgets = (mw.sample_prep_label, mw.sample_prep_lineEdit, mw.sample_prep_load_pushButton, mw.sample_prep_edit_pushButton)
+    def shown(w): return not w.isHidden()
+    for exp, visible in (('roi_multicolor_scan', True), ('him_epi_sd', True), ('photobleaching', False)):
+        gui.start_new_experiment_config(exp); app.processEvents()
+        check(f'({exp}) sample file widgets {"shown" if visible else "hidden"}', all(shown(w) == visible for w in widgets))
+    gui.start_new_experiment_config('roi_multicolor_scan'); app.processEvents()
+    logic.update_sample_file(path)
+    check('update_sample_file stores the path; the line edit follows', logic.config_dict.get('sample_file') == path
+          and mw.sample_prep_lineEdit.text() == path)
+    mw.sample_prep_lineEdit.setText('')
+    check('line edit -> logic (empty)', logic.config_dict.get('sample_file') == '')
+
+    OPENS, SAVES, BOXES = [], [], []
+    answers = {'open': '', 'save': ''}
+    originals = (QtWidgets.QFileDialog.getOpenFileName, QtWidgets.QFileDialog.getSaveFileName, QtWidgets.QMessageBox.warning)
+    QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda parent, caption='', directory='', *a, **k: (OPENS.append(directory), (answers['open'], ''))[1])
+    QtWidgets.QFileDialog.getSaveFileName = staticmethod(lambda parent, caption='', directory='', *a, **k: (SAVES.append(directory), (answers['save'], ''))[1])
+    QtWidgets.QMessageBox.warning = staticmethod(lambda parent, title, text, *a, **k: BOXES.append((title, text)))
+    try:
+        gui.load_sample_file_clicked()
+        answers['open'] = path; gui.load_sample_file_clicked()
+        first, second = OPENS[0], OPENS[1]
+        mw.sample_prep_lineEdit.setText(os.path.join(TMP, 'gone', 'x.yml')); answers['open'] = ''; gui.load_sample_file_clicked()
+        check('Load: start in default sample path (empty field), then the folder of the field; *.yml chosen fills the '
+              'field; missing folder -> default sample path',
+              first == DEF_SAMPLE and second == DEF_SAMPLE and OPENS[2] == DEF_SAMPLE and logic.config_dict['sample_file'] != path, OPENS)
+        mw.sample_prep_lineEdit.setText(path); OPENS.clear(); gui.load_sample_file_clicked()
+        check('Load: start in the folder of the file of the field', OPENS == [TMP], OPENS)
+
+        # dialog opened by "Edit": exec replaced by a callback acting on the dialog
+        ACTION = [None]; DIALOGS = []
+        def fake_exec(dialog):
+            DIALOGS.append(dialog)
+            return ACTION[0](dialog) if ACTION[0] else 0
+        orig_exec = sd.SampleDialog.exec
+        sd.SampleDialog.exec = fake_exec
+        # no / invalid template: warning box, no dialog; Load still works
+        for label, value in (('not set', ''), ('invalid', os.path.join(TMP, 'bad_0.yml'))):
+            logic.sample_template_path = value; BOXES.clear(); DIALOGS.clear(); gui.edit_sample_file_clicked()
+            check(f'(Edit, template {label}) warning box, no dialog', BOXES and BOXES[0][0] == 'Sample template' and not DIALOGS, BOXES)
+        logic.sample_template_path = TEMPLATE
+        # existing file: form filled, value not in the choices shown as typed text, extra field kept on Save
+        si.save_sample_file(path, {'experiment_type': 'DNA-FISH', 'organism': 'Danio rerio', 'sample_type': 'embryo',
+                                   'experimenter': 'X', 'old_field': 'kept'})
+        mw.sample_prep_lineEdit.setText(path)
+        def inspect(d):
+            w = d.widgets
+            ACTION.append({'organism': w['organism'].currentText(), 'formamide': w['formamide_percent'].text(),
+                           'save_enabled': d.save_button.isEnabled(), 'label': d.findChildren(QtWidgets.QLabel)[0].text()})
+            return 0
+        ACTION[0] = inspect; gui.edit_sample_file_clicked(); info = ACTION.pop()
+        check('(Edit, existing file) form filled; value not in the choices shown as typed text; empty number field '
+              f'shown as {sd.EMPTY_NUMBER_TEXT!r}; Save enabled; required field labelled with "*"',
+              info['organism'] == 'Danio rerio' and info['formamide'] == sd.EMPTY_NUMBER_TEXT and info['save_enabled']
+              and info['label'] == 'experiment type *', info)
+        def save_with_number(d):
+            d.widgets['formamide_percent'].setValue(40); return 1 if d.save() else 0
+        ACTION[0] = save_with_number; gui.edit_sample_file_clicked()
+        again = si.load_sample_file(path)
+        check('(Edit, Save) file overwritten: number 40, field not in the template kept, empty optional fields None',
+              again.get('formamide_percent') == 40 and again.get('old_field') == 'kept' and again.get('genotype') is None
+              and again.get('organism') == 'Danio rerio', again)
+        def clear_number_and_save(d):
+            d.widgets['formamide_percent'].setValue(d.widgets['formamide_percent'].minimum()); return 1 if d.save() else 0
+        ACTION[0] = clear_number_and_save; gui.edit_sample_file_clicked()
+        check('(Edit, Save) a number field can be emptied again (None in the file)',
+              si.load_sample_file(path).get('formamide_percent') is None)
+        # new sample: Save disabled, Save refused while a required field is empty, Save as writes (.yml added)
+        mw.sample_prep_lineEdit.setText('')
+        def new_sample(d):
+            ACTION.append(d.save_button.isEnabled())
+            BOXES.clear(); answers['save'] = os.path.join(TMP, 'new_sample')
+            refused = not d.save_as() and BOXES and 'experiment type' in BOXES[-1][1] and 'experimenter' in BOXES[-1][1]
+            ACTION.append(bool(refused) and not os.path.exists(os.path.join(TMP, 'new_sample.yml')))
+            d.widgets['experiment_type'].setCurrentText('IF'); d.widgets['organism'].setCurrentText('Homo sapiens')
+            d.widgets['sample_type'].setCurrentText('cells'); d.widgets['experimenter'].setText('X')
+            return 1 if d.save_as() else 0
+        ACTION[0] = new_sample; SAVES.clear(); gui.edit_sample_file_clicked()
+        refused, save_enabled = ACTION.pop(), ACTION.pop()
+        new_path = os.path.join(TMP, 'new_sample.yml')
+        new_values = si.load_sample_file(new_path) if os.path.exists(new_path) else {}
+        check('(Edit, new sample) Save disabled; Save as refused while required fields are empty (box lists them); '
+              'Save as writes <name>.yml in template order, starting in default sample path; the line edit shows it',
+              not save_enabled and refused and list(new_values) == names and new_values['experiment_type'] == 'IF'
+              and SAVES and SAVES[0] == DEF_SAMPLE and mw.sample_prep_lineEdit.text() == new_path
+              and logic.config_dict.get('sample_file') == new_path, (save_enabled, refused, SAVES, new_values))
+        sd.SampleDialog.exec = orig_exec
+    finally:
+        (QtWidgets.QFileDialog.getOpenFileName, QtWidgets.QFileDialog.getSaveFileName,
+         QtWidgets.QMessageBox.warning) = (staticmethod(originals[0]), staticmethod(originals[1]), staticmethod(originals[2]))
+    logging.getLogger().removeHandler(handler)
+    KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
+    return results
+
 # --- autofocus report (qudi.util.autofocus_report) ---
 def _section_autofocus_report():
     """Autofocus report of Hi-M runs (qudi.util.autofocus_report): synthetic metadata folders (4 ROIs x 3 cycles) of
@@ -807,6 +995,7 @@ SECTIONS = [
     ('random ROI list helper', _section_random_roi_list),
     ('configurator: local / server folder buttons', _section_folder_buttons),
     ('configurator: sample tag and ZEN folder dialogs', _section_sample_tag),
+    ('sample file: helper, configurator, sample dialog', _section_sample_file),
     ('autofocus report', _section_autofocus_report),
 ]
 
