@@ -5,7 +5,8 @@ choose correlation_threshold.
 
 The reference images (autofocus_reference.npy, or the *.czi in acquisition order - same rule as the task)
 are compared with the autofocus images of the past experiment (*_AcquisitionBlock1_pt*.czi, searched
-recursively and sorted in acquisition order): image k is checked against the reference of ROI k mod n_rois,
+recursively and sorted in acquisition order; read in this process with one czifile decoding thread, the reader
+versions are printed at the start): image k is checked against the reference of ROI k mod n_rois,
 cycle k // n_rois + 1, with the same rolling update as the task (a passed image becomes the reference of its
 ROI). The score is the one of the task: qudi.tasks.common.autofocus_check.autofocus_score (ZNCC, -1..1).
 
@@ -48,7 +49,8 @@ from glob import glob
 import numpy as np
 
 from qudi.tasks.common.autofocus_check import (AUTOFOCUS_IMAGE_PATTERN, autofocus_score, load_reference_images,
-                                               read_autofocus_image, sort_czi_paths)
+                                               read_autofocus_image, reader_versions, single_thread_read_form,
+                                               sort_czi_paths)
 
 CSV_COLUMNS = ('cycle', 'RT', 'roi', 'score', 'shift_y_px', 'shift_x_px', 'passed')  # as autofocus_scores.csv
 
@@ -116,6 +118,8 @@ def main(argv=None) -> int:
     parser.add_argument('--plot', action='store_true', help='also save a PNG of the scores next to the CSV')
     args = parser.parse_args(argv)
 
+    # reader of the .czi images (read in this process, one decoding thread)
+    print(f'Image reader: {reader_versions()}; single-thread read: {single_thread_read_form()}')
     references = load_reference_images(args.reference)
     paths = find_autofocus_images(args.images)
     if not paths:

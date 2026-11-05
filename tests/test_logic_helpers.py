@@ -680,7 +680,10 @@ def _section_sample_file():
                               'required': False}
           and [f['name'] for f in template if f['required']] == ['experiment_type', 'organism', 'sample_type',
                                                                   'experimenter']
-          and template[7]['choices'] == ['4% PFA'], names)
+          and template[7]['choices'] == ['4% PFA', 'Live']
+          and template[1]['choices'][-3:] == ['B.subtilis', 'E.coli', 'M.xanthus']
+          and names[names.index('nuclear_stain') + 1:names.index('nuclear_stain') + 4] == ['dye_mask', 'dye_fiducial',
+                                                                                          'dye_barcode'], names)
     bad_cases = {'unknown type': 'a: {type: date}\n', 'min > max': 'a: {type: number, min: 5, max: 1}\n',
                  'choices not a list': 'a: {type: choice, choices: DAPI}\n', 'unknown key': 'a: {type: text, size: 3}\n',
                  'not a mapping': '- a\n- b\n'}

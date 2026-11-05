@@ -35,13 +35,18 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
+import concurrent.futures
 import copy
 import csv
 import logging
 import logging.handlers
 import math
+import multiprocessing
 import os
 import shutil
+import sys
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
 from glob import glob
 from time import monotonic
 
@@ -51,6 +56,7 @@ import yaml
 from qtpy import QtCore
 
 from qudi.core.connector import Connector
+from qudi.core.scripting.modulescript import ModuleScriptInterrupted
 from qudi.tasks.common import autofocus_check
 from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder, local_dated_root
 from qudi.tasks.common.data_transfer import DataTransfer
@@ -831,8 +837,17 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
       - Each check, after ZEN's "done" trigger of the autofocus block: wait (poll every 0.5 s, no timeout,
         interruptible; a warning every _AF_WAIT_WARNING_S with the new matching files) until exactly one
         autofocus image not seen yet exists (several: ZEN is still writing), then that list becomes the
-        snapshot for the next check. The image is read (first plane; up to _AF_READ_ATTEMPTS attempts,
-        _AF_READ_RETRY_S apart, warning at each failure); score and shift (px) logged. Pass (score >= correlation_threshold): the image becomes the
+        snapshot for the next check. Then wait until the file is complete: size non-zero and the same on two
+        checks FILE_STABLE_PERIOD_S apart (no timeout, interruptible, a warning every _AF_WAIT_WARNING_S).
+      - The image is read (first plane, czifile with one decoding thread) and scored in a helper process
+        (ProcessPoolExecutor, one 'spawn' process created in _setup, shut down in _cleanup; job
+        autofocus_check.read_and_score, waited for at most AUTOFOCUS_JOB_TIMEOUT_S, interruptible), so that a
+        native crash of the .czi reader cannot kill qudi. An exception raised by the job (e.g. file not readable
+        yet): up to _AF_READ_ATTEMPTS attempts, _AF_READ_RETRY_S apart, a warning each time, the last one stops
+        the run. The helper process dies or times out: error, new process, one more try; if that fails too, the
+        check counts as FAILED (reference kept, row with an empty score and passed False, NaN in
+        correlation.npy) and the minimum-fraction rule below decides. The versions of the reader (czifile,
+        imagecodecs, numpy) are logged at the start. Score and shift (px) logged. Pass (score >= correlation_threshold): the image becomes the
         reference of the ROI (autofocus_reference.npy saved again). Fail: the reference is kept, warning
         (and a second one if the ROI already failed in the previous cycle).
       - Abort: as soon as (ROIs - failures of the cycle) / ROIs < autofocus_min_fraction, an error gives the
@@ -913,6 +928,8 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self.correlation_threshold = params.get('correlation_threshold')
         self.autofocus_min_fraction = params.get('autofocus_min_fraction')
         self.transfer_data = bool(params.get('transfer_data') or False)
+        self.log.info(f'Autofocus image reader: {autofocus_check.reader_versions()}; single-thread read: '
+                      f'{autofocus_check.single_thread_read_form()}; read and scored in a helper process')
         self._transfer = None          # DataTransfer to <save_network_path>/<ZEN folder name>
         self._run_completed = False    # True when _run ended normally (no interrupt, no error)
         self._af_aborted = False       # True when the autofocus check stopped the experiment
@@ -1163,6 +1180,50 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     _AF_WAIT_WARNING_S = 60  # warning every _AF_WAIT_WARNING_S while the new autofocus image is not found
     _AF_READ_ATTEMPTS = 5    # attempts to read the new autofocus image (ZEN may still be writing it)
     _AF_READ_RETRY_S = 1.0   # pause between two read attempts
+    FILE_STABLE_PERIOD_S = 0.5      # the new image is read once its size is the same on two checks this far apart
+    AUTOFOCUS_JOB_TIMEOUT_S = 120   # longest wait for the helper process (read + score of one image)
+    _AF_JOB_POLL_S = 0.1            # interrupt check period while waiting for the helper process
+    # function run in the helper process with (path, reference); None: autofocus_check.read_and_score. A module-level
+    # function (it is pickled by name), e.g. a stand-in of the tests.
+    _af_worker = None
+
+    def _setup(self) -> None:
+        """Setup of all setups, plus the helper process pool of the autofocus check (the process itself starts with
+        the first check)."""
+        self._af_pool = None
+        super()._setup()
+        self._af_pool = self._new_af_pool()
+
+    @staticmethod
+    def _new_af_pool():
+        """One helper process, started with 'spawn' (a fresh interpreter: no thread or memory state of qudi)."""
+        return concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context('spawn'))
+
+    def _af_executor(self):
+        """The helper process pool, created when missing (after a crash, or for a task built without _setup)."""
+        if getattr(self, '_af_pool', None) is None:
+            self._af_pool = self._new_af_pool()
+        return self._af_pool
+
+    def _stop_af_pool(self) -> None:
+        """Shut the helper process pool down (pending jobs cancelled); a process still alive after 1 s (stuck
+        read) is terminated. Never raises."""
+        pool, self._af_pool = getattr(self, '_af_pool', None), None
+        if pool is None:
+            return
+        processes = list((getattr(pool, '_processes', None) or {}).values())
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception as err:
+            self.log.error(f'Autofocus check: could not shut the image reader process down: {err!r}')
+        for process in processes:
+            try:
+                process.join(timeout=1.0)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=1.0)
+            except Exception as err:
+                self.log.error(f'Autofocus check: could not stop the image reader process: {err!r}')
 
     def _autofocus_images(self) -> list:
         """Autofocus images (*_AcquisitionBlock1_pt*.czi) of the ZEN data folder, recursive search."""
@@ -1193,12 +1254,72 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
                                  f's: {len(new)} new matching file(s)' + (f' ({names})' if new else ''))
             self._zen_wait(self._AF_POLL_S)
 
-    def _read_autofocus_image(self, path):
-        """First plane of the new autofocus image; up to _AF_READ_ATTEMPTS attempts, _AF_READ_RETRY_S apart
-        (interruptible), a warning at each failure; the last failure is raised."""
+    def _wait_until_file_stable(self, path, roi_name) -> None:
+        """Wait until the size of the new image is non-zero and the same on two checks FILE_STABLE_PERIOD_S apart
+        (ZEN may still be writing it, through a network mount). No timeout, interruptible; a warning every
+        _AF_WAIT_WARNING_S while it changes."""
+        start = monotonic()
+        next_warning = start + self._AF_WAIT_WARNING_S
+        previous = None
+        while True:
+            self._check_interrupt()
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = None
+            if size and size == previous:
+                return
+            if monotonic() >= next_warning:
+                next_warning += self._AF_WAIT_WARNING_S
+                self.log.warning(f'Autofocus image of {roi_name} ({os.path.basename(path)}) still being written after '
+                                 f'{monotonic() - start:.0f} s (size {size} B)')
+            previous = size
+            self._zen_wait(self.FILE_STABLE_PERIOD_S)
+
+    def _run_in_helper(self, path, ref):
+        """(score, shift_y, shift_x, image) computed by the helper process; waits at most AUTOFOCUS_JOB_TIMEOUT_S,
+        checking for an interrupt every _AF_JOB_POLL_S. Raises BrokenProcessPool (process died),
+        AutofocusReaderTimeout, or the exception raised inside the job."""
+        worker = self._af_worker or autofocus_check.read_and_score
+        with _main_script_hidden():  # the helper process starts here (first job, or after a crash)
+            future = self._af_executor().submit(worker, path, ref)
+        deadline = monotonic() + self.AUTOFOCUS_JOB_TIMEOUT_S
+        while True:
+            self._check_interrupt()
+            try:
+                return future.result(timeout=self._AF_JOB_POLL_S)
+            except concurrent.futures.TimeoutError:
+                if future.done():
+                    raise  # a TimeoutError raised inside the job itself
+                if monotonic() >= deadline:
+                    future.cancel()
+                    raise AutofocusReaderTimeout(f'no result after {self.AUTOFOCUS_JOB_TIMEOUT_S:g} s')
+
+    def _score_in_helper(self, path, ref, roi_name):
+        """_run_in_helper; when the helper process dies or times out: error, new process, one more try. None when
+        the second try fails too (the check then counts as failed). Exceptions raised inside the job go up."""
+        for helper_attempt in (1, 2):
+            try:
+                return self._run_in_helper(path, ref)
+            except (BrokenProcessPool, AutofocusReaderTimeout) as err:
+                details = (f'timeout: {err}' if isinstance(err, AutofocusReaderTimeout)
+                           else f'process died: {err!r}')
+                self.log.error(f'Autofocus check of {roi_name}: the image reader process crashed (or timed out) - '
+                               f'{details}' + (' - new reader process, second attempt' if helper_attempt == 1 else ''))
+                self._stop_af_pool()  # a new pool is created by the next _af_executor()
+        self.log.error(f'Autofocus check of {roi_name}: the image reader process failed twice - the check of '
+                       f'{os.path.basename(path)} counts as failed')
+        return None
+
+    def _read_and_score(self, path, ref, roi_name):
+        """Read and score the new image in the helper process; an exception raised inside the job (e.g. file not
+        readable yet): up to _AF_READ_ATTEMPTS attempts, _AF_READ_RETRY_S apart (interruptible), a warning at each
+        failure, the last one is raised. None when the helper process failed twice."""
         for attempt in range(1, self._AF_READ_ATTEMPTS + 1):
             try:
-                return autofocus_check.read_autofocus_image(path)
+                return self._score_in_helper(path, ref, roi_name)
+            except ModuleScriptInterrupted:
+                raise
             except Exception as err:
                 if attempt == self._AF_READ_ATTEMPTS:
                     raise
@@ -1236,10 +1357,19 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         """Compare the image ZEN saved at the end of its autofocus block with the reference of roi_name (ZNCC,
         common/autofocus_check.py); see the class docstring for pass / fail and the abort rule."""
         cycle, index, n = self._cycles_done, self.roi_names.index(roi_name), len(self.roi_names)
-        # wait for the new autofocus image, read its first plane
-        image = self._read_autofocus_image(self._wait_for_autofocus_image(roi_name))
-        # score and shift against the reference of this ROI
-        score, shift_y, shift_x = autofocus_check.autofocus_score(self._af_refs[index], image)
+        # wait for the new autofocus image, then until ZEN has finished writing it
+        path = self._wait_for_autofocus_image(roi_name)
+        self._wait_until_file_stable(path, roi_name)
+        # read its first plane and score it against the reference of this ROI, in the helper process (a crash of
+        # the .czi reader cannot kill qudi)
+        result = self._read_and_score(path, self._af_refs[index], roi_name)
+        if result is None:
+            # reader process failed twice: failed check (reference kept, empty score, NaN in correlation.npy)
+            with open(os.path.join(self.directory, self._AF_CSV), 'a', newline='') as f:
+                csv.writer(f).writerow((cycle + 1, self._af_rt, roi_name, '', '', '', False))
+            self._autofocus_failed(roi_name, cycle, n, 'the image could not be read')
+            return
+        score, shift_y, shift_x, image = result
         passed = score >= self.correlation_threshold
         self._af_scores[cycle, index] = score
         self.log.info(f'Autofocus check cycle {cycle + 1}/{len(self._cycles)} - {self._af_rt} - {roi_name}: score '
@@ -1253,11 +1383,14 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             self._af_refs[index] = image
             np.save(os.path.join(self.directory, autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
             return
-        # fail: reference kept, warnings
+        self._autofocus_failed(roi_name, cycle, n, f'score {score:.3f} < threshold {self.correlation_threshold}')
+
+    def _autofocus_failed(self, roi_name, cycle, n, reason) -> None:
+        """Failed check: reference kept, warnings, then the minimum-fraction rule (RuntimeError when the experiment
+        is aborted)."""
         self._af_failures += 1
         self._af_failed_rois.add(roi_name)
-        self.log.warning(f'Autofocus check failed for {roi_name} (score {score:.3f} < threshold '
-                         f'{self.correlation_threshold})')
+        self.log.warning(f'Autofocus check failed for {roi_name} ({reason})')
         if roi_name in self._af_failed_before:
             self.log.warning(f'Autofocus check failed for {roi_name} in the previous cycle too')
         # abort as soon as the minimum fraction of passed ROIs can no longer be reached in this cycle
@@ -1271,14 +1404,44 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             raise RuntimeError(message)
 
     def _cleanup(self) -> None:
-        """correlation.npy (cycles x ROIs, NaN for the checks not done) in the metadata folder, then the cleanup of
-        all setups."""
+        """Helper process of the autofocus check stopped, correlation.npy (cycles x ROIs, NaN for the checks not done)
+        in the metadata folder, then the cleanup of all setups."""
+        try:
+            self._stop_af_pool()
+        except Exception as err:
+            self.log.error(f'Cleanup: could not stop the autofocus image reader process: {err!r}')
         if getattr(self, '_af_scores', None) is not None and getattr(self, 'directory', None):
             try:
                 np.save(os.path.join(self.directory, 'correlation.npy'), self._af_scores)
             except Exception as err:
                 self.log.error(f'Cleanup: could not save correlation.npy: {err}')
         super()._cleanup()
+
+
+class AutofocusReaderTimeout(Exception):
+    """The helper process of the autofocus check gave no result within AUTOFOCUS_JOB_TIMEOUT_S."""
+
+
+@contextmanager
+def _main_script_hidden():
+    """While a helper process is started with the 'spawn' method: the main script of the parent (qudi's start
+    script, a test script) is not imported again in the child - spawn imports it as __mp_main__ when
+    __main__ has a __spec__ name or a __file__. Both are removed for the time of the start and restored."""
+    main = sys.modules.get('__main__')
+    if main is None:
+        yield
+        return
+    saved = {key: main.__dict__[key] for key in ('__file__', '__spec__') if key in main.__dict__}
+    main.__dict__.pop('__file__', None)
+    main.__dict__['__spec__'] = None
+    try:
+        yield
+    finally:
+        for key in ('__file__', '__spec__'):
+            if key in saved:
+                main.__dict__[key] = saved[key]
+            else:
+                main.__dict__.pop(key, None)
 
 
 class HiMRAMMTask(RAMMImagingMixin, HiMTaskBase):

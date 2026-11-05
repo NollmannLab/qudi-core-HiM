@@ -225,8 +225,56 @@ def read_npy_image(path):
         return np.load(f)
 
 
+real_read_autofocus_image = None  # autofocus_check.read_autofocus_image before use_npy_autofocus_images
+
+
 def use_npy_autofocus_images():
-    """The task reads the test autofocus images with read_npy_image (installed in the shared module)."""
+    """The task reads the test autofocus images with read_npy_image: installed in the shared module (reads done in
+    the test process) and, as HiMSDTask._af_worker, read_and_score_npy (reads done in its helper process)."""
+    global real_read_autofocus_image
     from qudi.tasks.common import autofocus_check
+    from qudi.tasks import him
+    if real_read_autofocus_image is None:
+        real_read_autofocus_image = autofocus_check.read_autofocus_image
     autofocus_check.read_autofocus_image = read_npy_image
+    him.HiMSDTask._af_worker = staticmethod(read_and_score_npy)
+
+
+# --- jobs of the helper process of HiMSDTask (module-level: pickled by name, run in a fresh process) ---
+def read_and_score_npy(path, ref):
+    """Stand-in of autofocus_check.read_and_score for the test images (.npy content)."""
+    from qudi.tasks.common.autofocus_check import autofocus_score
+    image = read_npy_image(path)
+    score, shift_y, shift_x = autofocus_score(ref, image)
+    return score, shift_y, shift_x, image
+
+
+def read_and_score_failing(path, ref):
+    """Raises OSError while <path>.failures holds a number > 0 (decremented at each call), then read_and_score_npy."""
+    counter = path + '.failures'
+    left = int(open(counter).read()) if os.path.exists(counter) else 0
+    if left > 0:
+        with open(counter, 'w') as f:
+            f.write(str(left - 1))
+        raise OSError('file still being written (test)')
+    return read_and_score_npy(path, ref)
+
+
+def helper_exit(path, ref):
+    """The helper process dies (as after a native crash of the reader)."""
+    os._exit(1)
+
+
+def helper_exit_once(path, ref):
+    """The helper process dies the first time (marker <path>.crashed), then read_and_score_npy."""
+    marker = path + '.crashed'
+    if not os.path.exists(marker):
+        open(marker, 'w').close()
+        os._exit(1)
+    return read_and_score_npy(path, ref)
+
+
+def helper_sleep(path, ref):
+    """A job that never ends in time (stuck read)."""
+    sleep(60)
 

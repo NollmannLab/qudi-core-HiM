@@ -35,6 +35,21 @@ from qudi.core.connector import Connector  # noqa: E402
 from qudi.tasks import him  # noqa: E402
 _short.use_npy_autofocus_images()  # test autofocus images: .npy content (no czifile)
 
+# one helper process pool of the autofocus check shared by the tasks of this suite (starting a 'spawn' process takes
+# about a second); a pool shut down by a task (cleanup, crash of its process) is replaced by a new one
+_AF_POOL = [None]
+_new_af_pool = him.HiMSDTask._new_af_pool
+
+
+def _shared_af_pool():
+    pool = _AF_POOL[0]
+    if pool is None or pool._shutdown_thread or pool._broken:
+        pool = _AF_POOL[0] = _new_af_pool()
+    return pool
+
+
+him.HiMSDTask._new_af_pool = staticmethod(_shared_af_pool)
+
 np.random.seed(0)
 results = []
 
@@ -827,6 +842,7 @@ if selected('autofocus'):
         with open(os.path.join(task.directory, task._AF_CSV), 'w', newline='') as f:
             csv.writer(f).writerow(task._AF_CSV_COLUMNS)
         task._af_seen = set()
+        task.FILE_STABLE_PERIOD_S = 0.05  # short settings
         return task
 
     def check_rois(task, images):
@@ -962,52 +978,231 @@ if selected('autofocus'):
           and all(': 2 new matching file(s) (experiment_AcquisitionBlock1_pt1.czi, experiment_AcquisitionBlock1_pt2.czi)'
                   in m for m in warnings), (stopped, warnings))
 
-    # reading: fails twice then succeeds; always fails
-    calls_read = []
+    # reading in the helper process (job raising an exception): fails twice then succeeds; always fails
+    def with_worker(task, worker):
+        task._af_worker = worker  # instance attribute: plain function, no binding
+        return task
 
-    def flaky(path):
-        calls_read.append(path)
-        if len(calls_read) <= 2:
-            raise OSError('file still being written (test)')
-        return _short.read_npy_image(path)
-
-    task = af_task(2, 0.5)
+    task = with_worker(af_task(2, 0.5), _short.read_and_score_failing)
     task._AF_READ_RETRY_S = 0.01
     task._start_autofocus_cycle('RT1')
-    _short.write_autofocus_image(task._zen_directory, 1, base)
-    af.read_autofocus_image = flaky
+    path = _short.write_autofocus_image(task._zen_directory, 1, base)
+    open(path + '.failures', 'w').write('2')
     t0 = monotonic()
     try:
         task._check_autofocus('ROI_000')
         read_err = None
     except Exception as exc:
         read_err = exc
-    finally:
-        af.read_autofocus_image = _short.read_npy_image
     warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
-    check('(autofocus image) read failing twice then working: score computed (pass), two warnings (attempts 1/5, 2/5)',
-          read_err is None and len(calls_read) == 3 and task._af_passed == 1 and not np.isnan(task._af_scores[0, 0])
+    check('(autofocus image) read failing twice in the helper process, then working: score computed (pass), two '
+          'warnings (attempts 1/5, 2/5)',
+          read_err is None and open(path + '.failures').read() == '0' and task._af_passed == 1
+          and not np.isnan(task._af_scores[0, 0])
           and len(warnings) == 2 and 'attempt 1/5' in warnings[0] and 'attempt 2/5' in warnings[1], (read_err, warnings))
 
-    def broken(path):
-        raise OSError('unreadable file (test)')
-
-    task = af_task(2, 0.5)
+    task = with_worker(af_task(2, 0.5), _short.read_and_score_failing)
     task._AF_READ_RETRY_S = 0.01
     task._start_autofocus_cycle('RT1')
-    _short.write_autofocus_image(task._zen_directory, 1, base)
-    af.read_autofocus_image = broken
+    path = _short.write_autofocus_image(task._zen_directory, 1, base)
+    open(path + '.failures', 'w').write('99')
     t0 = monotonic()
     try:
         task._check_autofocus('ROI_000')
         read_err = None
     except OSError as exc:
         read_err = exc
-    finally:
-        af.read_autofocus_image = _short.read_npy_image
     warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
-    check('(autofocus image) read always failing: 4 warnings, then the error of the 5th attempt is raised',
-          read_err is not None and 'unreadable file' in str(read_err) and len(warnings) == 4, (read_err, warnings))
+    check('(autofocus image) read always failing in the helper process: 4 warnings, then the error of the 5th attempt '
+          'is raised', read_err is not None and 'file still being written' in str(read_err) and len(warnings) == 4,
+          (read_err, warnings))
+
+    # --- reader: one decoding thread, both czifile API forms (czifile replaced by a stand-in module) ---
+    import types
+    calls_czi = []
+
+    class FakeCzi:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def asarray(self, resize=True, order=0, out=None, max_workers=None):  # czifile 2019 signature
+            calls_czi.append(('asarray', max_workers))
+            return np.arange(20, dtype=np.uint16).reshape(1, 1, 4, 5, 1)
+
+    class FakeCziRecent(FakeCzi):
+        def asarray(self, *, maxworkers=None):
+            calls_czi.append(('asarray-recent', maxworkers))
+            return np.arange(20, dtype=np.uint16).reshape(1, 1, 4, 5, 1)
+
+    def fake_imread(filename, *args, **kwargs):  # czifile 2019 imread: kwargs passed to asarray
+        calls_czi.append(('imread', kwargs.get('max_workers')))
+        return np.arange(20, dtype=np.uint16).reshape(1, 1, 4, 5, 1)
+
+    forms = {'CziFile.asarray(max_workers)': types.SimpleNamespace(CziFile=FakeCzi, imread=fake_imread),
+             'CziFile.asarray(maxworkers)': types.SimpleNamespace(CziFile=FakeCziRecent, imread=fake_imread),
+             'imread(**kwargs)': types.SimpleNamespace(imread=fake_imread)}
+    read_forms, planes = {}, {}
+    saved_czifile = sys.modules.get('czifile')
+    try:
+        for label, module in forms.items():
+            sys.modules['czifile'] = module
+            calls_czi.clear()
+            planes[label] = _short.real_read_autofocus_image('fake.czi')
+            read_forms[label] = (list(calls_czi), af.single_thread_read_form())
+    finally:
+        if saved_czifile is None:
+            sys.modules.pop('czifile', None)
+        else:
+            sys.modules['czifile'] = saved_czifile
+    check('(reader) read_autofocus_image decodes with ONE thread: CziFile(path).asarray(max_workers=1) (czifile 2019), '
+          'asarray(maxworkers=1) (recent form), imread(path, max_workers=1) without the class; first plane (H, W)',
+          read_forms == {'CziFile.asarray(max_workers)': ([('asarray', 1)], 'CziFile(path).asarray(max_workers=1)'),
+                         'CziFile.asarray(maxworkers)': ([('asarray-recent', 1)], 'CziFile(path).asarray(maxworkers=1)'),
+                         'imread(**kwargs)': ([('imread', 1)], 'imread(path, max_workers=1)')}
+          and all(p.shape == (4, 5) and p[1, 2] == 7 for p in planes.values()), read_forms)
+    versions = af.reader_versions()
+    check('(reader) reader_versions: czifile, imagecodecs (or imagecodecs-lite), numpy; "not installed" when missing',
+          re.fullmatch(r'czifile \S+( installed)?, imagecodecs(-lite)? \S+( installed)?, numpy \S+', versions)
+          and versions.endswith(f'numpy {np.__version__}')
+          and (importlib.util.find_spec('czifile') is not None or versions.startswith('czifile not installed')),
+          versions)
+
+    # --- the new file is read only once its size is stable ---
+    task = af_task(2, 0.5)
+    task._start_autofocus_cycle('RT1')
+    path = _short.write_autofocus_image(task._zen_directory, 1, base)
+    full = open(path, 'rb').read()
+    open(path, 'wb').write(full[:len(full) // 2])  # ZEN still writing: half of the file
+    waits = []
+    real_wait = task._zen_wait
+
+    def zen_writing(duration):
+        waits.append(os.path.getsize(path))
+        if len(waits) == 1:
+            open(path, 'wb').write(full)  # ZEN finishes the file during the first wait
+        real_wait(min(duration, 0.01))
+    task._zen_wait = zen_writing
+    t0 = monotonic()
+    task._check_autofocus('ROI_000')
+    expected_score = af.autofocus_score(base, base)[0]
+    check('(stable size) a file whose size changes once is read only after two equal sizes (2 waits: half size, then '
+          'full size); the complete image is scored (same score as autofocus_score in the test process)',
+          waits == [len(full) // 2, len(full)] and abs(task._af_scores[0, 0] - expected_score) < 1e-9
+          and task._af_passed == 1, (waits, task._af_scores[0, 0]))
+
+    # --- helper process: normal check, crash, timeout, interrupt (each new process: about 1 s to start) ---
+    task = af_task(2, 0.5)
+    task._start_autofocus_cycle('RT1')
+    noisy = base + np.random.default_rng(3).normal(0, 0.05 * float(base.std()), base.shape)
+    _short.write_autofocus_image(task._zen_directory, 1, noisy)
+    task._check_autofocus('ROI_000')
+    in_process = af.autofocus_score(base, noisy)
+    check('(helper process) normal check: same score as autofocus_score in the test process; the image returned by the '
+          'helper becomes the reference',
+          abs(task._af_scores[0, 0] - in_process[0]) < 1e-12 and np.array_equal(task._af_refs[0], noisy),
+          (task._af_scores[0, 0], in_process))
+
+    def af_rows(task):
+        return list(csv.reader(open(os.path.join(task.directory, task._AF_CSV))))[1:]
+
+    # crash once: error, new pool, second attempt works
+    task = with_worker(af_task(2, 0.5), _short.helper_exit_once)
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    pool_before = task._af_executor()
+    t0 = monotonic()
+    task._check_autofocus('ROI_000')
+    errors = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.ERROR]
+    check('(helper process) crash once (os._exit in the job): error "the image reader process crashed (or timed out) - '
+          'process died ...", new pool, second attempt scored (pass)',
+          len(errors) == 1 and errors[0].startswith('Autofocus check of ROI_000: the image reader process crashed (or '
+                                                    'timed out) - process died')
+          and task._af_pool is not pool_before and task._af_passed == 1 and not np.isnan(task._af_scores[0, 0]),
+          (errors, task._af_passed))
+
+    # crash twice: the ROI counts as failed, the task goes on
+    task = with_worker(af_task(4, 0.5), _short.helper_exit)
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    t0 = monotonic()
+    try:
+        task._check_autofocus('ROI_000')
+        crash_err = None
+    except Exception as exc:
+        crash_err = exc
+    errors = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.ERROR]
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(helper process) crash twice: no exception, 3 errors (crash, crash, failed twice), the ROI counts as FAILED '
+          '(reference kept, row with empty score and passed False, NaN), warning "Autofocus check failed for ROI_000 '
+          '(the image could not be read)"',
+          crash_err is None and len(errors) == 3 and 'failed twice' in errors[2] and task._af_failures == 1
+          and np.isnan(task._af_scores[0, 0]) and np.array_equal(task._af_refs[0], base)
+          and af_rows(task) == [['1', 'RT1', 'ROI_000', '', '', '', 'False']]
+          and 'Autofocus check failed for ROI_000 (the image could not be read)' in warnings,
+          (crash_err, errors, af_rows(task)))
+    del task._af_worker  # back to the class worker (read_and_score_npy): the next ROI is checked normally
+    _short.write_autofocus_image(task._zen_directory, 2, base)
+    task._check_autofocus('ROI_001')
+    check('(helper process) after two crashes the next ROI is checked with a new process (pass)',
+          task._af_passed == 1 and not np.isnan(task._af_scores[0, 1]))
+    # crash twice on most ROIs: the minimum-fraction rule decides as usual
+    task = with_worker(af_task(2, 0.9), _short.helper_exit)
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    try:
+        task._check_autofocus('ROI_000')
+        rule_err = None
+    except RuntimeError as exc:
+        rule_err = exc
+    check('(helper process) crash twice with min fraction 0.9: the failed check triggers the abort rule (RuntimeError)',
+          rule_err is not None and 'below the minimum fraction' in str(rule_err), rule_err)
+
+    # timeout: same handling
+    task = with_worker(af_task(4, 0.5), _short.helper_sleep)
+    task.AUTOFOCUS_JOB_TIMEOUT_S = 3.0
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    t0 = monotonic()
+    task._check_autofocus('ROI_000')
+    elapsed = monotonic() - t0
+    errors = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.ERROR]
+    check('(helper process) job that never ends (timeout 3 s): two timeouts, then the ROI counts as failed; no '
+          'exception; the stuck processes are stopped',
+          len(errors) == 3 and all('timeout: no result after 3 s' in m for m in errors[:2])
+          and task._af_failures == 1 and np.isnan(task._af_scores[0, 0]) and elapsed < 15,
+          (errors, elapsed))
+
+    # interrupt while waiting for the helper: the task stops, the cleanup shuts the pool down
+    task = with_worker(af_task(2, 0.5), _short.helper_sleep)
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    interrupt_at = [None]
+
+    def interrupt_after_start():
+        processes = (getattr(task._af_pool, '_processes', None) or {}) if getattr(task, '_af_pool', None) else {}
+        if processes and interrupt_at[0] is None:
+            interrupt_at[0] = monotonic() + 0.5  # the job is running
+        if interrupt_at[0] is not None and monotonic() >= interrupt_at[0]:
+            raise ModuleScriptInterrupted()
+    task._check_interrupt = interrupt_after_start
+    try:
+        task._check_autofocus('ROI_000')
+        stop_err = None
+    except ModuleScriptInterrupted as exc:
+        stop_err = exc
+    helper_processes = list((task._af_pool._processes or {}).values()) if task._af_pool else []
+    task._check_interrupt = lambda: None
+    task._cleanup()
+    check('(helper process) interrupt while waiting for the helper: ModuleScriptInterrupted (task stops), _cleanup '
+          'shuts the pool down and the running helper process is stopped',
+          isinstance(stop_err, ModuleScriptInterrupted) and task._af_pool is None and helper_processes
+          and not any(p.is_alive() for p in helper_processes), (stop_err, helper_processes))
 
 # --- online data transfer: DataTransfer (common/data_transfer.py), small files in temporary folders ---
 if selected('transfer'):

@@ -13,18 +13,18 @@
 # the existing sample files.
 
 experiment_type:   {type: choice, choices: [DNA-FISH, RNA-FISH, IF, DNA-FISH + IF, RNA-FISH + IF], required: true}
-organism:          {type: choice, choices: [Drosophila melanogaster, Mus musculus, Homo sapiens], required: true}
+organism:          {type: choice, choices: [Drosophila melanogaster, Mus musculus, Homo sapiens, B.subtilis, E.coli, M.xanthus], required: true}
 sample_type:       {type: choice, choices: [embryo, larva, adult, tissue, cells], required: true}
 preparation:       {type: choice, choices: [whole-mount, cryosection, cells on coverslip]}
 genotype:          {type: text}
 sex:               {type: choice, choices: [female, male, mixed, unknown]}
 stage_or_tissue:   {type: text}
-fixation:          {type: choice, choices: [4% PFA]}
+fixation:          {type: choice, choices: [4% PFA, Live]}
 formamide_percent: {type: number, min: 0, max: 100}
 mounting_medium:   {type: text}
-nuclear_stain:     {type: choice, choices: [DAPI]}
 probe_library:     {type: text}
 library_labelling: {type: choice, choices: [direct, indirect]}
+nuclear_stain:     {type: choice, choices: [DAPI]}
 dye_mask:          {type: choice, choices: [Alexa 488, Cy3, Atto 550, Rhodamine Red, Alexa 647, Alexa 750]}
 dye_fiducial:      {type: choice, choices: [Alexa 488, Cy3, Atto 550, Rhodamine Red, Alexa 647, Alexa 750]}
 dye_barcode:       {type: choice, choices: [Alexa 488, Cy3, Atto 550, Rhodamine Red, Alexa 647, Alexa 750]}

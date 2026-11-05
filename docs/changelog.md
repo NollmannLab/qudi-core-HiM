@@ -6,6 +6,48 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Hi-M SD autofocus check: crash of the .czi reader
+
+#### Fixed
+
+- Native crash of the .czi reader no longer kills qudi (2026-11-05).
+  - Problem: during a Hi-M SD run, qudi died with "double free or corruption (out) / Fatal Python error:
+    Aborted" on the second ROI, in HiMSDTask._check_autofocus -> autofocus_score -> preprocess, right after the
+    new autofocus .czi was read; no Python exception, no cleanup. Intermittent: the same files replay fine
+    outside qudi.
+  - Cause (most likely, not reproduced): native memory corruption in the old compiled .czi decoding stack
+    (czifile 2019.7.2.2 + imagecodecs-lite 2019.12.3, built for numpy 1.x, running with numpy 2.2.5), which
+    decodes the sub-blocks in several threads by default; the file was read about 10 ms after ZEN's "done"
+    signal, through a network mount, possibly before ZEN finished writing it. The corruption shows up later
+    (in preprocess), where the freed memory is used.
+  - `autofocus_check.read_autofocus_image`: one decoding thread - `CziFile(path).asarray(max_workers=1)`
+    (czifile 2019; `maxworkers=1` for recent versions), `imread(path, max_workers=1)` without the class; copy of
+    the first plane. New `single_thread_read_form()`, `reader_versions()` (czifile, imagecodecs or
+    imagecodecs-lite, numpy) and `read_and_score(path, ref)` (read + score; numpy / scipy / czifile only).
+  - `HiMSDTask`: after the new image is found, wait until its size is non-zero and stable on two checks
+    `FILE_STABLE_PERIOD_S` (0.5 s) apart (no timeout, interruptible, warning every 60 s). The image is read and
+    scored in a helper process (ProcessPoolExecutor, one 'spawn' process, created in `_setup`, shut down in
+    `_cleanup`; the main script of the parent is not re-imported in the child), waited for at most
+    `AUTOFOCUS_JOB_TIMEOUT_S` (120 s) with interrupt checks. Exception inside the job: same retry rule as before
+    (5 attempts, 1 s apart). Helper process died or timed out: error, new process, one more try; a second
+    failure counts the ROI as a failed check (reference kept, empty score / passed False in
+    autofocus_scores.csv, NaN in correlation.npy) and the minimum-fraction rule decides. Reader versions and
+    read form logged at the start. Worker function chosen through `HiMSDTask._af_worker` (tests).
+  - `qudi.util.autofocus_calibration`: same single-thread read (in its own process), reader versions printed
+    at the start.
+  - The reference .czi images (when there is no autofocus_reference.npy) are still read in the task process,
+    once, before any hardware call (single-thread read).
+  - Tests (tests/test_him.py, autofocus block, about 17 s; each crash / timeout case starts new helper
+    processes): both czifile API forms with max_workers=1, stable size, helper score = in-process score, crash
+    once / twice, timeout, interrupt; helper-process stand-ins in tests/_short.py; one pool shared by the suite.
+
+### Sample template
+
+#### Changed
+
+- sample_template.yml (2026-11-05): organism choices B.subtilis, E.coli, M.xanthus added; fixation choice
+  Live added; nuclear_stain moved right before the dyes (after library_labelling).
+
 ### Sample tag, photobleaching imaging flag, metadata copy to the server
 
 #### Changed

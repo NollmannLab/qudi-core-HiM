@@ -8,7 +8,16 @@ calibration script (qudi.util.autofocus_calibration):
 
   - load_reference_images(folder) -> (n, H, W) array: autofocus_reference.npy if the folder has it,
     otherwise every *.czi of the folder in acquisition order (last number of the file name), first plane.
-  - read_autofocus_image(path) -> (H, W) array: first plane of a ZEN .czi image (image[0, 0, :, :, 0]).
+  - read_autofocus_image(path) -> (H, W) array: first plane of a ZEN .czi image (image[0, 0, :, :, 0]), decoded
+    with ONE thread (czifile decodes the sub-blocks in several threads by default; the old compiled decoders of
+    czifile 2019 / imagecodecs-lite are not thread-safe enough to rely on). Both czifile API forms are
+    supported: CziFile(path).asarray(max_workers=1) (or maxworkers=1 in recent versions) when the class is
+    there, otherwise imread(path, max_workers=1).
+  - single_thread_read_form() -> str: the call read_autofocus_image uses with the installed czifile.
+  - reader_versions() -> str: versions of czifile, imagecodecs (or imagecodecs-lite) and numpy.
+  - read_and_score(path, ref) -> (score, shift_y, shift_x, image): read_autofocus_image + autofocus_score, the
+    job of the helper process of the Hi-M task (this module only imports numpy / scipy / czifile, so it runs
+    in a fresh process).
   - sort_czi_paths(paths) -> list: paths sorted by the last number of the file name (acquisition order).
   - preprocess(image): binning by BIN_FACTOR, minus its gaussian blur (background removal).
   - autofocus_score(ref, new) -> (score, shift_y, shift_x): zero-normalised cross-correlation (ZNCC, a
@@ -32,11 +41,14 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 __all__ = ['BIN_FACTOR', 'BACKGROUND_SIGMA', 'TEMPLATE_FRACTION', 'REFERENCE_FILE_NAME', 'AUTOFOCUS_IMAGE_PATTERN',
-           'load_reference_images', 'read_autofocus_image', 'sort_czi_paths', 'preprocess', 'autofocus_score']
+           'load_reference_images', 'read_autofocus_image', 'single_thread_read_form', 'reader_versions',
+           'read_and_score', 'sort_czi_paths', 'preprocess', 'autofocus_score']
 
+import inspect
 import os
 import re
 from glob import glob
+from importlib import metadata
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
@@ -59,10 +71,72 @@ def sort_czi_paths(paths) -> list:
     return sorted(paths, key=last_number)
 
 
+def _thread_keyword(function) -> dict:
+    """Keyword that limits the czifile decoding to one thread for this function: {'max_workers': 1} (czifile 2019,
+    also through **kwargs), {'maxworkers': 1} (recent versions), {} when the function has neither."""
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return {'max_workers': 1}
+    for name in ('max_workers', 'maxworkers'):
+        if name in parameters:
+            return {name: 1}
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return {'max_workers': 1}  # czifile 2019 imread(filename, *args, **kwargs) passes it to asarray
+    return {}
+
+
+def _czi_reader(czifile):
+    """('asarray', keyword) when czifile.CziFile has asarray, else ('imread', keyword)."""
+    cls = getattr(czifile, 'CziFile', None)
+    if cls is not None and hasattr(cls, 'asarray'):
+        return 'asarray', _thread_keyword(cls.asarray)
+    return 'imread', _thread_keyword(czifile.imread)
+
+
+def single_thread_read_form() -> str:
+    """The call read_autofocus_image makes with the installed czifile, e.g. 'CziFile(path).asarray(max_workers=1)'."""
+    try:
+        import czifile
+    except ImportError:
+        return 'czifile not installed'
+    form, keyword = _czi_reader(czifile)
+    args = ', '.join(f'{k}={v}' for k, v in keyword.items())
+    return f'CziFile(path).asarray({args})' if form == 'asarray' else f'imread(path{", " + args if args else ""})'
+
+
 def read_autofocus_image(path) -> np.ndarray:
-    """First plane of a ZEN .czi image (image[0, 0, :, :, 0]). Needs the czifile package."""
-    from czifile import imread  # imported here: only needed when a .czi image is read
-    return np.asarray(imread(path)[0, 0, :, :, 0])
+    """First plane of a ZEN .czi image (image[0, 0, :, :, 0]), decoded with one thread. Needs the czifile package."""
+    import czifile  # imported here: only needed when a .czi image is read
+    form, keyword = _czi_reader(czifile)
+    if form == 'asarray':
+        with czifile.CziFile(path) as czi:
+            data = czi.asarray(**keyword)
+    else:
+        data = czifile.imread(path, **keyword)
+    return np.array(np.asarray(data)[0, 0, :, :, 0])  # copy: independent of the decoder's buffer
+
+
+def reader_versions() -> str:
+    """'czifile <v>, imagecodecs <v>, numpy <v>' ('not installed' for a missing package; imagecodecs-lite when it
+    is the one installed)."""
+    def version(name):
+        try:
+            return metadata.version(name)
+        except metadata.PackageNotFoundError:
+            return None
+    codecs = next(((name, v) for name in ('imagecodecs', 'imagecodecs-lite') if (v := version(name))),
+                  ('imagecodecs', None))
+    return ', '.join(f'{name} {v or "not installed"}' for name, v in
+                     (('czifile', version('czifile')), codecs, ('numpy', version('numpy'))))
+
+
+def read_and_score(path, ref):
+    """(score, shift_y, shift_x, image): first plane of the autofocus image at path (read_autofocus_image) and its
+    autofocus_score against ref. Job of the helper process of the Hi-M task."""
+    image = read_autofocus_image(path)
+    score, shift_y, shift_x = autofocus_score(ref, image)
+    return score, shift_y, shift_x, image
 
 
 def load_reference_images(folder) -> np.ndarray:
