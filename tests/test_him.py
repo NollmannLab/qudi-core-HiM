@@ -506,10 +506,11 @@ if selected('sd_zen_folder'):
           f'movie_name.txt, experiment_config.yaml, injections.yml (copy of the injections file), metadata.yml, '
           f'HiM_task.log; prefix {prefix} (folders before + 1), names scan_{prefix}_RT1_<roi>_ROI',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == folder
-          and sorted(os.listdir(folder)) == ['HiM_parameters.yml', 'HiM_task.log', 'autofocus_reference.npy',
-                                             'autofocus_scores.csv', 'correlation.npy', 'experiment_config.yaml',
-                                             'injections.yml', 'metadata.yml', 'movie_name.txt',
-                                             'reference_images_RT1.npy']
+          and sorted(os.listdir(folder)) == sorted(['HiM_parameters.yml', 'HiM_task.log', 'autofocus_reference.npy',
+                                                    'autofocus_scores.csv', 'correlation.npy', 'experiment_config.yaml',
+                                                    'injections.yml', 'metadata.yml', 'movie_name.txt',
+                                                    'reference_images_RT1.npy', 'ROI_probe_autofocus_summary.csv',
+                                                    'autofocus_correlation_heatmap.png', 'autofocus_drift.png'])
           and open(os.path.join(folder, 'injections.yml'), 'rb').read() == open(task.injections_path, 'rb').read()
           and task.prefix == prefix and names == [f'scan_{prefix}_RT1_{n[4:]}_ROI' for n in NAMES],
           (err, result, os.listdir(folder) if os.path.isdir(folder) else None, names))
@@ -575,6 +576,10 @@ if selected('sd_zen_folder'):
           t_int is not None and result is None and not task.success and lines
           and lines[-1].endswith(' - Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
           (t_int, result, lines[-1:], run_log_handlers()))
+    check('(autofocus report) not made after an interrupt (no heatmap / summary / drift in the metadata folder)',
+          not any(os.path.exists(os.path.join(folder, n)) for n in ('autofocus_correlation_heatmap.png',
+                                                                   'ROI_probe_autofocus_summary.csv',
+                                                                   'autofocus_drift.png')), os.listdir(folder))
     end_state_ok('interrupt during hybridization (ZEN folder)', t0)
 
     # autofocus: reference count != ROI count -> the task stops before any hardware call, clear message
@@ -609,7 +614,36 @@ if selected('sd_zen_folder'):
           and scores is not None and scores.shape == (1, N) and not np.isnan(scores[0, 0]) and np.isnan(scores[0, 1])
           and lines and lines[-1].endswith('Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
           (err, rows, scores, lines[-1:]))
+    check('(autofocus report) made after an autofocus abort: heatmap, summary and drift figure in the metadata folder; '
+          'listed in the log',
+          all(os.path.isfile(os.path.join(folder, n)) for n in ('autofocus_correlation_heatmap.png',
+                                                               'ROI_probe_autofocus_summary.csv', 'autofocus_drift.png'))
+          and any(m.startswith('Autofocus report: autofocus_correlation_heatmap.png') for _, m in msgs),
+          os.listdir(folder) if os.path.isdir(folder) else None)
     end_state_ok('autofocus abort', t0)
+
+    # autofocus report failing: warning only, the cleanup goes on
+    original_report = him.autofocus_report.report_run
+
+    def broken_report(*args, **kwargs):
+        raise RuntimeError('report failure (test)')
+
+    him.autofocus_report.report_run = broken_report
+    try:
+        task, result, err, t0, _, server, local, *_ = zen_case('zen_report_error')
+    finally:
+        him.autofocus_report.report_run = original_report
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    folder = sd_folder(local, zen.created[-1])
+    lines = log_lines(folder)
+    check('(autofocus report) an exception in report_run -> warning "Autofocus report could not be created: ..."; run '
+          'completed, cleanup to the end (last log line), log file closed',
+          err is None and result and result['cycles_done'] == 1
+          and any(lvl == logging.WARNING and m.startswith('Autofocus report could not be created: ')
+                  and 'report failure (test)' in m for lvl, m in msgs)
+          and lines and lines[-1].endswith('Hi-M task ended after 1/1 cycle(s).') and not run_log_handlers(),
+          (err, [m for lvl, m in msgs if lvl >= logging.WARNING]))
+    end_state_ok('autofocus report failing', t0)
 
     # autofocus image of the first ROI created (empty) by ZEN before "ready", filled after the trigger
     zen_trigger.placeholder = True

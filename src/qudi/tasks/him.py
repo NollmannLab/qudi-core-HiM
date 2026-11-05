@@ -56,6 +56,7 @@ from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folde
 from qudi.tasks.common.data_transfer import DataTransfer
 from qudi.tasks.common.popups import show_warning_popup
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
+from qudi.util import autofocus_report
 from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
                                             set_metadata_field, write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
@@ -814,7 +815,11 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         counts and the experiment stops (error, cleanup as usual). The counter restarts at each cycle.
       - Files (metadata folder): autofocus_scores.csv (one row per check, written as the run goes),
         reference_images_<RT>.npy (end of each cycle), correlation.npy (cycles x ROIs, written by the
-        cleanup; NaN for the checks not done).
+        cleanup; NaN for the checks not done). Report (qudi.util.autofocus_report, written by the cleanup
+        after a normal end or an autofocus abort, not after an interrupt or another error; before the copy of
+        the metadata to the server): autofocus_correlation_heatmap.png (ROIs x probes),
+        ROI_probe_autofocus_summary.csv (one row per ROI / probe) and autofocus_drift.png (drift of the
+        autofocus images per ROI and cycle). An error while making the report is logged as a warning only.
 
     Online data transfer (experiment key transfer_data, TransferData_checkBox of the experiment configurator;
     common/data_transfer.py): copies to <save_network_path>/<ZEN folder name>/, in a background thread, so that
@@ -878,6 +883,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self.transfer_data = bool(params.get('transfer_data') or False)
         self._transfer = None          # DataTransfer to <save_network_path>/<ZEN folder name>
         self._run_completed = False    # True when _run ended normally (no interrupt, no error)
+        self._af_aborted = False       # True when the autofocus check stopped the experiment
         self._af_refs = None           # reference image of each ROI (n_rois, H, W)
         self._af_seen = set()          # autofocus images already used (empty at the start of the run)
         self._af_scores = None         # correlation.npy: cycles x ROIs
@@ -1027,7 +1033,9 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             self._transfer_pause()
 
     def _end_of_run_files(self) -> None:
-        """Cleanup, after the hardware reset: last acquisitions (normal end only), then the metadata files."""
+        """Cleanup, after the hardware reset: autofocus report (normal end or autofocus abort), then the last
+        acquisitions (normal end only) and the metadata files to the server."""
+        self._make_autofocus_report()
         if getattr(self, '_transfer', None) is None:
             return
         # a. normal end: the acquisitions of the last cycle
@@ -1059,6 +1067,18 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             self._transfer.flush(self.transfer_timeout)
         except Exception as err:
             self.log.error(f'Cleanup: transfer of the metadata: {err}')
+
+    def _make_autofocus_report(self) -> None:
+        """Autofocus report in the metadata folder (qudi.util.autofocus_report.report_run) after a normal end or an
+        autofocus abort; any error is logged as a warning only."""
+        if not (getattr(self, '_run_completed', False) or getattr(self, '_af_aborted', False)) \
+                or not getattr(self, 'directory', None):
+            return
+        try:
+            written = autofocus_report.report_run(self.directory, log=self.log)
+            self.log.info('Autofocus report: ' + ', '.join(os.path.basename(path) for path in written))
+        except Exception as err:
+            self.log.warning(f'Autofocus report could not be created: {err!r}')
 
     def _after_run_log_closed(self) -> None:
         """Cleanup, once HiM_task.log is closed: send it, stop the transfer, report the files not sent."""
@@ -1202,6 +1222,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
                        f'fraction {self.autofocus_min_fraction:.0%}. The Hi-M experiment is aborted.')
             self.log.error(message)
             # TODO: email alert to the user (legacy send_alert_email), not migrated yet
+            self._af_aborted = True  # the cleanup still makes the autofocus report
             raise RuntimeError(message)
 
     def _cleanup(self) -> None:

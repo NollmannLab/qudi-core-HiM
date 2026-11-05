@@ -1,6 +1,6 @@
 """Logic helpers: data folders defined in the logic modules (ROI lists, injections files), the random
 ROI list command-line helper (qudi.util.make_random_roi_list) and the local / server folder buttons of the
-experiment configurator.
+experiment configurator, and the autofocus report of Hi-M runs (qudi.util.autofocus_report).
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_logic_helpers.py [<repo_root>]
 Short settings: tests/_short.py (docs/TESTING.md).
@@ -494,10 +494,167 @@ def _section_folder_buttons():
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 
+# --- autofocus report (qudi.util.autofocus_report) ---
+def _section_autofocus_report():
+    """Autofocus report of Hi-M runs (qudi.util.autofocus_report): synthetic metadata folders (4 ROIs x 3 cycles) of
+    the qudi-core task (correlation.npy cycles x ROIs + autofocus_scores.csv) and of the legacy software (probes x
+    ROIs, no CSV), one run (report_run) and several runs (summarize_folder)."""
+    import csv, logging, os, tempfile
+    import numpy as np
+    import yaml
+    from qudi.util import autofocus_report as ar
+
+    results = []
+
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond)))
+        print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+
+    TMP = tempfile.mkdtemp()
+    LOGS = []
+
+    class H(logging.Handler):
+        def emit(self, r):
+            LOGS.append((r.levelno, r.getMessage()))
+
+    log = logging.getLogger('qudi.tests.autofocus_report')
+    log.setLevel(logging.INFO)
+    log.addHandler(H())
+    ROIS = ['ROI_000', 'ROI_001', 'ROI_002', 'ROI_003']
+
+    def run_folder(name, probes, corr, threshold=None, scores=None, rois=ROIS):
+        """<TMP>/<name>/metadata with HiM_parameters.yml, correlation.npy and (scores: list of rows)
+        autofocus_scores.csv."""
+        folder = os.path.join(TMP, name, 'metadata')
+        os.makedirs(folder)
+        params = {'1- global parameters': {'sample_name': 'S'}, '2- fluidic parameters': {'probes': probes},
+                  '4- ROIs': {roi: f'X={k} - Y=0 - Z=None' for k, roi in enumerate(rois)}}
+        if threshold is not None:
+            params['1- global parameters']['correlation_threshold'] = threshold
+        yaml.safe_dump(params, open(os.path.join(folder, 'HiM_parameters.yml'), 'w'), sort_keys=False)
+        np.save(os.path.join(folder, 'correlation.npy'), np.asarray(corr, dtype=float))
+        if scores is not None:
+            with open(os.path.join(folder, 'autofocus_scores.csv'), 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['cycle', 'RT', 'roi', 'score', 'shift_y_px', 'shift_x_px', 'passed'])
+                writer.writerows(scores)
+        return folder
+
+    def summary_rows(path):
+        return list(csv.DictReader(open(path, newline='')))
+
+    rng = np.random.default_rng(1)
+    corr_new = rng.uniform(0.6, 1.0, (3, 4))          # cycles x ROIs
+    cycle_rt = {1: 'RT3', 2: 'RT1', 3: 'RT2'}          # order of the run (RT column)
+    scores = [(c, cycle_rt[c], roi, f'{corr_new[c - 1, k]:.6f}', c * k, -c, True)
+              for c in (1, 2, 3) for k, roi in enumerate(ROIS)]
+    new = run_folder('new_run', {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_new, threshold=0.8, scores=scores)
+
+    seen = {}
+    original_heatmap = ar._heatmap
+
+    def spy_heatmap(corr, rois, labels, path, vmin, vmax, threshold, title):
+        seen.update(threshold=threshold, labels=list(labels), shape=corr.shape)
+        return original_heatmap(corr, rois, labels, path, vmin, vmax, threshold, title)
+
+    ar._heatmap = spy_heatmap
+    try:
+        written = ar.report_run(new, log=log)
+    finally:
+        ar._heatmap = original_heatmap
+    names = sorted(os.path.basename(p) for p in written)
+    rows = summary_rows(os.path.join(new, ar.SUMMARY_NAME))
+    check('(report_run, qudi-core run) writes the heatmap, the CSV and the drift figure in the metadata folder',
+          names == sorted([ar.HEATMAP_NAME, ar.SUMMARY_NAME, ar.DRIFT_NAME])
+          and all(os.path.getsize(p) > 0 for p in written), names)
+    check('(report_run) probe labels from the RT column of autofocus_scores.csv (RT3, RT1, RT2), not the probes dict '
+          'order; the threshold is read from the parameters (0.8); heatmap ROIs x probes',
+          seen.get('labels') == ['RT3', 'RT1', 'RT2'] and seen.get('threshold') == 0.8 and seen.get('shape') == (4, 3),
+          seen)
+    check('(report_run) CSV: one row per ROI / probe (experiment_folder, roi_name, probe_name, correlation), the '
+          'scores of correlation.npy',
+          len(rows) == 12 and list(rows[0]) == ['experiment_folder', 'roi_name', 'probe_name', 'correlation']
+          and rows[0]['roi_name'] == 'ROI_000' and rows[0]['probe_name'] == 'RT3'
+          and abs(float(rows[0]['correlation']) - corr_new[0, 0]) < 1e-12
+          and rows[0]['experiment_folder'] == os.path.join(TMP, 'new_run'), rows[:2])
+
+    # legacy run: probes x ROIs, no autofocus_scores.csv
+    LOGS.clear()
+    legacy = run_folder('legacy_run', {'2': 'RT2', '1': 'RT1', '3': 'RT3'}, rng.uniform(0.6, 1.0, (3, 4)))
+    written = ar.report_run(legacy, log=log)
+    rows = summary_rows(os.path.join(legacy, ar.SUMMARY_NAME))
+    check('(report_run, legacy run) heatmap and CSV, no drift figure; probes in key order (RT1, RT2, RT3) with a note '
+          'that the order is assumed; threshold 0.7 by default',
+          sorted(os.path.basename(p) for p in written) == sorted([ar.HEATMAP_NAME, ar.SUMMARY_NAME])
+          and not os.path.exists(os.path.join(legacy, ar.DRIFT_NAME))
+          and [r['probe_name'] for r in rows[:3]] == ['RT1', 'RT2', 'RT3']
+          and any('order assumed' in m for _, m in LOGS) and ar.load_run(legacy, log)['threshold'] is None,
+          (written, LOGS))
+
+    # aborted run: NaN for the checks not done
+    corr_abort = corr_new.copy()
+    corr_abort[1, 2:] = np.nan
+    corr_abort[2, :] = np.nan
+    aborted = run_folder('aborted_run', {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_abort, threshold=0.6,
+                         scores=[row for row in scores if row[0] == 1 or (row[0] == 2 and row[2] in ROIS[:2])])
+    try:
+        written = ar.report_run(aborted, log=log)
+        abort_err = None
+    except Exception as err:
+        written, abort_err = [], err
+    check('(report_run, aborted run with NaN) no error, heatmap / CSV / drift written (labels of the cycles without '
+          'any check from the probes)', abort_err is None and len(written) == 3
+          and all(os.path.isfile(p) for p in written), abort_err)
+
+    # label count mismatch
+    mismatch = run_folder('mismatch_run', {1: 'RT1', 2: 'RT2'}, rng.uniform(0.6, 1.0, (3, 4)))
+    try:
+        ar.report_run(mismatch, log=log)
+        mismatch_err = None
+    except ValueError as err:
+        mismatch_err = err
+    check('(report_run) 2 probe labels for 3 cycles -> clear ValueError', mismatch_err is not None
+          and '2 probe label(s) for the 3 cycle(s)' in str(mismatch_err), mismatch_err)
+
+    # several runs
+    root = os.path.join(TMP, 'experiment')
+    for k in (1, 2):
+        os.makedirs(os.path.join(root, f'run_{k}'))
+    run_a = run_folder(os.path.join('experiment', 'run_1'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_new, 0.8, scores)
+    run_b = run_folder(os.path.join('experiment', 'run_2'), {1: 'RT4', 2: 'RT5'}, rng.uniform(0.6, 1.0, (2, 4)), 0.8,
+                       [(c, f'RT{c + 3}', roi, '0.9', 0, 0, True) for c in (1, 2) for roi in ROIS])
+    LOGS.clear()
+    written = ar.summarize_folder(root, log=log)
+    rows = summary_rows(os.path.join(root, ar.SUMMARY_NAME))
+    check('(summarize_folder) two runs, same ROIs: one global heatmap and CSV in the root folder; 5 probes "<probe> | '
+          '<experiment folder>"; no warning',
+          sorted(written) == sorted([os.path.join(root, ar.HEATMAP_NAME), os.path.join(root, ar.SUMMARY_NAME)])
+          and all(os.path.isfile(p) for p in written) and len(rows) == 4 * 5
+          and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (written, len(rows), LOGS))
+    run_folder(os.path.join('experiment', 'run_3'), {1: 'RT6'}, rng.uniform(0.6, 1.0, (1, 4)))  # legacy score
+    LOGS.clear()
+    ar.summarize_folder(root, log=log)
+    check('(summarize_folder) runs with and without autofocus_scores.csv -> warning: the scores are not on the same scale',
+          any(lvl == logging.WARNING and 'not on the same scale' in m for lvl, m in LOGS), LOGS)
+    other = os.path.join(TMP, 'other_experiment')
+    run_folder(os.path.join('other_experiment', 'a'), {1: 'RT1'}, rng.uniform(0.6, 1.0, (1, 4)))
+    run_folder(os.path.join('other_experiment', 'b'), {1: 'RT1'}, rng.uniform(0.6, 1.0, (1, 3)), rois=ROIS[:3])
+    try:
+        ar.summarize_folder(other, log=log)
+        roi_err = None
+    except ValueError as err:
+        roi_err = err
+    check('(summarize_folder) runs with different ROIs -> ValueError (ROI mismatch)',
+          roi_err is not None and 'ROI mismatch' in str(roi_err), roi_err)
+    KEEP_ALIVE.append(locals())
+    return results
+
+
 SECTIONS = [
     ('data folders in the logic', _section_data_folders),
     ('random ROI list helper', _section_random_roi_list),
     ('configurator: local / server folder buttons', _section_folder_buttons),
+    ('autofocus report', _section_autofocus_report),
 ]
 
 if __name__ == '__main__':

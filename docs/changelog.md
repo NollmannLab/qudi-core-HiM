@@ -8,6 +8,34 @@ Last updated: 2026-11-05
 
 ### Tasks
 
+#### Added
+
+- Autofocus report of Hi-M runs on the spinning disk (2026-11-05).
+  - New `src/qudi/util/autofocus_report.py` (port of the standalone autofocus analysis script; matplotlib
+    `Figure` only, no pyplot / GUI backend, numpy + csv instead of pandas): `report_run(metadata_folder,
+    threshold=None, vmin=0.5, vmax=1.0)` writes `autofocus_correlation_heatmap.png` (ROIs x probes, ROIs whose
+    mean score is below the threshold between red lines, colour bar "Autofocus score"),
+    `ROI_probe_autofocus_summary.csv` (experiment_folder, roi_name, probe_name, correlation) and, with
+    `autofocus_scores.csv`, `autofocus_drift.png` (drift sqrt(dy^2 + dx^2) per ROI and cycle: heatmap, and drift
+    vs cycle with the median in bold); `summarize_folder(root_folder, ...)`: every run under a folder (same ROIs
+    required), probes labelled "<probe> | <experiment folder>", global heatmap and CSV, warning when runs with
+    and without `autofocus_scores.csv` (two different scores) are mixed. Command line:
+    `python -m qudi.util.autofocus_report <folder> [--all] [--threshold T] [--vmin V] [--vmax V]`.
+  - Inputs: `HiM_parameters.yml` (ROIs, probes, correlation_threshold - default 0.7), `correlation.npy`
+    (cycles / probes x ROIs, transposed when needed; NaN = check not done), `autofocus_scores.csv` (probe label of
+    each cycle from its RT column; legacy runs: probes in key order, with a note); a label count different from
+    the cycle count is an error. Rows of correlation.npy are taken as cycles first when the matrix is square (the
+    script assumed ROIs x probes in that case; both the task and the legacy software write cycles / probes x
+    ROIs).
+  - `HiMSDTask._cleanup`: report made after a normal end or an autofocus abort (flag set just before the
+    abort), not after an interrupt or another error; after correlation.npy and before the metadata are queued
+    for the server (figures copied too); an error is logged as a warning, the cleanup goes on.
+  - Tests: `tests/test_logic_helpers.py` section "autofocus report" (qudi-core / legacy / aborted runs, label
+    mismatch, several runs, ROI mismatch); `tests/test_him.py` (report after a normal end and an autofocus
+    abort, not after an interrupt, report error logged as a warning).
+
+### Tasks
+
 #### Fixed
 
 - Hi-M on the spinning disk: the autofocus check waited for ever on the first ROI (2026-11-05).
