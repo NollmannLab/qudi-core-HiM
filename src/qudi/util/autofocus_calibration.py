@@ -70,6 +70,7 @@ def replay(references, image_paths, threshold, read=read_autofocus_image, experi
     n = len(refs)
     rows = []
     for k, path in enumerate(image_paths):
+        print(f"Analyzing image #{k}/{len(image_paths)}")
         index = k % n
         image = read(path)
         score, shift_y, shift_x = autofocus_score(refs[index], image)
