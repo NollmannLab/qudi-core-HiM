@@ -300,10 +300,10 @@ class ZenTriggerLogic:
             k = len(self.written)
             self.written.append(_short.write_autofocus_image(self.zen.created[-1], k + 1,
                                                              self.images(k) if self.images else None))
-        else:  # acquisition block: the stack of the ROI (AcquisitionBlock3)
+        else:  # acquisition block: the stack of the ROI (AcquisitionBlock2)
             folder = os.path.join(self.zen.created[-1], 'acquisition')
             os.makedirs(folder, exist_ok=True)
-            path = os.path.join(folder, f'experiment_AcquisitionBlock3_pt{len(self.acquired) + 1}.czi')
+            path = os.path.join(folder, f'experiment_AcquisitionBlock2_pt{len(self.acquired) + 1}.czi')
             with open(path, 'wb') as f:
                 f.write(os.urandom(2048))
             self.acquired.append(path)
@@ -491,14 +491,15 @@ if selected('sd_zen_folder'):
 
     LOG_LINE = re.compile(r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ - [A-Za-z]+ - qudi\.\S+ - ')  # qudi: lower-case levels
 
-    def zen_case(name, interrupt_when=None, **extra):
+    def zen_case(name, interrupt_when=None, injections=None, **extra):
         server, local = os.path.join(TMP, f'server_{name}'), os.path.join(TMP, f'local_{name}')
         os.makedirs(server)
         os.makedirs(local)
         values = {'save_network_path': server, 'zen_saving_path': zen.root, 'zen_ref_images_path': zen_ref,
                   'correlation_threshold': 0.6, 'autofocus_min_fraction': _short.AUTOFOCUS_MIN_FRACTION}
         values.update(extra)
-        exp = files(one_probe, name, save_path=local, extra={k: v for k, v in values.items() if v is not None})
+        exp = files(injections or one_probe, name, save_path=local,
+                    extra={k: v for k, v in values.items() if v is not None})
         task = him.HiMSDTask()
         for k, v in _short.local_options(repo, ENTRY['options']).items():
             setattr(task, k, v)
@@ -747,7 +748,7 @@ if selected('sd_zen_folder'):
     acquired = [os.path.join(zen_name, os.path.relpath(p, zen.created[-1])) for p in zen_trigger.acquired[acquired_before:]]
     metadata = sorted(os.path.join(zen_name, 'metadata', f) for f in server_files(folder))  # recursive
     check(f'(transfer, server reachable) metadata folder local (<save_path>/<YYYY-MM-DD>/...); on the server '
-          f'<save_network_path>/<ZEN folder name>/: the {N} *_AcquisitionBlock3_pt*.czi with their relative path, '
+          f'<save_network_path>/<ZEN folder name>/: the {N} *_AcquisitionBlock2_pt*.czi with their relative path, '
           f'every metadata file incl. metadata/autofocus/ and HiM_task.log (metadata/...), no autofocus image '
           f'(Block1), no .part file',
           err is None and result and result['directory'] == folder and len(acquired) == N
@@ -760,6 +761,43 @@ if selected('sd_zen_folder'):
           and open(os.path.join(server, zen_name, 'metadata', 'HiM_parameters.yml'), 'rb').read()
           == open(os.path.join(folder, 'HiM_parameters.yml'), 'rb').read())
     end_state_ok('transfer, server reachable', t0)
+
+    # 2 cycles: server folder created early; the Block2 files of cycle 1 sent during the fluidics of cycle 2
+    two_probes = copy.deepcopy(EXAMPLE)
+    two_probes['probes'] = {1: 'RT1', 2: 'RT2'}
+    seen_at = {}
+    original_hyb, original_start = him.HiMSDTask._hybridization, him.HiMSDTask._start_autofocus_cycle
+
+    def spy_hyb(self, label, rt, tube, hyb_steps):
+        if rt not in seen_at:  # first hybridization step of the cycle: is the server folder there?
+            seen_at[rt] = {'server_folder': os.path.isdir(os.path.join(self.save_network_path, self._server_path()))}
+        return original_hyb(self, label, rt, tube, hyb_steps)
+
+    def spy_start(self, rt):  # start of the imaging of the cycle (after the pause of the transfer)
+        seen_at.setdefault(rt, {})['on_server'] = sorted(
+            f for d, _, fs in os.walk(self.save_network_path) for f in fs if 'AcquisitionBlock2' in f)
+        seen_at[rt]['acquired'] = [os.path.basename(p) for p in zen_trigger.acquired]
+        return original_start(self, rt)
+
+    him.HiMSDTask._hybridization, him.HiMSDTask._start_autofocus_cycle = spy_hyb, spy_start
+    acquired_before = len(zen_trigger.acquired)
+    try:
+        task, result, err, t0, _, server, local, *_ = zen_case('tr_two', transfer_data=True, injections=two_probes)
+    finally:
+        him.HiMSDTask._hybridization, him.HiMSDTask._start_autofocus_cycle = original_hyb, original_start
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    cycle1_files = [os.path.basename(p) for p in zen_trigger.acquired[acquired_before:acquired_before + N]]
+    check('(transfer, 2 cycles) the server folder <server>/<ZEN folder name>/ exists before the first fluidics step '
+          '(created by the transfer thread when the run folder is created; info logged)',
+          err is None and seen_at.get('RT1', {}).get('server_folder') is True
+          and any(m.startswith('Data transfer: server folder ') and m.endswith(' requested') for m in msgs),
+          (err, seen_at))
+    check(f'(transfer, 2 cycles) after the imaging of cycle 1 and the hybridization of cycle 2, the {N} Block2 files of '
+          f'cycle 1 are on the server (start of the imaging of cycle 2); each listing logged with the counts',
+          result and result['cycles_done'] == 2 and seen_at.get('RT2', {}).get('on_server') == sorted(cycle1_files)
+          and any(m.startswith('Data transfer: ') and 'acquisition file(s) (*_AcquisitionBlock2_pt*.czi)' in m
+                  and f', {N} newly queued, ' in m for m in msgs), (result, seen_at.get('RT2'), cycle1_files))
+    end_state_ok('transfer, 2 cycles', t0)
 
     popups = []
     original_popup = him.show_warning_popup
@@ -1369,6 +1407,69 @@ if selected('transfer'):
           raised is None and left is not None and len(left) == 5 and monotonic() - t0 < 3
           and any(lvl == logging.WARNING and m.startswith('Metadata copy: 5 of 5 file(s) not sent')
                   and m.endswith(f'they are in {meta_src}') for lvl, m in msgs), (raised, left, msgs[-2:]))
+
+    # HiMSDTask._queue_acquisitions: Block2 files only, the first N (acquisitions done) in pt order, logs
+    q_zen = os.path.join(TMP, 'q_zen', '2026-11-05_HiM_q')
+    os.makedirs(os.path.join(q_zen, 'acquisition'))
+    os.makedirs(os.path.join(q_zen, 'autofocus'))
+    for k in (5, 1, 4, 2, 3):  # created out of order
+        open(os.path.join(q_zen, 'acquisition', f'experiment_AcquisitionBlock2_pt{k}.czi'), 'wb').write(b'x' * k)
+    open(os.path.join(q_zen, 'autofocus', 'experiment_AcquisitionBlock1_pt1.czi'), 'wb').write(b'af')
+    q_task = him.HiMSDTask()
+    q_task.log.addHandler(H()) if not any(isinstance(h, H) for h in q_task.log.handlers) else None
+    q_task._zen_directory = q_zen
+    q_task._transfer = dt.DataTransfer(tr_log, os.path.join(TMP, 'q_server'))  # paused: files stay queued
+    q_task._acquisitions_done = 3
+    t0 = monotonic()
+    q_task._queue_acquisitions()
+    queued = [os.path.basename(p) for p in q_task._transfer.pending()]
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    check('(queue acquisitions) 3 acquisitions done, 5 Block2 files: only pt1..pt3 queued (pt order), no Block1 file; '
+          'info "5 acquisition file(s) (*_AcquisitionBlock2_pt*.czi) in <ZEN folder>, 3 newly queued, 3 waiting, 0 sent"',
+          sorted(queued) == [f'experiment_AcquisitionBlock2_pt{k}.czi' for k in (1, 2, 3)]
+          and (logging.INFO, f'Data transfer: 5 acquisition file(s) (*_AcquisitionBlock2_pt*.czi) in {q_zen}, 3 newly '
+                             f'queued, 3 waiting, 0 sent') in msgs, (queued, msgs))
+    q_task._acquisitions_done = 5
+    t0 = monotonic()
+    q_task._queue_acquisitions()
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    check('(queue acquisitions) 5 done: pt4 and pt5 added ("2 newly queued, 5 waiting"); files already queued are not '
+          'counted again', any(m.endswith(', 2 newly queued, 5 waiting, 0 sent') for m in msgs), msgs)
+    q_task._transfer.stop()
+    empty_zen = os.path.join(TMP, 'q_zen', 'empty')
+    os.makedirs(empty_zen)
+    q_task._zen_directory = empty_zen
+    q_task._transfer = dt.DataTransfer(tr_log, os.path.join(TMP, 'q_server'))
+    q_task._acquisitions_done = 2
+    t0 = monotonic()
+    q_task._queue_acquisitions()
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(queue acquisitions) 2 acquisitions done and no Block2 file: one warning "no ZEN acquisition file matches '
+          '... check the ZEN block numbers"',
+          warnings == [f'Data transfer: no ZEN acquisition file matches *_AcquisitionBlock2_pt*.czi in {empty_zen} '
+                       f'although 2 acquisition(s) were done - check the ZEN block numbers'], warnings)
+    q_task._transfer.stop()
+
+    # DataTransfer.make_dir: created by the thread; a failure only marks the server as down
+    md_root = os.path.join(TMP, 'md_server')
+    tr = dt.DataTransfer(tr_log, md_root)
+    t0 = monotonic()
+    tr.make_dir(os.path.join('2026-11-05_HiM_md'))
+    made = wait_until(lambda: os.path.isdir(os.path.join(md_root, '2026-11-05_HiM_md')), 3.0)
+    returned_at_once = monotonic() - t0
+    tr.stop()
+    blocked = os.path.join(TMP, 'md_file.txt')
+    open(blocked, 'w').close()
+    tr = dt.DataTransfer(tr_log, os.path.join(blocked, 'server'))
+    try:
+        tr.make_dir('x')
+        md_err = None
+    except Exception as exc:
+        md_err = exc
+    down = wait_until(lambda: not tr.server_ok, 3.0)
+    tr.stop()
+    check('(DataTransfer.make_dir) folder created by the transfer thread; a folder that cannot be created: no exception, '
+          'server marked as down', made and returned_at_once < 3.0 and md_err is None and down, (made, md_err, down))
 
 if ONLY:
     print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)

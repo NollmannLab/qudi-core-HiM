@@ -882,9 +882,14 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         _TRANSFER_TEST_S); if it fails, a warning pop-up and the experiment continues (the files go when the
         server is back; test every RETRY_PERIOD_S). The files go to <save_network_path>/<ZEN folder name>/,
         the ZEN folder name being known once ZEN is ready.
-      - Files sent during the run: the ZEN acquisitions *_AcquisitionBlock3_pt*.czi (recursive, same path
+      - Server folder <save_network_path>/<ZEN folder name>/ created by the transfer thread as soon as the ZEN
+        folder is known (DataTransfer.make_dir: no wait; a failure only marks the server as down).
+      - Files sent during the run: the ZEN acquisitions *_AcquisitionBlock2_pt*.czi (recursive, same path
         relative to the ZEN folder), listed at the start of the hybridization and of the photobleaching of each
-        cycle; copies only during the fluidics steps (hybridization; photobleaching + needle rinse). Before the
+        cycle and in the cleanup: sorted by their pt number, only the first N are queued (N = ZEN acquisitions
+        confirmed done in this run, counted when _image_roi returns), each listing logged (files found, newly
+        queued, waiting, sent; a warning when acquisitions were done but no file matches the pattern); copies
+        only during the fluidics steps (hybridization; photobleaching + needle rinse). Before the
         imaging of a cycle: pause, and wait for the copy in progress (at most transfer_timeout, not while the
         server is down). Other ZEN files (e.g. the autofocus images) are not sent.
       - Cleanup (after the hardware reset): normal end -> the last czi files are sent (flush, at most
@@ -912,7 +917,8 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     trigger_logic = Connector(interface='TriggerLogic')
 
     transfer_timeout = 300  # s, longest wait for the copies to the server (before an imaging, at the end of the run)
-    _TRANSFER_PATTERN = '*_AcquisitionBlock3_pt*.czi'  # ZEN acquisitions copied to the server during the run
+    _TRANSFER_PATTERN = '*_AcquisitionBlock2_pt*.czi'  # ZEN acquisitions copied to the server during the run
+    # (the autofocus images are *_AcquisitionBlock1_pt*.czi, not sent)
     _TRANSFER_TEST_S = 10   # first write test of the server folder
     _LOG_TRANSFER_S = 30    # copy of HiM_task.log at the end of the run
 
@@ -934,6 +940,7 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self.correlation_threshold = params.get('correlation_threshold')
         self.autofocus_min_fraction = params.get('autofocus_min_fraction')
         self.transfer_data = bool(params.get('transfer_data') or False)
+        self._acquisitions_done = 0    # ZEN acquisition blocks confirmed done in this run
         self.log.info(f'Autofocus image reader: {autofocus_check.reader_versions()}; single-thread read: '
                       f'{autofocus_check.single_thread_read_form()}; read and scored in a helper process')
         self._transfer = None          # DataTransfer to <save_network_path>/<ZEN folder name>
@@ -1004,6 +1011,15 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         (the image of the first ROI may already exist, still empty), empty score table."""
         self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
         directory = create_mirror_folder(self._data_root, self._zen_directory, self.log)
+        # online transfer: the server folder <save_network_path>/<ZEN folder name>/ created now by the transfer
+        # thread (no wait here; a failure marks the server as down)
+        if getattr(self, '_transfer', None) is not None:
+            try:
+                self._transfer.make_dir(self._server_path())
+                self.log.info(f'Data transfer: server folder {os.path.join(self.save_network_path, self._server_path())}'
+                              f' requested')
+            except Exception as err:  # the transfer never stops the experiment
+                self.log.warning(f'Data transfer: could not request the server folder: {err}')
         # server copy of the metadata announced now that the ZEN folder name is known
         if getattr(self, 'save_network_path', ''):
             self.log.info(f'Metadata will also be copied to '
@@ -1050,11 +1066,32 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         return os.path.join(os.path.basename(os.path.normpath(self._zen_directory)), *parts)
 
     def _queue_acquisitions(self) -> None:
-        """Queue the ZEN acquisitions (*_AcquisitionBlock3_pt*.czi) with their path relative to the ZEN folder."""
+        """Queue the ZEN acquisitions (_TRANSFER_PATTERN, recursive) of the ROIs already imaged: the matching files
+        sorted by their pt number, the first N only (N = acquisitions confirmed done in this run; a later file is
+        still being written by ZEN), with their path relative to the ZEN folder. One info line with the counts;
+        a warning when acquisitions were done but no file matches the pattern."""
         if getattr(self, '_transfer', None) is None or not getattr(self, '_zen_directory', None):
             return
-        for path in glob(os.path.join(self._zen_directory, '**', self._TRANSFER_PATTERN), recursive=True):
-            self._transfer.add(path, self._server_path(os.path.relpath(path, self._zen_directory)))
+        done = getattr(self, '_acquisitions_done', 0)
+        found = autofocus_check.sort_czi_paths(
+            glob(os.path.join(self._zen_directory, '**', self._TRANSFER_PATTERN), recursive=True))
+        if done > 0 and not found:
+            self.log.warning(f'Data transfer: no ZEN acquisition file matches {self._TRANSFER_PATTERN} in '
+                             f'{self._zen_directory} although {done} acquisition(s) were done - check the ZEN block '
+                             f'numbers')
+        new = 0
+        for path in found[:done]:
+            if self._transfer.add(path, self._server_path(os.path.relpath(path, self._zen_directory))):
+                new += 1
+        self.log.info(f'Data transfer: {len(found)} acquisition file(s) ({self._TRANSFER_PATTERN}) in '
+                      f'{self._zen_directory}, {new} newly queued, {self._transfer.pending_count} waiting, '
+                      f'{self._transfer.sent_count} sent')
+
+    def _image_roi(self, roi_name: str, file_name: str) -> None:
+        """Imaging of one ROI (SDImagingMixin), then one more ZEN acquisition counted as done (its file can be sent
+        to the server)."""
+        super()._image_roi(roi_name, file_name)
+        self._acquisitions_done = getattr(self, '_acquisitions_done', 0) + 1
 
     def _transfer_open(self) -> None:
         """Start of a fluidics step of the cycle: list the acquisitions, allow the copies."""

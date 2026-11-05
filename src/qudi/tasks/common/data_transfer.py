@@ -7,8 +7,11 @@ network operation (creating folders, the write test, copying, renaming) runs in 
 (threading.Thread + queue.Queue, daemon), inside try/except: the calling task thread never touches the
 server, so a server or network problem can never crash or block the task. Errors go to the task log.
 
-  - add(src_path, relative_dest): queue a file for <destination_root>/<relative_dest> (a file already queued,
-    being copied or sent is ignored); discard(src_paths): take files out of the queue.
+  - add(src_path, relative_dest) -> bool: queue a file for <destination_root>/<relative_dest> (a file already
+    queued, being copied or sent is ignored: False); discard(src_paths): take files out of the queue.
+  - pending_count / sent_count: number of files waiting (queued or being copied) / sent.
+  - make_dir(relative_dir): ask the thread to create <destination_root>/<relative_dir> (no wait, no exception
+    in the calling thread; a failure marks the server as down, as a failed copy).
   - allow() / pause(): files are copied only while the transfer is allowed (paused at creation); pause() does
     not interrupt a copy in progress.
   - server_ok: False after a failed copy or write test (one warning when the connection is lost, one info
@@ -80,19 +83,38 @@ class DataTransfer:
         self._idle = threading.Event()      # set while no copy is in progress
         self._idle.set()
         self._test_requests = queue.Queue()  # events of test() calls, answered by the thread
+        self._dir_requests = queue.Queue()   # folders to create (make_dir), relative to destination_root
         self._last_test = None
         self._current = None
         self._thread = threading.Thread(target=self._loop, name='data_transfer', daemon=True)
         self._thread.start()
 
     # ------------------------------------------------------------------ calling thread
-    def add(self, src_path, relative_dest) -> None:
-        """Queue src_path for <destination_root>/<relative_dest>; ignored when already queued or sent."""
+    def add(self, src_path, relative_dest) -> bool:
+        """Queue src_path for <destination_root>/<relative_dest>; ignored (False) when already queued or sent."""
         with self._lock:
             if src_path in self._queued or src_path in self._sent:
-                return
+                return False
             self._queued.add(src_path)
         self._queue.put((src_path, relative_dest))
+        self._wake.set()
+        return True
+
+    @property
+    def pending_count(self) -> int:
+        """Number of files queued or being copied."""
+        with self._lock:
+            return len(self._queued)
+
+    @property
+    def sent_count(self) -> int:
+        """Number of files sent."""
+        with self._lock:
+            return len(self._sent)
+
+    def make_dir(self, relative_dir) -> None:
+        """Ask the transfer thread to create <destination_root>/<relative_dir>; returns at once."""
+        self._dir_requests.put(str(relative_dir))
         self._wake.set()
 
     def allow(self) -> None:
@@ -187,6 +209,16 @@ class DataTransfer:
             self._reported_down = False
             self.log.info(f'Data transfer: server folder {self.destination_root} reachable again - transfer resumed')
 
+    def _make_dirs(self) -> None:
+        """Folders asked by make_dir; a failure marks the server as down (one warning)."""
+        while not self._dir_requests.empty():
+            relative_dir = self._dir_requests.get_nowait()
+            path = os.path.join(self.destination_root, relative_dir)
+            try:
+                os.makedirs(path, exist_ok=True)
+            except Exception as err:
+                self._set_server(False, f'could not create the folder {path}: {err}')
+
     def _write_test(self) -> bool:
         """Create destination_root, write and remove a small file there."""
         self._last_test = monotonic()
@@ -239,6 +271,8 @@ class DataTransfer:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
+                # folders asked by make_dir()
+                self._make_dirs()
                 # write tests asked by test()
                 while not self._test_requests.empty():
                     done, result = self._test_requests.get_nowait()

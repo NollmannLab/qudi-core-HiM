@@ -6,6 +6,30 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Hi-M SD online transfer: acquisitions never sent
+
+#### Fixed
+
+- No ZEN acquisition copied to the server during a Hi-M SD run with transfer_data on; the server folder
+  `<save_network_path>/<ZEN folder name>/` only appeared at the end, with the metadata (2026-11-05).
+  - Cause: `HiMSDTask._TRANSFER_PATTERN` was `*_AcquisitionBlock3_pt*.czi`, but the ZEN acquisitions are
+    `*_AcquisitionBlock2_pt*.czi` (autofocus images: `*_AcquisitionBlock1_pt*.czi`); nothing matched, nothing was
+    queued and nothing was logged. The tests' fake ZEN wrote Block3 files too, so they did not see it.
+  - Pattern `*_AcquisitionBlock2_pt*.czi` (docstrings, tests and the two transfer lines of this devlog corrected).
+  - Only the acquisitions of the ROIs already imaged are queued: `HiMSDTask._acquisitions_done` is incremented
+    when `_image_roi` returns; `_queue_acquisitions` sorts the matching files by pt number
+    (`autofocus_check.sort_czi_paths`) and queues the first N (start of each fluidics step and cleanup).
+  - Each listing logged: "Data transfer: <found> acquisition file(s) (<pattern>) in <ZEN folder>, <new> newly
+    queued, <pending> waiting, <sent> sent"; a warning when acquisitions were done but no file matches the
+    pattern ("... check the ZEN block numbers").
+  - The server folder is created as soon as the ZEN folder is known (`_create_data_folder`), by the transfer
+    thread (new `DataTransfer.make_dir(relative_dir)`: no wait, no exception; a failure marks the server as
+    down). `DataTransfer`: new read-only `pending_count` / `sent_count`; `add` returns True when the file was
+    queued.
+  - Tests (tests/test_him.py): queueing (Block2 only, first N in pt order, warning), make_dir, and a 2-cycle SD run
+    (server folder before the first fluidics step, cycle 1 files on the server at the start of the imaging of
+    cycle 2).
+
 ### Run files: autofocus subfolder, one score CSV, no experiment copy
 
 #### Changed
@@ -262,7 +286,7 @@ Last updated: 2026-11-05
     call when `save_network_path` is empty), new task option `transfer_timeout` (s, default 300). Before any
     hardware call: `DataTransfer` on `save_network_path` and a write test (10 s); if it fails, warning pop-up,
     the experiment continues. Files go to `<save_network_path>/<ZEN folder name>/`: the ZEN acquisitions
-    `*_AcquisitionBlock3_pt*.czi` (recursive, relative path kept), listed at the start of the hybridization and
+    `*_AcquisitionBlock2_pt*.czi` (recursive, relative path kept; Block3 at first, corrected 2026-11-05), listed at the start of the hybridization and
     of the photobleaching of each cycle, copied only during these fluidics steps (and the needle rinse);
     before the imaging: pause and wait for the copy in progress (at most `transfer_timeout`, not while the
     server is down). Cleanup, after the hardware reset: normal end -> last acquisitions; interrupt / error ->
@@ -272,7 +296,7 @@ Last updated: 2026-11-05
     log line) and `_after_run_log_closed` (after the log file is closed); dummy and RAMM unchanged.
   - `spinning_disk/him_epi.yaml`: `transfer_data` shown (was hidden, so always false).
   - Changes from the legacy (UploadDataWorker, launch_data_uploading, ...): files copied as they are (no
-    czi -> tif conversion, no renaming), acquisitions `*_AcquisitionBlock3_pt*.czi` (was AcquisitionBlock2),
+    czi -> tif conversion, no renaming), acquisitions `*_AcquisitionBlock2_pt*.czi` (as the legacy),
     write test of the destination instead of a ping to a fixed IP, failed files retried (the legacy disabled
     the transfer for the rest of the run after a 5 min timeout), metadata saved locally and copied only at the
     end, destination without a date folder.
