@@ -6,6 +6,44 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Sample tag, photobleaching imaging flag, metadata copy to the server
+
+#### Changed
+
+- Sample tag: letters and digits only (2026-11-05). `SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9]+$'` in the
+  configurator logic and in `roi_multicolour_scan.py` ('-' no longer accepted, e.g. "IF-2" is rejected);
+  messages, comments and the comments of the roi_multicolour_scan definitions updated; a test checks that the
+  two patterns are equal.
+- Metadata copied to the server when save_network_path is set (2026-11-05). The metadata are still written
+  locally first.
+  - `common/data_transfer.py`: `copy_metadata_to_server(log, local_metadata_dir, server_root, relative_dir,
+    timeout_s, exclude=())` - every file of the folder (recursive, except the names in exclude) to
+    `<server_root>/<relative_dir>/...` with a DataTransfer of its own, flush (at most timeout_s), thread stopped;
+    info with the number of files sent or a warning with the number not sent and the local folder; returns the
+    files not sent, never raises.
+  - `RoiScanSDTask`: with save_network_path, the destination `<save_network_path>/<ZEN folder name>/metadata`
+    is logged once the ZEN folder is known (no write test, no pop-up); `_cleanup` runs the cleanup of all setups
+    (hardware restore) and then, in all cases (normal end, interrupt, error) and only if the local metadata
+    folder exists, `copy_metadata_to_server` (`METADATA_COPY_TIMEOUT_S = 60`), in try/except.
+  - `HiMSDTask`: the metadata folder (then HiM_task.log, sent after its handler is closed) is copied whenever
+    save_network_path is set, with or without transfer_data; transfer_data now only controls the transfer of
+    the ZEN acquisition images during the fluidics steps. Same cleanup order (autofocus report first); without
+    transfer_data the DataTransfer is created only in the cleanup, for the metadata. Destination logged once
+    the ZEN folder is known.
+
+#### Added
+
+- Configurator field `photobleaching_imaging` (bool, check box `photobleaching_imaging_checkBox`, section
+  "documents" next to the injections file, hidden unless the definition declares it), logic
+  `update_photobleaching_imaging(state)`; declared (optional, default false) in spinning_disk/him_epi.yaml and
+  him_confocal.yaml. `HiMTaskBase` reads it (default False); True only gives the warning
+  "photobleaching_imaging is not implemented yet - ignored" at the start of the run (2026-11-05).
+- Tests: tag pattern cases and pattern equality, photobleaching_imaging in the configurator section of
+  tests/test_logic_helpers.py; copy_metadata_to_server (transfer block), photobleaching_imaging warning and the
+  metadata / log on the server without transfer_data (sd_zen_folder block) in tests/test_him.py; metadata on the
+  server after a normal end and an interrupt, server down, no copy without save_network_path in the run-folder
+  section of tests/test_roi_scan.py.
+
 ### Sample file
 
 #### Added

@@ -46,13 +46,14 @@ import yaml
 
 from qudi.core.connector import Connector
 from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder, local_dated_root
+from qudi.tasks.common.data_transfer import copy_metadata_to_server
 from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
                                             write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
 from qudi.tasks.common.sample_info import add_sample_to_run, optional_sample
 
-SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9-]+$'  # sample_tag: letters, digits and '-'
+SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9]+$'  # sample_tag: letters and digits only (same as the configurator logic)
 
 
 class RoiScanTaskBase(ProgressModuleTask):
@@ -69,7 +70,7 @@ class RoiScanTaskBase(ProgressModuleTask):
 
     User config file (user_config_path) expected keys:
         sample_name: 'Mysample'
-        sample_tag: 'DAPI'     # DAPI, RNA, IF or a free tag (letters, digits and '-') - folder/file naming only;
+        sample_tag: 'DAPI'     # DAPI, RNA, IF or a free tag (letters and digits only) - folder/file naming;
                                # former files with dapi / rna (no sample_tag): dapi -> DAPI, rna -> RNA,
                                # otherwise no tag (warning in the log)
         save_path: '/path/to/data'            # local folder (required)
@@ -359,7 +360,7 @@ class RoiScanTaskBase(ProgressModuleTask):
 
     def _read_sample_tag(self, user_param_dict) -> str:
         """Sample tag of the folder and file names (experiment key sample_tag), checked before any hardware call:
-        letters, digits and '-' only (no space, no '_': separator of the file names). Former experiment files
+        letters and digits only (no '-', no space, no '_': '_' separates the parts of the file names). Former experiment files
         without sample_tag: dapi True -> 'DAPI', rna True -> 'RNA', otherwise no tag (warning in the log).
         Raises ValueError for an invalid tag."""
         if 'sample_tag' not in user_param_dict:
@@ -370,8 +371,8 @@ class RoiScanTaskBase(ProgressModuleTask):
         tag = user_param_dict['sample_tag']
         tag = '' if tag is None else str(tag)
         if re.fullmatch(SAMPLE_TAG_PATTERN, tag) is None:
-            raise ValueError(f"Experiment file {self.user_config_path}: invalid sample_tag {tag!r} - only letters, "
-                             f"digits and '-' are allowed (no space, no '_').")
+            raise ValueError(f"Experiment file {self.user_config_path}: invalid sample_tag {tag!r} - only letters "
+                             f"and digits are allowed (no '-', no space, no '_').")
         return tag
 
     # ======================================================================================
@@ -431,7 +432,8 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
 
     Experiment file: save_path (local folder, required) and zen_saving_path (required: the folder where ZEN
     creates the data folder of the experiment; it must be an existing folder that can be listed - checked
-    before any hardware call). zen_saving_path is only read. save_network_path is not used on this setup.
+    before any hardware call). zen_saving_path is only read. save_network_path (optional): server folder that
+    receives a copy of the metadata folder at the end of the run (see below); the run folder stays local.
 
     ZEN settings check: before any hardware call, a modal box 'ZEN settings' (SDImagingMixin
     _confirm_zen_settings, shared with the Hi-M task) lists the ZEN settings to check in block 7 - the channels to select (the
@@ -450,6 +452,13 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     (metadata.yml then has the 'Sample' section). Nothing is written in the ZEN folder. self.prefix is the number of folders that were in zen_saving_path before ZEN started + 1, on 3
     digits; movie names scan_<prefix>_<sample_tag>_<roi number>_ROI (scan_<prefix>_<roi number>_ROI without tag).
 
+    Copy of the metadata to the server: with save_network_path set, once the ZEN folder is known an info
+    message gives the destination <save_network_path>/<ZEN folder name>/metadata (no write test, no pop-up).
+    At the end of _cleanup, after the hardware restore, in all cases (normal end, interrupt, error) and only
+    if the local metadata folder was created, the folder is copied there in the background
+    (common/data_transfer.py copy_metadata_to_server, at most METADATA_COPY_TIMEOUT_S): the task thread never
+    touches the server and a server problem only gives a warning (number of files not sent, local folder).
+
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
         roi_multicolour_scan:
@@ -466,6 +475,8 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     """
 
     trigger_logic = Connector(interface='TriggerLogic')
+
+    METADATA_COPY_TIMEOUT_S = 60  # s, longest wait for the copy of the metadata folder to the server
 
     def _confirm_before_start(self) -> bool:
         """ZEN settings box (SDImagingMixin._confirm_zen_settings) with loops = number of ROIs scanned in this
@@ -500,7 +511,31 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
         """<root>/<ZEN folder name>/metadata (create_mirror_folder); self.prefix = folders in zen_saving_path
         before ZEN started + 1, on 3 digits."""
         self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
-        return create_mirror_folder(self._data_root, self._zen_directory, self.log)
+        directory = create_mirror_folder(self._data_root, self._zen_directory, self.log)
+        # server copy announced now that the ZEN folder name is known (no write test, no pop-up)
+        if getattr(self, 'save_network_path', ''):
+            self.log.info(f'Metadata will also be copied to {self._server_metadata_dir()} at the end of the run')
+        return directory
+
+    def _server_metadata_dir(self) -> str:
+        """<save_network_path>/<ZEN folder name>/metadata."""
+        return os.path.join(self.save_network_path, self._server_relative_dir())
+
+    def _server_relative_dir(self) -> str:
+        return os.path.join(os.path.basename(os.path.normpath(self._zen_directory)), 'metadata')
+
+    def _cleanup(self) -> None:
+        """Cleanup of all setups (hardware restore first), then the copy of the metadata folder to the server."""
+        super()._cleanup()
+        # metadata to <save_network_path>/<ZEN folder name>/metadata: only with save_network_path and a local
+        # metadata folder; any failure is logged, the cleanup itself is already done
+        if not self.save_network_path or not getattr(self, 'directory', None) or not os.path.isdir(self.directory):
+            return
+        try:
+            copy_metadata_to_server(self.log, self.directory, self.save_network_path, self._server_relative_dir(),
+                                    self.METADATA_COPY_TIMEOUT_S)
+        except Exception as err:
+            self.log.warning(f'Cleanup: copy of the metadata to the server: {err!r}')
 
 
 class RoiScanRAMMTask(RAMMImagingMixin, RoiScanTaskBase):

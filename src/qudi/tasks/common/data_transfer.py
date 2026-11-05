@@ -27,6 +27,12 @@ source, os.replace to <dest>; a destination that already exists with the size of
 A file is marked sent only after os.replace succeeded. Any error: warning with the exception, <dest>.part
 removed if possible, the file is queued again and the server marked as down.
 
+copy_metadata_to_server(log, local_metadata_dir, server_root, relative_dir, timeout_s, exclude=()) -> list: copy
+of a local metadata folder at the end of a run (ROI scan on the spinning disk), with a DataTransfer of its own:
+every file (recursive, except the names in exclude) to <server_root>/<relative_dir>/<path relative to the
+folder>, flush (at most timeout_s), thread stopped; info with the number of files sent, or a warning with the
+number of files not sent and the local folder holding them. Returns the local paths not sent; never raises.
+
 Modified with Claude code (Anthropic)
 
 -----------------------------------------------------------------------------------
@@ -40,7 +46,7 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-__all__ = ['DataTransfer', 'RETRY_PERIOD_S']
+__all__ = ['DataTransfer', 'RETRY_PERIOD_S', 'copy_metadata_to_server']
 
 import os
 import queue
@@ -265,3 +271,40 @@ class DataTransfer:
                 except Exception:
                     pass
                 self._stop.wait(_IDLE_WAIT_S)
+
+
+def copy_metadata_to_server(log, local_metadata_dir, server_root, relative_dir, timeout_s, exclude=()) -> list:
+    """Copy local_metadata_dir to <server_root>/<relative_dir>/ in the background (see the module docstring):
+    every file except the names in exclude, with its path relative to the folder; wait at most timeout_s; the
+    calling thread never touches the server. Returns the local paths not sent; a server problem only gives
+    warnings."""
+    exclude = set(exclude)
+    paths = []
+    transfer = None
+    try:
+        # files of the local folder (recursive), excluded names left out
+        for folder, _, names in os.walk(local_metadata_dir):
+            for name in sorted(names):
+                if name not in exclude:
+                    paths.append(os.path.join(folder, name))
+        transfer = DataTransfer(log, server_root, timeout_s=timeout_s)
+        for path in paths:
+            transfer.add(path, os.path.join(relative_dir, os.path.relpath(path, local_metadata_dir)))
+        # copies allowed, waited for at most timeout_s (returns early when the server is down)
+        left = transfer.flush(timeout_s)
+    except Exception as err:
+        log.warning(f'Metadata copy to {server_root}: {err!r}')
+        left = list(transfer.pending()) if transfer is not None else paths
+    finally:
+        if transfer is not None:
+            try:
+                transfer.stop()
+            except Exception as err:
+                log.warning(f'Metadata copy: could not stop the transfer: {err!r}')
+    destination = os.path.join(str(server_root), str(relative_dir))
+    if left:
+        log.warning(f'Metadata copy: {len(left)} of {len(paths)} file(s) not sent to {destination} - they are in '
+                    f'{local_metadata_dir}')
+    else:
+        log.info(f'Metadata copy: {len(paths)} file(s) sent to {destination}')
+    return left

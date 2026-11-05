@@ -11,7 +11,7 @@ fields:
     required: true
     default: ""
 
-  # tag of the run folder and file names: DAPI, RNA, IF or a free tag (letters, digits and '-')
+  # tag of the run folder and file names: DAPI, RNA, IF or a free tag (letters and digits only)
   sample_tag:
     required: true
     default: "DAPI"

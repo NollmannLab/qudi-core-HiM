@@ -119,7 +119,9 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     save_network_path (server data folder, optional), sample_file (optional; required by the SD definitions:
     YAML describing the sample, tasks/common/sample_info.py; read before any hardware call, a missing or
     unreadable file is reported with the other problems; absent or empty: no sample file), and the keys read
-    by the subclass (_read_microscope_parameters).
+    by the subclass (_read_microscope_parameters). photobleaching_imaging (optional, default false; declared by
+    the SD definitions): image after the photobleaching - not implemented, True only gives the warning
+    "photobleaching_imaging is not implemented yet - ignored" at the start of the run.
 
     Data folder (all setups): <root>/YYYY_MM_DD/NNN_HiM_<sample_name>, created by qudi
     (tasks/common/data_folders.py); self.prefix = NNN. <root> is chosen before any hardware call
@@ -195,6 +197,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # HiM_parameters.yml and in metadata.yml only when it is one of these keys.
     _EXPERIMENT_KEYS = ('sample_name', 'roi_list_path', 'injections_path', 'imaging_sequence', 'num_z_planes',
                         'save_path')
+    PHOTOBLEACHING_IMAGING_WARNING = 'photobleaching_imaging is not implemented yet - ignored'
     _RINSE_TIMEOUT_MARGIN_S = 30.0  # the rinse must end within needle_rinsing_duration_s + this margin
     # problems of FluidicsStepsMixin._validate checked once for the whole experiment instead
     _SKIPPED_VALIDATION_PROBLEMS = ('robot origin', 'probe list is empty', 'probe injection(s) from tube')
@@ -222,6 +225,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self._data_root = None
         self._metadata_template = None
         self._sample = None  # sample file of the run (sample_info.SampleFile; None: no sample file)
+        self.photobleaching_imaging = False  # image after the photobleaching (not implemented)
         self.imaging_sequence = None
         self.num_z_planes = None
         self._valve = self._flow = self._robot = None
@@ -258,6 +262,10 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.num_z_planes = params.get('num_z_planes') if self._uses_z_planes() else None
         self.save_path = params.get('save_path')
         self.save_network_path = params.get('save_network_path') or ''
+        # image after the photobleaching (optional key photobleaching_imaging): not implemented, only a warning
+        self.photobleaching_imaging = bool(params.get('photobleaching_imaging') or False)
+        if self.photobleaching_imaging:
+            self.log.warning(self.PHOTOBLEACHING_IMAGING_WARNING)
         # sample file (optional key sample_file): read before any hardware call, copied with the run files
         try:
             self._sample = optional_sample(params.get('sample_file'))
@@ -837,9 +845,17 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         ROI_probe_autofocus_summary.csv (one row per ROI / probe) and autofocus_drift.png (drift of the
         autofocus images per ROI and cycle). An error while making the report is logged as a warning only.
 
+    Copy of the metadata to the server: whenever save_network_path is set (with or without transfer_data), the
+    metadata folder is copied to <save_network_path>/<ZEN folder name>/metadata by the cleanup, after the
+    hardware reset and the autofocus report, in all cases (normal end, interrupt, error) once the folder exists;
+    HiM_task.log is sent last, after its handler is closed. Without transfer_data the background helper
+    (common/data_transfer.py) is created only in the cleanup, for these files. The destination is logged once
+    the ZEN folder is known. A server problem only gives warnings.
+
     Online data transfer (experiment key transfer_data, TransferData_checkBox of the experiment configurator;
-    common/data_transfer.py): copies to <save_network_path>/<ZEN folder name>/, in a background thread, so that
-    a server or network problem never stops or blocks the experiment.
+    common/data_transfer.py): copies of the ZEN acquisition images to <save_network_path>/<ZEN folder name>/
+    during the fluidics steps, in a background thread, so that a server or network problem never stops or
+    blocks the experiment.
       - transfer_data with an empty save_network_path: error before any hardware call. Then, still before any
         hardware call, the transfer is started on save_network_path with a write test (at most
         _TRANSFER_TEST_S); if it fails, a warning pop-up and the experiment continues (the files go when the
@@ -851,9 +867,9 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         imaging of a cycle: pause, and wait for the copy in progress (at most transfer_timeout, not while the
         server is down). Other ZEN files (e.g. the autofocus images) are not sent.
       - Cleanup (after the hardware reset): normal end -> the last czi files are sent (flush, at most
-        transfer_timeout); interrupt / error -> no czi file (left for a manual copy); in all cases the files of
-        the metadata folder except the log (as metadata/...), then HiM_task.log once closed. Files not sent:
-        one warning with their number and local paths.
+        transfer_timeout); interrupt / error -> no czi file (left for a manual copy); then the metadata as
+        above (metadata/..., HiM_task.log once closed), with the same helper. Files not sent: one warning with
+        their number and local paths.
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -965,6 +981,10 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         table."""
         self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
         directory = create_mirror_folder(self._data_root, self._zen_directory, self.log)
+        # server copy of the metadata announced now that the ZEN folder name is known
+        if getattr(self, 'save_network_path', ''):
+            self.log.info(f'Metadata will also be copied to '
+                          f'{os.path.join(self.save_network_path, self._server_path("metadata"))} at the end of the run')
         np.save(os.path.join(directory, autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
         self._af_seen = set()  # empty: the image file of the first ROI is created by ZEN before "ready"
         self._af_scores = np.full((len(self._cycles), len(self.roi_names)), np.nan)
@@ -1049,30 +1069,38 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             self._transfer_pause()
 
     def _end_of_run_files(self) -> None:
-        """Cleanup, after the hardware reset: autofocus report (normal end or autofocus abort), then the last
-        acquisitions (normal end only) and the metadata files to the server."""
+        """Cleanup, after the hardware reset: autofocus report (normal end or autofocus abort), then, with
+        transfer_data, the last acquisitions (normal end only), and, whenever save_network_path is set, the
+        metadata files to the server."""
         self._make_autofocus_report()
+        if getattr(self, '_transfer', None) is not None:
+            # a. normal end: the acquisitions of the last cycle
+            if self._run_completed:
+                try:
+                    self._queue_acquisitions()
+                    self._transfer.flush(self.transfer_timeout)
+                except Exception as err:
+                    self.log.error(f'Cleanup: transfer of the acquisitions: {err}')
+            # b. interrupt / error: the acquisitions stay local (manual copy)
+            else:
+                try:
+                    skipped = self._transfer.discard([p for p in self._transfer.pending()
+                                                      if p.startswith(self._zen_directory)])
+                    self.log.info(f'Data transfer: run not completed - the ZEN acquisitions are not sent '
+                                  f'({len(skipped)} queued file(s) left); copy them from {self._zen_directory}')
+                except Exception as err:
+                    self.log.error(f'Cleanup: data transfer: {err}')
+        # c. the metadata folder, except the log: whenever save_network_path is set (none when the run stopped
+        #    before the ZEN folder was known)
+        if not getattr(self, 'directory', None) or not getattr(self, 'save_network_path', ''):
+            return
         if getattr(self, '_transfer', None) is None:
-            return
-        # a. normal end: the acquisitions of the last cycle
-        if self._run_completed:
+            # transfer_data off: the background helper is created now, for the metadata only (no write test)
             try:
-                self._queue_acquisitions()
-                self._transfer.flush(self.transfer_timeout)
+                self._transfer = DataTransfer(self.log, self.save_network_path, timeout_s=self.transfer_timeout)
             except Exception as err:
-                self.log.error(f'Cleanup: transfer of the acquisitions: {err}')
-        # b. interrupt / error: the acquisitions stay local (manual copy)
-        else:
-            try:
-                skipped = self._transfer.discard([p for p in self._transfer.pending()
-                                                  if p.startswith(self._zen_directory)])
-                self.log.info(f'Data transfer: run not completed - the ZEN acquisitions are not sent ({len(skipped)} '
-                              f'queued file(s) left); copy them from {self._zen_directory}')
-            except Exception as err:
-                self.log.error(f'Cleanup: data transfer: {err}')
-        # c. the metadata folder, except the log (none when the run stopped before the ZEN folder was known)
-        if not self.directory:
-            return
+                self.log.error(f'Cleanup: transfer of the metadata: {err}')
+                return
         try:
             log_path = os.path.join(self.directory, self._LOG_FILE_NAME)
             for folder, _, names in os.walk(self.directory):
@@ -1097,7 +1125,8 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
             self.log.warning(f'Autofocus report could not be created: {err!r}')
 
     def _after_run_log_closed(self) -> None:
-        """Cleanup, once HiM_task.log is closed: send it, stop the transfer, report the files not sent."""
+        """Cleanup, once HiM_task.log is closed: send it, stop the transfer, report the files not sent (only when a
+        transfer exists: transfer_data, or save_network_path with a metadata folder)."""
         if getattr(self, '_transfer', None) is None:
             return
         left = []

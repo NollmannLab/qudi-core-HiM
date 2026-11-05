@@ -30,6 +30,11 @@ fields:
     required: true
     default: ""
 
+  # image after the photobleaching (photobleaching_imaging_checkBox) - not implemented in the task yet
+  photobleaching_imaging:
+    required: false
+    default: false
+
   dapi_path:
     required: true
     default: ""

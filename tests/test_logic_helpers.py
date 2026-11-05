@@ -581,18 +581,24 @@ def _section_sample_tag():
     check('Free: line edit shown and enabled; typed tag stored in the configuration',
           free_on and logic.config_dict.get('sample_tag') == 'RT1' and combo.currentText() == 'Free',
           logic.config_dict.get('sample_tag'))
-    edit.setText('DAPI-2'); app.processEvents()
-    check("free tag 'DAPI-2' typed letter by letter keeps 'Free' selected",
-          combo.currentText() == 'Free' and edit.text() == 'DAPI-2' and logic.config_dict.get('sample_tag') == 'DAPI-2')
+    edit.setText('DAPI2'); app.processEvents()
+    check("free tag 'DAPI2' typed letter by letter keeps 'Free' selected",
+          combo.currentText() == 'Free' and edit.text() == 'DAPI2' and logic.config_dict.get('sample_tag') == 'DAPI2')
     combo.setCurrentText('IF'); app.processEvents()
     check('IF: stored, line edit hidden and disabled',
           logic.config_dict.get('sample_tag') == 'IF' and not shown(edit) and not edit.isEnabled())
     validator = edit.validator()
     accept = QtGui.QValidator.State.Acceptable
-    states = {t: validator.validate(t, 0)[0] for t in ('RT 1', 'RT_1', 'RT1', 'IF-2')}
-    check("validator: rejects 'RT 1' and 'RT_1', accepts 'RT1' and 'IF-2'",
-          states['RT 1'] != accept and states['RT_1'] != accept and states['RT1'] == accept and states['IF-2'] == accept,
+    states = {t: validator.validate(t, 0)[0] for t in ('RT 1', 'RT_1', 'IF-2', 'RT1', 'IF')}
+    check("validator: rejects 'RT 1', 'RT_1' and 'IF-2', accepts 'RT1' and 'IF'",
+          all(states[t] != accept for t in ('RT 1', 'RT_1', 'IF-2')) and states['RT1'] == accept and states['IF'] == accept,
           states)
+    from qudi.tasks import roi_multicolour_scan
+    check('tag pattern of the configurator logic == tag pattern of the ROI scan task',
+          logic.SAMPLE_TAG_PATTERN == roi_multicolour_scan.SAMPLE_TAG_PATTERN == r'^[A-Za-z0-9]+$')
+    check("logic is_valid_sample_tag: 'RT1', 'IF' valid; 'IF-2', 'RT_1', 'RT 1', '' invalid",
+          all(logic.is_valid_sample_tag(t) for t in ('RT1', 'IF'))
+          and not any(logic.is_valid_sample_tag(t) for t in ('IF-2', 'RT_1', 'RT 1', '')))
     logic.update_sample_tag('RNA')
     check('logic update_sample_tag stores the tag; GUI follows', logic.config_dict.get('sample_tag') == 'RNA'
           and combo.currentText() == 'RNA')
@@ -600,10 +606,10 @@ def _section_sample_tag():
     # ------------------------------------------------------------------ save
     out = os.path.join(TMP, 'out')
     # other required fields filled: only the sample tag decides
-    for required in ('sample_name', 'roi_list_path', 'zen_saving_path', 'save_path'):
+    for required in ('sample_name', 'roi_list_path', 'zen_saving_path', 'save_path', 'sample_file'):
         logic.config_dict[required] = logic.config_dict.get(required) or TMP
     logic.config_dict['imaging_sequence'] = logic.config_dict.get('imaging_sequence') or [['488 nm', 10.0]]
-    for bad in ('', 'RT_1', 'RT 1'):
+    for bad in ('', 'RT_1', 'RT 1', 'IF-2'):
         LOGS.clear(); logic.update_sample_tag(bad)
         logic.save_to_exp_config_file(out, 'roi_multicolor_scan', filename='bad.yml')
         errors = [m for lvl, m in LOGS if lvl >= logging.ERROR and 'not saved' in m]
@@ -745,6 +751,29 @@ def _section_sample_file():
     for exp, visible in (('roi_multicolor_scan', True), ('him_epi_sd', True), ('photobleaching', False)):
         gui.start_new_experiment_config(exp); app.processEvents()
         check(f'({exp}) sample file widgets {"shown" if visible else "hidden"}', all(shown(w) == visible for w in widgets))
+    # photobleaching_imaging (check box 'Acquire image after photobleaching?'): declared by the SD Hi-M definition only
+    pb_box = mw.photobleaching_imaging_checkBox
+    shown_for = {}
+    for exp in ('roi_multicolor_scan', 'him_epi_sd', 'photobleaching'):
+        gui.start_new_experiment_config(exp); app.processEvents()
+        shown_for[exp] = shown(pb_box)
+    check('photobleaching_imaging_checkBox shown only for him_epi_sd (definition declaring photobleaching_imaging)',
+          shown_for == {'roi_multicolor_scan': False, 'him_epi_sd': True, 'photobleaching': False}, shown_for)
+    gui.start_new_experiment_config('him_epi_sd'); app.processEvents()
+    default = logic.config_dict.get('photobleaching_imaging')
+    pb_box.setChecked(True); app.processEvents()
+    from_box = logic.config_dict.get('photobleaching_imaging')
+    logic.update_photobleaching_imaging(0)
+    from_state = logic.config_dict.get('photobleaching_imaging')
+    check('(him_epi_sd) default False; check box -> True (bool); update_photobleaching_imaging(Qt state 0) -> False, '
+          'box follows', default is False and from_box is True and from_state is False and not pb_box.isChecked(),
+          (default, from_box, from_state))
+    pb_file = os.path.join(TMP, 'him_pb.yml')
+    yaml.safe_dump({'experiment': 'him_epi_sd', 'photobleaching_imaging': True}, open(pb_file, 'w'))
+    logic.load_config_file(pb_file); app.processEvents()
+    check('loading an experiment file with photobleaching_imaging: true checks the box',
+          pb_box.isChecked() and logic.config_dict.get('photobleaching_imaging') is True and shown(pb_box))
+
     gui.start_new_experiment_config('roi_multicolor_scan'); app.processEvents()
     logic.update_sample_file(path)
     check('update_sample_file stores the path; the line edit follows', logic.config_dict.get('sample_file') == path

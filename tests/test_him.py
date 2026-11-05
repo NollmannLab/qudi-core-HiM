@@ -518,10 +518,15 @@ if selected('sd_zen_folder'):
                  if p.startswith(zen_folder)]
     zen_name = os.path.basename(zen_folder)
     check('(ZEN folder) nothing created or modified in the ZEN saving folder by qudi (only the ZEN folder and the '
-          'images the fake ZEN saved); nothing on the server (no transfer)',
+          'images the fake ZEN saved); transfer_data off + save_network_path: only the metadata folder and the log '
+          'copied to <server>/<ZEN folder name>/metadata at the end, no image',
           zen.tree() == sorted(tree_before + [zen_name, os.path.join(zen_name, 'autofocus'),
                                               os.path.join(zen_name, 'acquisition')] + zen_files)
-          and len(zen_files) == 2 * N and os.listdir(server) == [], (zen.tree(), os.listdir(server)))
+          and len(zen_files) == 2 * N and os.listdir(server) == [zen_name]
+          and os.listdir(os.path.join(server, zen_name)) == ['metadata']
+          and sorted(os.listdir(os.path.join(server, zen_name, 'metadata'))) == sorted(os.listdir(folder))
+          and open(os.path.join(server, zen_name, 'metadata', 'HiM_task.log'), 'rb').read()
+          == open(os.path.join(folder, 'HiM_task.log'), 'rb').read(), (zen.tree(), os.listdir(server)))
     lines = log_lines(folder)
     plan = [k for k, l in enumerate(lines) if ' - qudi.tasks.him.HiMSDTask - ' in l and 'ZEN: select the channels' in l]
     hardware = [k for k, l in enumerate(lines) if 'Waiting for ZEN to signal' in l or 'Triggering ZEN' in l
@@ -562,6 +567,16 @@ if selected('sd_zen_folder'):
     check('(sample file missing) reported with the other problems, before any hardware call',
           err is not None and 'Hi-M task not started' in str(err) and missing_sample in str(err)
           and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+
+    # (3b) photobleaching_imaging true: not implemented, one warning at the start (run stopped here before any
+    #      hardware call by a missing zen_saving_path, to keep the case short)
+    task, result, err, t0, *_ = zen_case('zen_pb_imaging', photobleaching_imaging=True, zen_saving_path=None)
+    pb_warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING
+                   and m == 'photobleaching_imaging is not implemented yet - ignored']
+    check('(photobleaching_imaging true) warning "photobleaching_imaging is not implemented yet - ignored" once at the '
+          'start; flag read as True', len(pb_warnings) == 1 and task.photobleaching_imaging is True, (pb_warnings, err))
+    check('(photobleaching_imaging absent) no such warning in the normal run above',
+          not any(m == 'photobleaching_imaging is not implemented yet - ignored' for t, lvl, m in LOGS if t < t0))
 
     # (4) zen_saving_path missing / not a folder -> error before any hardware call
     for label, value, fragment in (('missing', None, "'zen_saving_path' missing"),
@@ -1102,6 +1117,40 @@ if selected('transfer'):
     release.set()
     dt.shutil.copyfile = real_copy
     tr.stop()
+
+    # copy_metadata_to_server: relative paths kept, excluded names left out, server down -> files not sent
+    meta_src, meta_paths, server = tr_files('meta', n=3)
+    open(os.path.join(meta_src, 'HiM_task.log'), 'w').write('log\n')
+    open(os.path.join(meta_src, 'metadata.yml'), 'w').write('Time: now\n')
+    t0 = monotonic()
+    left = dt.copy_metadata_to_server(tr_log, meta_src, server, os.path.join('zen_exp', 'metadata'), 5,
+                                      exclude=('HiM_task.log',))
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    check('(copy_metadata_to_server) every file under <server>/<relative_dir>/ with its relative path, excluded name '
+          'not copied, same content; info with the number of files sent; returns []',
+          left == [] and tree_of(os.path.join(server, 'zen_exp', 'metadata'))
+          == sorted(['metadata.yml'] + [os.path.join('sub', f'file_{k}.bin') for k in range(3)])
+          and open(os.path.join(server, 'zen_exp', 'metadata', 'sub', 'file_2.bin'), 'rb').read()
+          == open(meta_paths[2], 'rb').read()
+          and any(m.startswith('Metadata copy: 4 file(s) sent to') for m in msgs), (left, tree_of(server), msgs))
+
+    def failing_copy(*args, **kwargs):
+        raise OSError('server down (test)')
+    dt.shutil.copyfile = failing_copy
+    t0 = monotonic()
+    try:
+        left = dt.copy_metadata_to_server(tr_log, meta_src, os.path.join(TMP, 'tr_server_down'), 'zen/metadata', 2)
+        raised = None
+    except Exception as err:
+        left, raised = None, err
+    finally:
+        dt.shutil.copyfile = real_copy
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    check('(copy_metadata_to_server) server down (copy raising): no exception, the 5 local files returned as not sent, '
+          'warning with their number and the local folder, within the timeout',
+          raised is None and left is not None and len(left) == 5 and monotonic() - t0 < 3
+          and any(lvl == logging.WARNING and m.startswith('Metadata copy: 5 of 5 file(s) not sent')
+                  and m.endswith(f'they are in {meta_src}') for lvl, m in msgs), (raised, left, msgs[-2:]))
 
 if ONLY:
     print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)

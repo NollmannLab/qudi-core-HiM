@@ -240,7 +240,7 @@ class ExpConfigLogic(LogicBase):
     # sample tag of the ROI scan (experiment key sample_tag): one of these items, or a free tag
     SAMPLE_TAG_ITEMS = ('DAPI', 'RNA', 'IF')
     SAMPLE_TAG_FREE = 'Free'
-    SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9-]+$'  # letters, digits and '-' (no space, no '_': file name separator)
+    SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9]+$'  # letters and digits only (no '-', no space, no '_': file name separator)
 
     # attributes
     _experiment_definitions = {}
@@ -643,7 +643,7 @@ class ExpConfigLogic(LogicBase):
         if "sample_tag" in fields and not self.is_valid_sample_tag(self.config_dict.get("sample_tag")):
             self.log.error(
                 f"Experiment configuration not saved. Invalid sample_tag {self.config_dict.get('sample_tag')!r}: "
-                f"only letters, digits and '-' are allowed (no space, no '_').")
+                f"only letters and digits are allowed (no '-', no space, no '_').")
             return
 
         saved_config = {"experiment": experiment,}
@@ -715,7 +715,7 @@ class ExpConfigLogic(LogicBase):
 
     @classmethod
     def is_valid_sample_tag(cls, tag) -> bool:
-        """True for a non-empty tag of letters, digits and '-'."""
+        """True for a non-empty tag of letters and digits only."""
         return isinstance(tag, str) and re.fullmatch(cls.SAMPLE_TAG_PATTERN, tag) is not None
 
     def _sample_tag_from_old_keys(self, loaded_config, path) -> None:
@@ -733,6 +733,14 @@ class ExpConfigLogic(LogicBase):
                          f"{self.config_dict.get('sample_tag')!r}. Save the configuration again to update the file.")
 
     @QtCore.Slot(int)
+    def update_photobleaching_imaging(self, state):
+        """Store the 'acquire an image after the photobleaching' flag (Hi-M; a Qt check state or a bool) as a bool
+        and notify listeners."""
+        if not isinstance(state, bool) and isinstance(state, int):
+            state = state == 2  # Enum Qt::CheckState Checked = 2
+        self.config_dict['photobleaching_imaging'] = bool(state)
+        self.sigConfigDictUpdated.emit()
+
     def update_data_transfer(self, state):
         """Convert a Qt check state to the data-transfer flag and notify listeners."""
         if state == 2:  # Enum Qt::CheckState Checked = 2

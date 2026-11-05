@@ -202,6 +202,7 @@ class ExpConfiguratorGUI(GuiBase):
         "roi_list_path": "documents",
         "injections_path": "documents",
         "dapi_path": "documents",
+        "photobleaching_imaging": "documents",
 
         "illumination_time": "prebleaching",
 
@@ -320,6 +321,10 @@ class ExpConfiguratorGUI(GuiBase):
             "roi_list_path_Label",
             "roi_list_path_LineEdit",
             "load_roi_PushButton",
+        ),
+
+        "photobleaching_imaging": (
+            "photobleaching_imaging_checkBox",
         ),
 
         "injections_path": (
@@ -475,7 +480,7 @@ class ExpConfiguratorGUI(GuiBase):
 
         self._mw.sample_name_LineEdit.textChanged.connect(self._exp_logic.update_sample_name)
         self._mw.mail_LineEdit.textChanged.connect(self._exp_logic.update_mail_address)
-        # sample tag: DAPI / RNA / IF, or Free with a tag typed in the line edit (letters, digits, '-')
+        # sample tag: DAPI / RNA / IF, or Free with a tag typed in the line edit (letters and digits only)
         if self._mw.sample_tag_comboBox.count() == 0:
             self._mw.sample_tag_comboBox.addItems(list(self._exp_logic.SAMPLE_TAG_ITEMS)
                                                   + [self._exp_logic.SAMPLE_TAG_FREE])
@@ -492,6 +497,7 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.sample_prep_edit_pushButton.setToolTip('Create or edit the sample file')
         self._sample_dialog = None
         self._mw.TransferData_checkBox.stateChanged.connect(self._exp_logic.update_data_transfer)
+        self._mw.photobleaching_imaging_checkBox.stateChanged.connect(self._photobleaching_imaging_changed)
         self._mw.select_camera_comboBox.currentTextChanged.connect(self._exp_logic.update_camera)
         self._mw.exposure_DSpinBox.valueChanged.connect(self._exp_logic.update_exposure)
         self._mw.gain_SpinBox.valueChanged.connect(self._exp_logic.update_gain)
@@ -940,6 +946,9 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.injections_list_LineEdit.setVisible(visible)
         self._mw.load_injections_PushButton.setVisible(visible)
 
+        # image after the photobleaching (Hi-M): shown only when the definition declares photobleaching_imaging
+        self._mw.photobleaching_imaging_checkBox.setVisible(False)
+
         # the following items were used for Bokeh - DEPRECATED
         self._mw.dapi_path_Label.setVisible(False)
         self._mw.dapi_data_LineEdit.setVisible(False)
@@ -1123,6 +1132,10 @@ class ExpConfiguratorGUI(GuiBase):
         if this_dir:
             self._mw.Zen_saving_folder_lineEdit.setText(this_dir)
 
+    def _photobleaching_imaging_changed(self, *_args) -> None:
+        """Check box 'Acquire image after photobleaching?' -> logic (bool)."""
+        self._exp_logic.update_photobleaching_imaging(self._mw.photobleaching_imaging_checkBox.isChecked())
+
     def _update_sample_tag_line_edit(self) -> None:
         """The free-tag line edit is enabled, and visible with the other sample tag widgets, only when 'Free' is
         selected."""
@@ -1146,7 +1159,7 @@ class ExpConfiguratorGUI(GuiBase):
         tag = str(tag)
         free = self._exp_logic.SAMPLE_TAG_FREE
         if self._mw.sample_tag_comboBox.currentText() == free and self._mw.sample_tag_lineEdit.text() == tag:
-            pass  # free tag being typed (e.g. 'DAPI-2' passes through 'DAPI'): keep 'Free' selected
+            pass  # free tag being typed (e.g. 'DAPI2' passes through 'DAPI'): keep 'Free' selected
         elif tag in self._exp_logic.SAMPLE_TAG_ITEMS:
             self._mw.sample_tag_comboBox.setCurrentText(tag)
         else:
@@ -1261,6 +1274,8 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.save_path_LineEdit.setText(self._exp_logic.config_dict.get('save_path', ''))
             self._mw.save_network_path_LineEdit.setText(self._exp_logic.config_dict.get('save_network_path', ''))
             self._mw.TransferData_checkBox.setChecked(self._exp_logic.config_dict.get('transfer_data', False))
+            self._mw.photobleaching_imaging_checkBox.setChecked(
+                bool(self._exp_logic.config_dict.get('photobleaching_imaging', False)))
             self._mw.fileformat_ComboBox.setCurrentText(self._exp_logic.config_dict.get('file_format', ''))
             self._mw.num_z_planes_SpinBox.setValue(self._exp_logic.config_dict.get('num_z_planes', 1))
             self._mw.z_step_DSpinBox.setValue(self._exp_logic.config_dict.get('z_step', 0.0))
@@ -1367,6 +1382,7 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.sample_tag_lineEdit,
             self._mw.sample_prep_lineEdit,
             self._mw.TransferData_checkBox,
+            self._mw.photobleaching_imaging_checkBox,
             self._mw.exposure_DSpinBox,
             self._mw.gain_SpinBox,
             self._mw.num_frames_SpinBox,

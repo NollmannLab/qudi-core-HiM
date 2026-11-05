@@ -31,6 +31,11 @@ fields:
     required: true
     default: ""
 
+  # image after the photobleaching (photobleaching_imaging_checkBox) - not implemented in the task yet
+  photobleaching_imaging:
+    required: false
+    default: false
+
   zen_ref_images_path:
     required: true
     default: ""

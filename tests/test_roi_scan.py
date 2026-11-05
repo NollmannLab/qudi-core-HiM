@@ -1018,7 +1018,7 @@ def _section_data_folder():
     def scan_task(cls, path, template=TEMPLATE):
         rec = Rec()
         stands = {'roi_logic': RoiLogic(rec), 'laser_logic': LaserControlLogic(rec)}
-        if cls is rs.RoiScanSDTask:
+        if issubclass(cls, rs.RoiScanSDTask):
             stands['trigger_logic'] = TriggerLogic(rec)
         KEEP.append(stands)
         task = _short.shorten(type(cls.__name__ + 'UnderTest', (cls,),
@@ -1074,11 +1074,22 @@ def _section_data_folder():
                                                      'parameters.yml'],
               (err, result, task.prefix, os.listdir(run_folder) if os.path.isdir(run_folder) else None))
         check(f'(1 ROI scan SD, run {run_number}) nothing created or modified in the ZEN saving folder (only the folder '
-              f'ZEN created, still empty); nothing on the server; no pop-up, no warning',
+              f'ZEN created, still empty); no pop-up, no warning',
               ZEN.tree() == sorted(tree_before + [os.path.basename(zen_folder)]) and os.listdir(zen_folder) == []
-              and os.listdir(server) == [] and os.listdir(local) == [SD_DAY] and not server_boxes()
+              and os.listdir(local) == [SD_DAY] and not server_boxes()
               and not any(lvl >= logging.WARNING for lvl, _ in LOGS),
-              (ZEN.tree(), os.listdir(server), [m for lvl, m in LOGS if lvl >= logging.WARNING]))
+              (ZEN.tree(), [m for lvl, m in LOGS if lvl >= logging.WARNING]))
+        server_copy = mirror(server, zen_folder)
+        msgs = [m for _, m in LOGS]
+        check(f'(1 ROI scan SD, run {run_number}) save_network_path set: metadata folder copied at the end to '
+              f'<save_network_path>/<ZEN folder name>/metadata (same files, same content); destination announced, '
+              f'number of files sent logged',
+              os.path.isdir(server_copy) and sorted(os.listdir(server_copy)) == sorted(os.listdir(run_folder))
+              and all(open(os.path.join(server_copy, n), 'rb').read() == open(os.path.join(run_folder, n), 'rb').read()
+                      for n in os.listdir(run_folder))
+              and f'Metadata will also be copied to {server_copy} at the end of the run' in msgs
+              and any(m.startswith('Metadata copy: 4 file(s) sent') for m in msgs),
+              (os.listdir(server_copy) if os.path.isdir(server_copy) else None, msgs[-3:]))
     # metadata folder already holding files -> metadata_<HHMMSS>
     other = data_folders.create_mirror_folder(local_sd(local), zen_folder, task.log)
     check('(1 create_mirror_folder) existing metadata folder with files -> metadata_<HHMMSS> in the same folder, '
@@ -1087,18 +1098,43 @@ def _section_data_folder():
           and os.path.isdir(other) and os.listdir(zen_folder) == []
           and any('already holds files' in m for _, m in LOGS), other)
 
+    # ------------------------------------------------------------------ (1b) interrupt: metadata still copied
+    class InterruptedSD(rs.RoiScanSDTask):
+        def _image_roi(self, roi_name, file_name):
+            super()._image_roi(roi_name, file_name)
+            self.interrupt()  # interrupt after the first ROI (raised at the next check)
+    server, local = folder('server_1b'), folder('local_1b')
+    task, rec = scan_task(InterruptedSD, scan_yaml('sd_interrupt', save_path=local, save_network_path=server))
+    result, err = run(task, {'start_roi': ''})
+    run_folder = mirror(local_sd(local), ZEN.created[-1])
+    server_copy = mirror(server, ZEN.created[-1])
+    names = [n for n, _ in rec.calls]
+    check('(1b ROI scan SD, interrupt after the first ROI) hardware restored (stage back, velocity, GUI) before the copy; '
+          'metadata folder on the server (same files as the local folder)',
+          task.interrupted and movies(run_folder) == [f'scan_{task.prefix}_{TAG}_{ROIS[0][4:]}_ROI']
+          and 'cleanup finished' in [m for _, m in LOGS] and 'enable_roi_actions' in names
+          and os.path.isdir(server_copy) and sorted(os.listdir(server_copy)) == sorted(os.listdir(run_folder))
+          and [m for _, m in LOGS].index('cleanup finished')
+          < next(k for k, (_, m) in enumerate(LOGS) if m.startswith('Metadata copy:')),
+          (err, task.interrupted, movies(run_folder), os.listdir(server_copy) if os.path.isdir(server_copy) else None))
+
     # ------------------------------------------------------------------ (2) save_network_path missing / not writable
     for label, server in (('missing', MISSING), ('not writable', READ_ONLY), ('empty', '')):
         local = folder(f'local_2_{label.replace(" ", "_")}')
         task, rec = scan_task(rs.RoiScanSDTask, scan_yaml(f'sd_{label[:3]}', save_path=local, save_network_path=server))
         result, err = run(task, {'start_roi': ''})
         run_folder = mirror(local_sd(local), ZEN.created[-1])
-        check(f'(2 save_network_path {label}) not used by the SD ROI scan: files under <save_path>/<YYYY-MM-DD>/<ZEN '
-              f'folder name>/metadata, scan runs (both ROIs), no pop-up, no warning',
+        warnings = [m for lvl, m in LOGS if lvl >= logging.WARNING]
+        expected_warning = (f'Metadata copy: 4 of 4 file(s) not sent to '
+                            f'{os.path.join(server, os.path.basename(ZEN.created[-1]), "metadata")} - they are in {run_folder}')
+        check(f'(2 save_network_path {label}) files under <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata, scan '
+              f'runs (both ROIs), no pop-up; ' + ('server down: no exception, warning with the files not sent and the '
+                                                   'local folder' if server else 'nothing copied, no warning'),
               err is None and result.get('directory') == run_folder and result.get('imaged_rois') == ROIS
               and movies(run_folder) == [f'scan_{task.prefix}_{TAG}_{r[4:]}_ROI' for r in ROIS] and not server_boxes()
-              and not any(lvl >= logging.WARNING for lvl, _ in LOGS),
-              (err, result, [m for lvl, m in LOGS if lvl >= logging.WARNING]))
+              and (expected_warning in warnings if server else
+                   not warnings and not any('Metadata' in m for _, m in LOGS)),
+              (err, result, warnings))
         close_boxes()
 
     # ------------------------------------------------------------------ (3b) zen_saving_path missing / not a folder
@@ -1160,7 +1196,7 @@ def _section_data_folder():
         check(f'(5 run folder, tag {tag!r}) <root>/YYYY_MM_DD/001_Scan_SDsample{"_" + tag if tag else ""}',
               path == os.path.join(base, DAY, f'001_Scan_SDsample{"_" + tag if tag else ""}') and os.path.isdir(path),
               path)
-    for bad in ('RT_1', 'RT 1', ''):
+    for bad in ('RT_1', 'RT 1', 'IF-2', ''):
         task, rec = scan_task(rs.RoiScanSDTask, scan_yaml('sd_tag_bad', save_path=folder('local_5_bad'), sample_tag=bad))
         result, err = run(task, {'start_roi': ''})
         check(f'(5 invalid sample_tag {bad!r}) clear error before any hardware call (no roi / laser / trigger call)',
@@ -1265,11 +1301,14 @@ def _section_data_folder():
     prefix = str(len([n for n in os.listdir(ZEN.root) if os.path.isdir(os.path.join(ZEN.root, n))])).zfill(3)
     check(f'(5 Hi-M SD, 1 probe, 2 ROIs) files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata '
           f'(HiM_parameters.yml, movie_name.txt, injections.yml, HiM_task.log); names scan_{prefix}_RT1_<roi>_ROI; '
-          f'nothing on the server (no transfer), nothing written by qudi in the ZEN folder',
+          f'save_network_path set, no transfer_data: only the metadata folder (with HiM_task.log) copied to '
+          f'<server>/<ZEN folder name>/metadata, no image; nothing written by qudi in the ZEN folder',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == run_folder
           and {'HiM_parameters.yml', 'injections.yml', 'HiM_task.log', 'experiment_config.yaml',
                'metadata.yml'} <= set(os.listdir(run_folder))
-          and names == [f'scan_{prefix}_RT1_{r[4:]}_ROI' for r in ROIS] and os.listdir(server) == []
+          and names == [f'scan_{prefix}_RT1_{r[4:]}_ROI' for r in ROIS]
+          and os.listdir(server) == [os.path.basename(ZEN.created[-1])]
+          and sorted(os.listdir(mirror(server, ZEN.created[-1]))) == sorted(os.listdir(run_folder))
           and os.listdir(ZEN.created[-1]) == ['autofocus'], (err, result, names))  # only the images of the fake ZEN
 
     # ------------------------------------------------------------------ (6) dummies with save_path only
