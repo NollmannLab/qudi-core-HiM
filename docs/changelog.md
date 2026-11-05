@@ -6,6 +6,17 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### ROI GUI: error when closing qudi
+
+#### Fixed
+
+- Closing qudi raised `AttributeError: 'NoneType' object has no attribute 'tracking'` in
+  `RoiGUI.close_function` (called by the closeEvent of RoiMainWindowCE) (2026-11-05). On quit qudi deactivates
+  the modules, then closes the remaining windows (QApplication.closeAllWindows); `RoiGUI.on_deactivate` did not
+  close its window, so it was closed after the ROI logic was gone. `on_deactivate` now closes the window (as the
+  other GUI modules), and `close_function` returns without doing anything when the ROI logic is None or cannot
+  be read (AttributeError / ReferenceError). Tests: tests/test_roi_path.py (optimize path section).
+
 ### Hi-M SD autofocus check: crash of the .czi reader
 
 #### Fixed

@@ -418,6 +418,10 @@ class RoiGUI(GuiBase):
         self.__disconnect_update_signals_from_logic()
         self.__disconnect_internal_signals()
         self.close_function()
+        # close the window now, while the logic is still reachable: otherwise it stays open and is closed later by
+        # QApplication.closeAllWindows (end of qudi), after the logic is gone. Its closeEvent calls close_function
+        # again, which does nothing more (signals disconnected, logic checked); a closed window is not closed again.
+        self._mw.close()
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Helper methods called during activation / deactivation
@@ -1052,6 +1056,14 @@ class RoiGUI(GuiBase):
 
     def close_function(self):
         """ This method serves as a reimplementation of the close event. Continuous mode (tracking mode of stage
-        position) is stopped when the main window is closed. """
-        if self._roi_logic.tracking:
+        position) is stopped when the main window is closed. Nothing is done when the ROI logic cannot be reached
+        (module deactivated or deleted). """
+        # ROI logic gone (None, or a deleted module behind the connector): nothing to stop
+        if self._roi_logic is None:
+            return
+        try:
+            tracking = self._roi_logic.tracking
+        except (AttributeError, ReferenceError):
+            return
+        if tracking:
             self.sigStopTracking.emit()
