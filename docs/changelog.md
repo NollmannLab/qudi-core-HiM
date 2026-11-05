@@ -4,7 +4,44 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-11-04
+Last updated: 2026-11-05
+
+### Tasks
+
+#### Added
+
+- Hi-M on the spinning disk: online data transfer to the server; SD run folders always local (2026-11-05).
+  - New `src/qudi/tasks/common/data_transfer.py`, `DataTransfer(log, destination_root, timeout_s)`: one daemon
+    thread does every network operation (folders, write test, copies) inside try/except; `add`, `allow` /
+    `pause` (paused at creation), `wait_idle(timeout)`, `flush(timeout)`, `test(timeout)`, `stop`; copy to
+    `<dest>.part`, size check, `os.replace` (marked sent only then; a destination with the same size counts as
+    sent); on error: warning, `.part` removed, file queued again, server marked down (one warning when lost,
+    one info when back), write test every `RETRY_PERIOD_S` (60 s) until it passes; never disabled for the run.
+  - `data_folders.local_dated_root`: `<save_path>/<YYYY-MM-DD>` (created, write-tested). `RoiScanSDTask` and
+    `HiMSDTask` override a new hook `_choose_data_root` with it: their run folder is always
+    `<save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata` (no server fallback, no pop-up). The other callers of
+    `choose_data_root` (ROI scan / Hi-M base classes: dummy, RAMM) are unchanged.
+  - `HiMSDTask`: experiment key `transfer_data` (configurator TransferData_checkBox; error before any hardware
+    call when `save_network_path` is empty), new task option `transfer_timeout` (s, default 300). Before any
+    hardware call: `DataTransfer` on `save_network_path` and a write test (10 s); if it fails, warning pop-up,
+    the experiment continues. Files go to `<save_network_path>/<ZEN folder name>/`: the ZEN acquisitions
+    `*_AcquisitionBlock3_pt*.czi` (recursive, relative path kept), listed at the start of the hybridization and
+    of the photobleaching of each cycle, copied only during these fluidics steps (and the needle rinse);
+    before the imaging: pause and wait for the copy in progress (at most `transfer_timeout`, not while the
+    server is down). Cleanup, after the hardware reset: normal end -> last acquisitions; interrupt / error ->
+    acquisitions left for a manual copy; in all cases the metadata folder (except the log), then
+    `HiM_task.log` once closed; files not sent listed in one warning.
+  - `HiMTaskBase._cleanup`: two empty hooks, `_end_of_run_files` (after the hardware reset, before the last
+    log line) and `_after_run_log_closed` (after the log file is closed); dummy and RAMM unchanged.
+  - `spinning_disk/him_epi.yaml`: `transfer_data` shown (was hidden, so always false).
+  - Changes from the legacy (UploadDataWorker, launch_data_uploading, ...): files copied as they are (no
+    czi -> tif conversion, no renaming), acquisitions `*_AcquisitionBlock3_pt*.czi` (was AcquisitionBlock2),
+    write test of the destination instead of a ping to a fixed IP, failed files retried (the legacy disabled
+    the transfer for the rest of the run after a 5 min timeout), metadata saved locally and copied only at the
+    end, destination without a date folder.
+  - Tests (`tests/test_him.py`): block `transfer` (DataTransfer) and Hi-M SD transfer cases in `sd_zen_folder`;
+    the fake ZEN of the tests saves an acquisition per ROI and restarts its block count at each run;
+    `tests/test_roi_scan.py` run folder section adapted to the local dated folder.
 
 ### Tasks
 

@@ -43,8 +43,8 @@ fields:
     required: false
     default_from: default_network_path
 
+  # online copy of the data to save_network_path during the run (TransferData_checkBox)
   transfer_data:
-    visible: false
     required: false
     default: false
 

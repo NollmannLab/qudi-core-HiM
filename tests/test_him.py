@@ -1,12 +1,13 @@
 """Hi-M task (qudi.tasks.him) on the dummy setup, the SD task with a fake ZEN, the RAMM placeholder.
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_him.py [<repo_root>] [quick | metadata | sd_z_planes |
-sd_zen_folder | autofocus ...]
+sd_zen_folder | autofocus | transfer ...]
 (quick: without the interrupt / error / SD / RAMM cases; the other words: only these blocks.)
 Real modules of dummy_config.cfg: fluidics (dummy valve, DaqPumpController pumps, DummyFlowSensor,
 FluidicsFlowLogic, pipetting robot on the dummy stage), roi_logic and laser_control_logic. The task
 runs in its own thread, the modules in the main thread (event loop). Logic calls are recorded.
 Sections:
+  - online data transfer (common/data_transfer.py DataTransfer; Hi-M SD cases in the ZEN folder block);
   - autofocus check of the SD (common/autofocus_check.py, HiMSDTask): score, abort rule, wait loop;
   - run files: experiment_config.yaml and metadata.yml in the run folder;
   - number of z planes: not used by the SD task, still required by the dummy;
@@ -231,11 +232,14 @@ def end_state_ok(label, t0):
 
 
 QUICK = 'quick' in sys.argv[1:]
-ONLY = set(sys.argv[1:]) & {'metadata', 'sd_z_planes', 'sd_zen_folder', 'autofocus'}  # only these blocks, then stop
+ONLY = set(sys.argv[1:]) & {'metadata', 'sd_z_planes', 'sd_zen_folder', 'autofocus', 'transfer'}  # only these blocks
 
 
 def selected(block):
     return not ONLY or block in ONLY
+
+
+SD_DAY = __import__('datetime').datetime.now().strftime('%Y-%m-%d')  # <save_path>/<YYYY-MM-DD>/ of the SD runs
 
 
 class ZenSim:
@@ -268,18 +272,30 @@ class ZenTriggerLogic:
     _meta = {'mro': ('TriggerLogic',)}
 
     def __init__(self, zen, images=None):
-        self.zen, self.sent, self.images, self.written = zen, [], images, []
+        self.zen, self.sent, self.images, self.written, self.acquired = zen, [], images, [], []
+        self.starts = 0  # start triggers of the current run (counted again for each run, at ZEN "ready")
 
     def send_trigger(self, name):
         self.sent.append(name)
-        if name == 'trigger_ZEN_start_block' and self.sent.count(name) % 2 == 1 and self.zen.created:
+        if name != 'trigger_ZEN_start_block' or not self.zen.created:
+            return
+        self.starts += 1
+        if self.starts % 2 == 1:  # autofocus block: autofocus image (AcquisitionBlock1)
             k = len(self.written)
             self.written.append(_short.write_autofocus_image(self.zen.created[-1], k + 1,
                                                              self.images(k) if self.images else None))
+        else:  # acquisition block: the stack of the ROI (AcquisitionBlock3)
+            folder = os.path.join(self.zen.created[-1], 'acquisition')
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, f'experiment_AcquisitionBlock3_pt{len(self.acquired) + 1}.czi')
+            with open(path, 'wb') as f:
+                f.write(os.urandom(2048))
+            self.acquired.append(path)
 
     def is_triggered(self, name):
         if name == 'trigger_ZEN_ready':
             self.zen.ready()
+            self.starts = 0  # new run: the next start trigger is an autofocus block
         return True
 
 
@@ -443,6 +459,9 @@ if selected('sd_zen_folder'):
     zen_ref = _short.write_autofocus_references(os.path.join(TMP, 'zen_ref_hm'), N)
     one_probe = copy.deepcopy(EXAMPLE)
     one_probe['probes'] = {1: 'RT1'}
+    def sd_folder(local, zen_folder):
+        return os.path.join(local, SD_DAY, os.path.basename(zen_folder), 'metadata')
+
     LOG_LINE = re.compile(r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ - [A-Za-z]+ - qudi\.\S+ - ')  # qudi: lower-case levels
 
     def zen_case(name, interrupt_when=None, **extra):
@@ -473,10 +492,11 @@ if selected('sd_zen_folder'):
     # (2) Hi-M SD, 1 probe, 2 ROIs, server reachable
     task, result, err, t0, _, server, local, before, tree_before, exp = zen_case('zen_ok')
     zen_folder = zen.created[-1] if zen.created else ''
-    folder = os.path.join(server, os.path.basename(zen_folder), 'metadata')
+    folder = sd_folder(local, zen_folder)
     prefix = str(before + 1).zfill(3)
     names = open(os.path.join(folder, 'movie_name.txt')).read().split() if os.path.isdir(folder) else []
-    check(f'(ZEN folder) Hi-M SD, 1 probe, {N} ROIs: files in <server>/<ZEN folder name>/metadata: HiM_parameters.yml, '
+    check(f'(ZEN folder) Hi-M SD, 1 probe, {N} ROIs: files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata '
+          f'(local, save_network_path set, no transfer): HiM_parameters.yml, '
           f'movie_name.txt, experiment_config.yaml, injections.yml (copy of the injections file), metadata.yml, '
           f'HiM_task.log; prefix {prefix} (folders before + 1), names scan_{prefix}_RT1_<roi>_ROI',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == folder
@@ -487,12 +507,14 @@ if selected('sd_zen_folder'):
           and open(os.path.join(folder, 'injections.yml'), 'rb').read() == open(task.injections_path, 'rb').read()
           and task.prefix == prefix and names == [f'scan_{prefix}_RT1_{n[4:]}_ROI' for n in NAMES],
           (err, result, os.listdir(folder) if os.path.isdir(folder) else None, names))
-    zen_files = [os.path.relpath(p, zen.root) for p in zen_trigger.written if p.startswith(zen_folder)]
+    zen_files = [os.path.relpath(p, zen.root) for p in zen_trigger.written + zen_trigger.acquired
+                 if p.startswith(zen_folder)]
+    zen_name = os.path.basename(zen_folder)
     check('(ZEN folder) nothing created or modified in the ZEN saving folder by qudi (only the ZEN folder and the '
-          'autofocus images the fake ZEN saved); nothing in the local folder',
-          zen.tree() == sorted(tree_before + [os.path.basename(zen_folder), os.path.join(os.path.basename(zen_folder),
-                                                                                       'autofocus')] + zen_files)
-          and len(zen_files) == N and os.listdir(local) == [], (zen.tree(), os.listdir(local)))
+          'images the fake ZEN saved); nothing on the server (no transfer)',
+          zen.tree() == sorted(tree_before + [zen_name, os.path.join(zen_name, 'autofocus'),
+                                              os.path.join(zen_name, 'acquisition')] + zen_files)
+          and len(zen_files) == 2 * N and os.listdir(server) == [], (zen.tree(), os.listdir(server)))
     lines = log_lines(folder)
     plan = [k for k, l in enumerate(lines) if ' - qudi.tasks.him.HiMSDTask - ' in l and 'ZEN: select the channels' in l]
     hardware = [k for k, l in enumerate(lines) if 'Waiting for ZEN to signal' in l or 'Triggering ZEN' in l
@@ -540,7 +562,7 @@ if selected('sd_zen_folder'):
     cond = (lambda: any(t.startswith('Hybridization 2/4') for _, s, t in PROGRESS)
             and any('Injecting Probe -' in t for _, s, t in PROGRESS))
     task, result, err, t0, t_int, server, local, *_ = zen_case('zen_int', interrupt_when=cond)
-    folder = os.path.join(server, os.path.basename(zen.created[-1]), 'metadata')
+    folder = sd_folder(local, zen.created[-1])
     lines = log_lines(folder)
     check('(interrupt during hybridization) task stopped; HiM_task.log closed (handlers removed), last line "Hi-M task '
           'ended after 0/1 cycle(s)."',
@@ -562,7 +584,7 @@ if selected('sd_zen_folder'):
         task, result, err, t0, _, server, local, *_ = zen_case('zen_af_abort', autofocus_min_fraction=0.9)
     finally:
         zen_trigger.images = None
-    folder = os.path.join(server, os.path.basename(zen.created[-1]), 'metadata')
+    folder = sd_folder(local, zen.created[-1])
     msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
     rows = list(csv.reader(open(os.path.join(folder, 'autofocus_scores.csv')))) if os.path.isdir(folder) else []
     scores = np.load(os.path.join(folder, 'correlation.npy')) if os.path.isdir(folder) else None
@@ -582,6 +604,71 @@ if selected('sd_zen_folder'):
           and lines and lines[-1].endswith('Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
           (err, rows, scores, lines[-1:]))
     end_state_ok('autofocus abort', t0)
+
+    # online transfer: setup check, server reachable, server unreachable, interrupt
+    task, result, err, t0, *_ = zen_case('tr_noserver', transfer_data=True, save_network_path='')
+    check("(transfer) transfer_data on and save_network_path empty -> error before any hardware call",
+          err is not None and "transfer_data is on but 'save_network_path' is empty" in str(err)
+          and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+
+    def server_files(server):
+        return sorted(os.path.relpath(os.path.join(d, n), server) for d, _, fs in os.walk(server) for n in fs)
+
+    acquired_before = len(zen_trigger.acquired)
+    task, result, err, t0, _, server, local, *_ = zen_case('tr_ok', transfer_data=True)
+    zen_name = os.path.basename(zen.created[-1])
+    folder = sd_folder(local, zen.created[-1])
+    on_server = server_files(server)
+    acquired = [os.path.join(zen_name, os.path.relpath(p, zen.created[-1])) for p in zen_trigger.acquired[acquired_before:]]
+    metadata = sorted(os.path.join(zen_name, 'metadata', n) for n in os.listdir(folder))
+    check(f'(transfer, server reachable) metadata folder local (<save_path>/<YYYY-MM-DD>/...); on the server '
+          f'<save_network_path>/<ZEN folder name>/: the {N} *_AcquisitionBlock3_pt*.czi with their relative path, '
+          f'every metadata file and HiM_task.log (metadata/...), no autofocus image (Block1), no .part file',
+          err is None and result and result['directory'] == folder and len(acquired) == N
+          and on_server == sorted(acquired + metadata) and os.path.join(zen_name, 'metadata', 'HiM_task.log') in on_server
+          and not any('AcquisitionBlock1' in f or f.endswith('.part') for f in on_server),
+          (err, on_server, acquired, metadata))
+    check('(transfer, server reachable) the copies are identical to the local files',
+          all(open(os.path.join(server, f), 'rb').read() == open(os.path.join(zen.root, f), 'rb').read() for f in acquired)
+          and open(os.path.join(server, zen_name, 'metadata', 'HiM_parameters.yml'), 'rb').read()
+          == open(os.path.join(folder, 'HiM_parameters.yml'), 'rb').read())
+    end_state_ok('transfer, server reachable', t0)
+
+    popups = []
+    original_popup = him.show_warning_popup
+    him.show_warning_popup = lambda title, text: popups.append((title, text)) or True  # pop-up recorded
+    try:
+        unreachable = os.path.join(TMP, 'a_file_tr.txt')
+        open(unreachable, 'w').close()
+        task, result, err, t0, _, server, local, *_ = zen_case('tr_down', transfer_data=True,
+                                                               save_network_path=os.path.join(unreachable, 'server'))
+    finally:
+        him.show_warning_popup = original_popup
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    folder = sd_folder(local, zen.created[-1])
+    check('(transfer, server unreachable) setup continues: one warning pop-up ("... is not reachable. The experiment '
+          'continues; the data will be transferred when the server is back."), run completed, files kept locally, '
+          'warning with the number of files not sent and their local paths',
+          err is None and result and result['cycles_done'] == 1 and len(popups) == 1
+          and popups[0][1].endswith('is not reachable. The experiment continues; the data will be transferred when '
+                                    'the server is back.')
+          and os.path.isfile(os.path.join(folder, 'HiM_task.log'))
+          and any(lvl == logging.WARNING and 'file(s) not sent to' in m and folder in m for lvl, m in msgs),
+          (err, popups, [m for lvl, m in msgs if lvl == logging.WARNING][-2:]))
+    end_state_ok('transfer, server unreachable', t0)
+
+    acquired_before = len(zen_trigger.acquired)
+    task, result, err, t0, t_int, server, local, *_ = zen_case(
+        'tr_int', transfer_data=True, interrupt_when=lambda: any(t == f'ROI 2/{N}' for _, s, t in PROGRESS))
+    zen_name = os.path.basename(zen.created[-1])
+    on_server = server_files(server)
+    check('(transfer, interrupt during the imaging) cleanup sends the metadata files and HiM_task.log, not the czi '
+          'files (left in the ZEN folder)',
+          t_int is not None and result is None and len(zen_trigger.acquired) > acquired_before
+          and os.path.join(zen_name, 'metadata', 'HiM_task.log') in on_server
+          and os.path.join(zen_name, 'metadata', 'HiM_parameters.yml') in on_server
+          and not any(f.endswith('.czi') for f in on_server), on_server)
+    end_state_ok('transfer, interrupt', t0)
     zen_box.stop()
 
     # (6) Hi-M dummy: run folder as before, with HiM_task.log
@@ -728,6 +815,115 @@ if selected('autofocus'):
     waiter.join(2)
     check('(wait loop) two new files -> keeps waiting; exactly one new file -> returns it',
           two_new and done and done[0].endswith('_pt2.czi'), (two_new, done))
+
+# --- online data transfer: DataTransfer (common/data_transfer.py), small files in temporary folders ---
+if selected('transfer'):
+    from qudi.tasks.common import data_transfer as dt
+    tr_log = logging.getLogger('qudi.tests.data_transfer')
+    tr_log.addHandler(H()) if not any(isinstance(h, H) for h in tr_log.handlers) else None
+    tr_log.setLevel(logging.INFO)
+    real_copy = dt.shutil.copyfile
+    real_retry = dt.RETRY_PERIOD_S
+
+    def tr_files(name, n=2):
+        src = os.path.join(TMP, f'tr_src_{name}')
+        os.makedirs(os.path.join(src, 'sub'), exist_ok=True)
+        paths = []
+        for k in range(n):
+            path = os.path.join(src, 'sub', f'file_{k}.bin')
+            with open(path, 'wb') as f:
+                f.write(os.urandom(1024 * (k + 1)))
+            paths.append(path)
+        return src, paths, os.path.join(TMP, f'tr_dest_{name}')
+
+    def wait_until(cond, timeout=5.0):
+        t_end = monotonic() + timeout
+        while not cond() and monotonic() < t_end:
+            sleep(0.02)
+        return cond()
+
+    def tree_of(root):
+        return sorted(os.path.relpath(os.path.join(d, n), root) for d, _, fs in os.walk(root) for n in fs) \
+            if os.path.isdir(root) else []
+
+    # copy with the same relative path, no .part left, a file already sent is not copied again
+    src, paths, dest = tr_files('copy')
+    tr = dt.DataTransfer(tr_log, dest)
+    for p_ in paths:
+        tr.add(p_, os.path.relpath(p_, src))
+    left = tr.flush(5)
+    copies = []
+    dt.shutil.copyfile = lambda a, b: (copies.append(a), real_copy(a, b))[1]
+    tr.add(paths[0], os.path.relpath(paths[0], src))  # already sent: ignored
+    tr2 = dt.DataTransfer(tr_log, dest)               # new transfer, destination already has the file
+    tr2.add(paths[1], os.path.relpath(paths[1], src))
+    left2 = tr2.flush(5)
+    dt.shutil.copyfile = real_copy
+    check('(DataTransfer) files copied with the same relative path, identical, no .part left; a file already sent '
+          'is not copied again (same transfer: ignored; destination with the same size: counted as sent)',
+          left == [] and left2 == [] and tree_of(dest) == ['sub/file_0.bin', 'sub/file_1.bin']
+          and all(open(p_, 'rb').read() == open(os.path.join(dest, os.path.relpath(p_, src)), 'rb').read() for p_ in paths)
+          and copies == [] and tr2.is_sent(paths[1]), (left, left2, tree_of(dest), copies))
+    tr.stop(), tr2.stop()
+
+    # paused: no copy starts; allowed: copied
+    src, paths, dest = tr_files('pause', 1)
+    tr = dt.DataTransfer(tr_log, dest)
+    tr.add(paths[0], 'f.bin')
+    sleep(0.4)
+    paused_ok = tree_of(dest) == [] and tr.pending() == paths
+    tr.allow()
+    check('(DataTransfer) paused at creation: no copy starts while paused; copied once allowed',
+          paused_ok and wait_until(lambda: tr.is_sent(paths[0])) and tree_of(dest) == ['f.bin'], tree_of(dest))
+    tr.stop()
+
+    # server down: the copy raises -> no exception in the caller, server_ok False, file kept in the queue; copy
+    # working again + write test passing -> file sent, server_ok True
+    src, paths, dest = tr_files('down', 1)
+    dt.RETRY_PERIOD_S = 0.3
+    dt.shutil.copyfile = lambda a, b: (_ for _ in ()).throw(OSError('server gone (test)'))
+    tr = dt.DataTransfer(tr_log, dest)
+    t0 = monotonic()
+    tr.add(paths[0], 'f.bin')
+    tr.allow()
+    down = wait_until(lambda: not tr.server_ok)
+    still_queued = tr.pending() == paths and not tr.is_sent(paths[0]) and not os.path.exists(os.path.join(dest, 'f.bin.part'))
+    left_down = tr.flush(1)  # server down: returns at once with the files not sent
+    idle_t0 = monotonic()
+    idle_down = tr.wait_idle(5)
+    idle_dt = monotonic() - idle_t0
+    dt.shutil.copyfile = real_copy
+    back = wait_until(lambda: tr.is_sent(paths[0]), timeout=5)
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    check('(DataTransfer, server down) the copy raises: no exception in the caller, server_ok False, the file stays in '
+          'the queue, no .part left; flush returns the files not sent',
+          down and still_queued and left_down == paths, (down, still_queued, left_down))
+    check('(DataTransfer, server down) wait_idle returns True at once while the server is down',
+          idle_down is True and idle_dt < 0.2, idle_dt)
+    check('(DataTransfer, server back) copy working + write test passing (RETRY_PERIOD_S shortened) -> file sent, '
+          'server_ok True; one warning "not reachable" and one info "reachable again" (no repeated message)',
+          back and tr.server_ok and tree_of(dest) == ['f.bin']
+          and sum(lvl == logging.WARNING and 'not reachable' in m for lvl, m in msgs) == 1
+          and sum('reachable again' in m for _, m in msgs) == 1, (back, tree_of(dest), msgs))
+    tr.stop()
+    dt.RETRY_PERIOD_S = real_retry
+
+    # a copy that hangs: wait_idle(short) returns False within the timeout, server_ok False
+    src, paths, dest = tr_files('hang', 1)
+    release = threading.Event()
+    dt.shutil.copyfile = lambda a, b: (release.wait(10), real_copy(a, b))[1]
+    tr = dt.DataTransfer(tr_log, dest)
+    tr.add(paths[0], 'f.bin')
+    tr.allow()
+    started = wait_until(lambda: tr._current is not None)
+    t_start = monotonic()
+    idle = tr.wait_idle(0.3)
+    waited = monotonic() - t_start
+    check('(DataTransfer) a copy that hangs: wait_idle(0.3 s) returns False within the timeout, server_ok False',
+          started and idle is False and 0.25 < waited < 1.0 and not tr.server_ok, (started, idle, waited, tr.server_ok))
+    release.set()
+    dt.shutil.copyfile = real_copy
+    tr.stop()
 
 if ONLY:
     print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)
@@ -963,9 +1159,9 @@ if not QUICK:
           and not any(m.startswith('ZEN: number of acquisition loops =') for m in msgs),
           (ZEN_BOX.texts, [m for m in msgs if 'ZEN' in m][:4]))
     run_folder = result['directory'] if result else ''
-    check('(SD) files in <save_path>/<ZEN folder name>/metadata (no server folder); nothing written by qudi in the ZEN '
+    check('(SD) files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata; nothing written by qudi in the ZEN '
           'folder',
-          err is None and run_folder == os.path.join(TMP, 'data_sd', os.path.basename(zen), 'metadata')
+          err is None and run_folder == os.path.join(TMP, 'data_sd', SD_DAY, os.path.basename(zen), 'metadata')
           and os.path.isdir(run_folder) and os.listdir(zen) == ['autofocus'], (result, err))  # images of the fake ZEN
     movies = open(os.path.join(run_folder, 'movie_name.txt')).read().split() if run_folder else []
     check(f'(SD) HiM_parameters.yml and movie_name.txt in that folder; prefix 002 (1 folder in zen_saving_path before '
