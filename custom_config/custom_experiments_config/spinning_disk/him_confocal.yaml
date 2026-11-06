@@ -20,9 +20,20 @@ fields:
     required: true
     default: ""
 
+  # sample file (YAML describing the biological sample, edited from the configurator): copied as
+  # experiment_parameters/sample.yml in the metadata folder of the run and added as the 'Sample' section of metadata.yml
+  sample_file:
+    required: true
+    default: ""
+
   injections_path:
     required: true
     default: ""
+
+  # image after the photobleaching (photobleaching_imaging_checkBox) - not implemented in the task yet
+  photobleaching_imaging:
+    required: false
+    default: false
 
   dapi_path:
     required: true

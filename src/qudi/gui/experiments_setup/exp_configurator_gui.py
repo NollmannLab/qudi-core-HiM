@@ -50,6 +50,9 @@ GUI modules::
           - npy
         default path imagedata: /path/to/local/data
         default network path: /path/to/network/data
+        default zen path: /path/to/zen/folders            # start folder of the ZEN folder dialogs
+        default sample path: /path/to/sample/files        # start folder of the sample file dialogs
+        sample template: /path/to/sample_template.yml     # fields of the sample file dialog
 
     experiments_configurator_gui:
       module.Class: experiments_setup.exp_configurator_gui.ExpConfiguratorGUI
@@ -63,6 +66,14 @@ The ROI list and injections file dialogs start in the folders of the logic modul
 roi_logic and injections_logic of experiments_configurator_logic). Fallback: the former GUI options
 default_roi_path / default_injections_path (one warning each at activation if they are still set), then
 default_path.
+
+Sample file (field ``sample_file``): sample_prep_lineEdit holds the path of a YAML file describing the
+biological sample; sample_prep_load_pushButton selects an existing file (*.yml, start folder: the folder of the
+field, else the logic option ``default sample path``, else home); sample_prep_edit_pushButton opens the sample
+dialog (sample_dialog.SampleDialog) generated from the logic option ``sample template``, filled from the file of
+the field when it exists, otherwise empty (new sample). Without a valid template, "Edit" shows a warning and the
+dialog does not open; the file can still be selected. The widgets are shown only for the experiments whose
+definition declares sample_file.
 
 The ``experiments`` list above contains definition filenames. The human-readable experiment names shown in the
 combo box come from the ``experiment`` key inside those files.
@@ -85,12 +96,15 @@ You should have received a copy of the GNU General Public License along with Qud
 
 import os
 from qtpy import QtCore
+from qtpy import QtGui
 from qtpy import QtWidgets
 from qtpy import uic
 
 from qudi.core.module import GuiBase
 from qudi.core.connector import Connector
 from qudi.core.configoption import ConfigOption
+from qudi.gui.experiments_setup.sample_dialog import SampleDialog
+from qudi.tasks.common.sample_info import load_sample_file, load_sample_template
 
 
 class ExpConfiguratorWindow(QtWidgets.QMainWindow):
@@ -163,8 +177,8 @@ class ExpConfiguratorGUI(GuiBase):
 
     FIELD_SECTIONS = {
         "sample_name": "general",
-        "dapi": "general",
-        "rna": "general",
+        "sample_tag": "general",
+        "sample_file": "general",
         "email": "general",
 
         "camera": "camera",
@@ -188,6 +202,7 @@ class ExpConfiguratorGUI(GuiBase):
         "roi_list_path": "documents",
         "injections_path": "documents",
         "dapi_path": "documents",
+        "photobleaching_imaging": "documents",
 
         "illumination_time": "prebleaching",
 
@@ -197,6 +212,7 @@ class ExpConfiguratorGUI(GuiBase):
 
         "zen_ref_images_path": "zen_security",
         "correlation_threshold": "zen_security",
+        "autofocus_min_fraction": "zen_security",
         "zen_saving_path": "zen_security",
 
         "galvo_start": "galvo",
@@ -210,12 +226,17 @@ class ExpConfiguratorGUI(GuiBase):
             "sample_name_LineEdit",
         ),
 
-        "dapi": (
-            "dapi_CheckBox",
+        "sample_tag": (
+            "sample_tag_label",
+            "sample_tag_comboBox",
+            "sample_tag_lineEdit",
         ),
 
-        "rna": (
-            "rna_CheckBox",
+        "sample_file": (
+            "sample_prep_label",
+            "sample_prep_lineEdit",
+            "sample_prep_load_pushButton",
+            "sample_prep_edit_pushButton",
         ),
 
         "email": (
@@ -302,6 +323,10 @@ class ExpConfiguratorGUI(GuiBase):
             "load_roi_PushButton",
         ),
 
+        "photobleaching_imaging": (
+            "photobleaching_imaging_checkBox",
+        ),
+
         "injections_path": (
             "injections_list_Label",
             "injections_list_LineEdit",
@@ -350,6 +375,11 @@ class ExpConfiguratorGUI(GuiBase):
         "correlation_threshold": (
             "Correlation_threshold_Label",
             "Zen_correlation_DSpinBox",
+        ),
+
+        "autofocus_min_fraction": (
+            "Min_fraction_label",
+            "Zen_min_fraction_DSpinBox",
         ),
 
         "galvo_start": (
@@ -450,9 +480,24 @@ class ExpConfiguratorGUI(GuiBase):
 
         self._mw.sample_name_LineEdit.textChanged.connect(self._exp_logic.update_sample_name)
         self._mw.mail_LineEdit.textChanged.connect(self._exp_logic.update_mail_address)
-        self._mw.dapi_CheckBox.stateChanged.connect(self._exp_logic.update_is_dapi)
-        self._mw.rna_CheckBox.stateChanged.connect(self._exp_logic.update_is_rna)
+        # sample tag: DAPI / RNA / IF, or Free with a tag typed in the line edit (letters and digits only)
+        if self._mw.sample_tag_comboBox.count() == 0:
+            self._mw.sample_tag_comboBox.addItems(list(self._exp_logic.SAMPLE_TAG_ITEMS)
+                                                  + [self._exp_logic.SAMPLE_TAG_FREE])
+        self._mw.sample_tag_lineEdit.setValidator(QtGui.QRegularExpressionValidator(
+            QtCore.QRegularExpression(self._exp_logic.SAMPLE_TAG_PATTERN), self._mw.sample_tag_lineEdit))
+        self._mw.sample_tag_lineEdit.setPlaceholderText('free tag, e.g. RT1')
+        self._mw.sample_tag_comboBox.currentTextChanged.connect(self._sample_tag_changed)
+        self._mw.sample_tag_lineEdit.textChanged.connect(self._sample_tag_changed)
+        # sample file: path in the line edit, selected with "Load" or written by the sample dialog ("Edit")
+        self._mw.sample_prep_lineEdit.textChanged.connect(self._exp_logic.update_sample_file)
+        self._mw.sample_prep_load_pushButton.clicked.connect(self.load_sample_file_clicked)
+        self._mw.sample_prep_edit_pushButton.clicked.connect(self.edit_sample_file_clicked)
+        self._mw.sample_prep_load_pushButton.setToolTip('Select an existing sample file (*.yml)')
+        self._mw.sample_prep_edit_pushButton.setToolTip('Create or edit the sample file')
+        self._sample_dialog = None
         self._mw.TransferData_checkBox.stateChanged.connect(self._exp_logic.update_data_transfer)
+        self._mw.photobleaching_imaging_checkBox.stateChanged.connect(self._photobleaching_imaging_changed)
         self._mw.select_camera_comboBox.currentTextChanged.connect(self._exp_logic.update_camera)
         self._mw.exposure_DSpinBox.valueChanged.connect(self._exp_logic.update_exposure)
         self._mw.gain_SpinBox.valueChanged.connect(self._exp_logic.update_gain)
@@ -470,6 +515,17 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.reference_images_lineEdit.textChanged.connect(self._exp_logic.update_zen_ref_images_path)
         self._mw.Zen_saving_folder_lineEdit.textChanged.connect(self._exp_logic.update_zen_saving_path)
         self._mw.Zen_correlation_DSpinBox.valueChanged.connect(self._exp_logic.update_correlation_threshold)
+        self._mw.Zen_min_fraction_DSpinBox.valueChanged.connect(self._exp_logic.update_autofocus_min_fraction)
+        # hints of the autofocus check settings (Hi-M on the spinning disk, tasks/common/autofocus_check.py)
+        correlation_hint = ('Autofocus check: threshold of the ZNCC score (Pearson coefficient between -1 and 1) of '
+                            'the new autofocus image against the reference of the ROI. Values tuned for the score '
+                            'of the former qudi-HiM task do not apply.')
+        fraction_hint = ('Autofocus check: minimum fraction (0-1) of the ROIs of a cycle whose check must pass; the '
+                         'experiment stops as soon as it can no longer be reached.')
+        for widget in (self._mw.Correlation_threshold_Label, self._mw.Zen_correlation_DSpinBox):
+            widget.setToolTip(correlation_hint)
+        for widget in (self._mw.Min_fraction_label, self._mw.Zen_min_fraction_DSpinBox):
+            widget.setToolTip(fraction_hint)
         self._mw.illumination_time_DSpinBox.valueChanged.connect(self._exp_logic.update_illumination_time)
         self._mw.num_iterations_SpinBox.valueChanged.connect(self._exp_logic.update_num_iterations)
         self._mw.time_step_SpinBox.valueChanged.connect(self._exp_logic.update_time_step)
@@ -698,6 +754,7 @@ class ExpConfiguratorGUI(GuiBase):
 
             self._set_named_widgets_visible(widget_names,True)
 
+        self._update_sample_tag_line_edit()
         self._sync_dock_widgets_visibility()
 
         self._apply_imaging_sequence_definition(fields)
@@ -797,7 +854,7 @@ class ExpConfiguratorGUI(GuiBase):
     def set_visibility_general_settings(self, visible):
         """Show or hide the general section's base widgets.
 
-        Experiment-specific fields such as DAPI, RNA, and email are hidden here by
+        Experiment-specific fields such as the sample tag and email are hidden here by
         default and shown later through ``FIELD_WIDGETS`` when declared by the active
         definition.
         """
@@ -805,9 +862,14 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.sample_name_Label.setVisible(visible)
         self._mw.sample_name_LineEdit.setVisible(visible)
 
-        # the dapi and rna checkboxes are needed only for the ROI Multicolor scan RAMM. Set them invisible as default.
-        self._mw.dapi_CheckBox.setVisible(False)
-        self._mw.rna_CheckBox.setVisible(False)
+        # the sample tag is needed only for the ROI multicolour scans. Set it invisible as default.
+        self._mw.sample_tag_label.setVisible(False)
+        self._mw.sample_tag_comboBox.setVisible(False)
+        self._mw.sample_tag_lineEdit.setVisible(False)
+        # the sample file is needed only by the experiments that declare sample_file. Invisible as default.
+        for name in ('sample_prep_label', 'sample_prep_lineEdit', 'sample_prep_load_pushButton',
+                     'sample_prep_edit_pushButton'):
+            getattr(self._mw, name).setVisible(False)
         # same for the mail. It is only required for the HiM tasks
         self._mw.mail_LineEdit.setVisible(False)
         self._mw.mail_Label.setVisible(False)
@@ -884,6 +946,9 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.injections_list_LineEdit.setVisible(visible)
         self._mw.load_injections_PushButton.setVisible(visible)
 
+        # image after the photobleaching (Hi-M): shown only when the definition declares photobleaching_imaging
+        self._mw.photobleaching_imaging_checkBox.setVisible(False)
+
         # the following items were used for Bokeh - DEPRECATED
         self._mw.dapi_path_Label.setVisible(False)
         self._mw.dapi_data_LineEdit.setVisible(False)
@@ -907,14 +972,16 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.load_dz_calibration_pushButton.setVisible(visible)
 
     def set_visibility_ZEN_security_settings(self, visible):
-        """Show or hide the ZEN section: header, autofocus reference images, correlation threshold
-        and ZEN saving folder."""
+        """Show or hide the ZEN section: header, autofocus reference images, correlation threshold, minimum
+        fraction of in-focus ROIs and ZEN saving folder."""
         self._mw.zen_settings_Label.setVisible(visible)
         self._mw.reference_image_folder_Label.setVisible(visible)
         self._mw.reference_images_lineEdit.setVisible(visible)
         self._mw.reference_images_pushButton.setVisible(visible)
         self._mw.Correlation_threshold_Label.setVisible(visible)
         self._mw.Zen_correlation_DSpinBox.setVisible(visible)
+        self._mw.Min_fraction_label.setVisible(visible)
+        self._mw.Zen_min_fraction_DSpinBox.setVisible(visible)
         self._mw.Zen_saving_folder_Label.setVisible(visible)
         self._mw.Zen_saving_folder_lineEdit.setVisible(visible)
         self._mw.Zen_saving_folder_pushButton.setVisible(visible)
@@ -1049,19 +1116,103 @@ class ExpConfiguratorGUI(GuiBase):
 
     def load_ref_images_path_clicked(self):
         """Choose the directory containing ZEN autofocus reference images."""
+        start = self._dialog_start_folder(self._mw.reference_images_lineEdit.text(), self._exp_logic.default_zen_path)
         this_dir = QtWidgets.QFileDialog.getExistingDirectory(self._mw,
                                                           'Open directory where reference images are saved',
-                                                          r'W:')  # to be changed using a correct path stem
+                                                          start)
         if this_dir:
             self._mw.reference_images_lineEdit.setText(this_dir)
 
     def load_zen_saving_path_clicked(self):
         """Choose the directory in which ZEN should save experiment data."""
+        start = self._dialog_start_folder(self._mw.Zen_saving_folder_lineEdit.text(), self._exp_logic.default_zen_path)
         this_dir = QtWidgets.QFileDialog.getExistingDirectory(self._mw,
                                                           'Open directory where data are saved',
-                                                          r"W:")  # to be changed using a correct path stem
+                                                          start)
         if this_dir:
             self._mw.Zen_saving_folder_lineEdit.setText(this_dir)
+
+    def _photobleaching_imaging_changed(self, *_args) -> None:
+        """Check box 'Acquire image after photobleaching?' -> logic (bool)."""
+        self._exp_logic.update_photobleaching_imaging(self._mw.photobleaching_imaging_checkBox.isChecked())
+
+    def _update_sample_tag_line_edit(self) -> None:
+        """The free-tag line edit is enabled, and visible with the other sample tag widgets, only when 'Free' is
+        selected."""
+        free = self._mw.sample_tag_comboBox.currentText() == self._exp_logic.SAMPLE_TAG_FREE
+        self._mw.sample_tag_lineEdit.setEnabled(free)
+        self._mw.sample_tag_lineEdit.setVisible(free and not self._mw.sample_tag_comboBox.isHidden())
+
+    def _sample_tag_changed(self, *_args) -> None:
+        """Selected item (DAPI / RNA / IF), or the free tag of the line edit for 'Free', sent to the logic."""
+        self._update_sample_tag_line_edit()
+        tag = self._mw.sample_tag_comboBox.currentText()
+        if tag == self._exp_logic.SAMPLE_TAG_FREE:
+            tag = self._mw.sample_tag_lineEdit.text()
+        self._exp_logic.update_sample_tag(tag)
+
+    def _show_sample_tag(self, tag) -> None:
+        """Display a sample tag: DAPI / RNA / IF select their item, any other value selects 'Free' and fills the
+        line edit. Nothing changes when the configuration has no sample tag."""
+        if tag is None:
+            return
+        tag = str(tag)
+        free = self._exp_logic.SAMPLE_TAG_FREE
+        if self._mw.sample_tag_comboBox.currentText() == free and self._mw.sample_tag_lineEdit.text() == tag:
+            pass  # free tag being typed (e.g. 'DAPI2' passes through 'DAPI'): keep 'Free' selected
+        elif tag in self._exp_logic.SAMPLE_TAG_ITEMS:
+            self._mw.sample_tag_comboBox.setCurrentText(tag)
+        else:
+            self._mw.sample_tag_comboBox.setCurrentText(free)
+            if self._mw.sample_tag_lineEdit.text() != tag:
+                self._mw.sample_tag_lineEdit.setText(tag)
+        self._update_sample_tag_line_edit()
+
+    def load_sample_file_clicked(self):
+        """Select an existing sample file (*.yml): the dialog starts in the folder of the file of the field, else
+        in the logic option default sample path, else in the home folder."""
+        current = self._mw.sample_prep_lineEdit.text().strip()
+        start = self._dialog_start_folder(os.path.dirname(current) if current else '', self._exp_logic.default_sample_path)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self._mw, 'Select the sample file', start,
+                                                        'Sample files (*.yml)')
+        if path:
+            self._mw.sample_prep_lineEdit.setText(path)
+
+    def _sample_template(self):
+        """Fields of the sample dialog (logic option sample template); None, with a warning box, when the option
+        is not set or the template is invalid."""
+        path = str(self._exp_logic.sample_template_path or '').strip()
+        if not path:
+            text = "No sample template set (option 'sample template' of the configurator logic)."
+        else:
+            try:
+                return load_sample_template(path)
+            except ValueError as err:
+                text = str(err)
+        self.log.warning(text)
+        QtWidgets.QMessageBox.warning(self._mw, 'Sample template', f'{text}\nThe sample file can still be loaded.')
+        return None
+
+    def edit_sample_file_clicked(self):
+        """Open the sample dialog: filled from the file of the field when it exists, otherwise empty (new sample).
+        After a save, the field shows the saved file."""
+        template = self._sample_template()
+        if template is None:
+            return
+        path = self._mw.sample_prep_lineEdit.text().strip()
+        values = {}
+        if path and os.path.isfile(path):
+            try:
+                values = load_sample_file(path)
+            except RuntimeError as err:
+                self.log.warning(str(err))
+                QtWidgets.QMessageBox.warning(self._mw, 'Sample file', str(err))
+                return
+        else:
+            path = ''  # new sample
+        self._sample_dialog = SampleDialog(template, values, path, self._exp_logic.default_sample_path, parent=self._mw)
+        if self._sample_dialog.exec() and self._sample_dialog.saved_path:
+            self._mw.sample_prep_lineEdit.setText(self._sample_dialog.saved_path)
 
     @staticmethod
     def _dialog_start_folder(current, default) -> str:
@@ -1110,6 +1261,8 @@ class ExpConfiguratorGUI(GuiBase):
         try:
             config = self._exp_logic.config_dict
             self._mw.sample_name_LineEdit.setText(self._exp_logic.config_dict.get('sample_name', ''))
+            self._show_sample_tag(config.get('sample_tag'))
+            self._mw.sample_prep_lineEdit.setText(config.get('sample_file') or '')
             self._select_camera_entry(self._exp_logic.config_dict.get('camera'))
             self._mw.exposure_DSpinBox.setValue(self._exp_logic.config_dict.get('exposure', 0.0))
             self._mw.gain_SpinBox.setValue(self._exp_logic.config_dict.get('gain', 0))
@@ -1121,6 +1274,8 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.save_path_LineEdit.setText(self._exp_logic.config_dict.get('save_path', ''))
             self._mw.save_network_path_LineEdit.setText(self._exp_logic.config_dict.get('save_network_path', ''))
             self._mw.TransferData_checkBox.setChecked(self._exp_logic.config_dict.get('transfer_data', False))
+            self._mw.photobleaching_imaging_checkBox.setChecked(
+                bool(self._exp_logic.config_dict.get('photobleaching_imaging', False)))
             self._mw.fileformat_ComboBox.setCurrentText(self._exp_logic.config_dict.get('file_format', ''))
             self._mw.num_z_planes_SpinBox.setValue(self._exp_logic.config_dict.get('num_z_planes', 1))
             self._mw.z_step_DSpinBox.setValue(self._exp_logic.config_dict.get('z_step', 0.0))
@@ -1137,6 +1292,7 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.axial_calibration_path_lineEdit.setText(self._exp_logic.config_dict.get('axial_calibration_path', ''))
             self._mw.mail_LineEdit.setText(self._exp_logic.config_dict.get('email', ''))
             self._mw.Zen_correlation_DSpinBox.setValue(self._exp_logic.config_dict.get('correlation_threshold', 0.6))
+            self._mw.Zen_min_fraction_DSpinBox.setValue(self._exp_logic.config_dict.get('autofocus_min_fraction', 0.9))
             self._mw.galvo_start_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_start', 0.0))
             self._mw.galvo_stop_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_stop', 0.0))
             self._mw.galvo_step_DSpinBox.setValue(self._exp_logic.config_dict.get('galvo_step', 0.1))
@@ -1222,9 +1378,11 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.sample_name_LineEdit,
             self._mw.select_camera_comboBox,
             self._mw.mail_LineEdit,
-            self._mw.dapi_CheckBox,
-            self._mw.rna_CheckBox,
+            self._mw.sample_tag_comboBox,
+            self._mw.sample_tag_lineEdit,
+            self._mw.sample_prep_lineEdit,
             self._mw.TransferData_checkBox,
+            self._mw.photobleaching_imaging_checkBox,
             self._mw.exposure_DSpinBox,
             self._mw.gain_SpinBox,
             self._mw.num_frames_SpinBox,
@@ -1241,6 +1399,7 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.reference_images_lineEdit,
             self._mw.Zen_saving_folder_lineEdit,
             self._mw.Zen_correlation_DSpinBox,
+            self._mw.Zen_min_fraction_DSpinBox,
             self._mw.illumination_time_DSpinBox,
             self._mw.num_iterations_SpinBox,
             self._mw.time_step_SpinBox,

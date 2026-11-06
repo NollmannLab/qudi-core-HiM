@@ -1,19 +1,22 @@
 """Hi-M task (qudi.tasks.him) on the dummy setup, the SD task with a fake ZEN, the RAMM placeholder.
 
-Usage: QT_QPA_PLATFORM=offscreen python tests/test_him.py [<repo_root>] [quick | metadata | sd_z_planes ...]
-(quick: without the interrupt / error / SD / RAMM cases; metadata, sd_z_planes: only these blocks.)
+Usage: QT_QPA_PLATFORM=offscreen python tests/test_him.py [<repo_root>] [quick | metadata | sd_z_planes |
+sd_zen_folder | autofocus | transfer ...]
+(quick: without the interrupt / error / SD / RAMM cases; the other words: only these blocks.)
 Real modules of dummy_config.cfg: fluidics (dummy valve, DaqPumpController pumps, DummyFlowSensor,
 FluidicsFlowLogic, pipetting robot on the dummy stage), roi_logic and laser_control_logic. The task
 runs in its own thread, the modules in the main thread (event loop). Logic calls are recorded.
 Sections:
-  - run files: experiment_config.yaml and metadata.yml in the run folder;
+  - online data transfer (common/data_transfer.py DataTransfer; Hi-M SD cases in the ZEN folder block);
+  - autofocus check of the SD (common/autofocus_check.py, HiMSDTask): score, abort rule, wait loop;
+  - run files: metadata.yml and HiM_parameters.yml (every key of the experiment file) in the run folder;
   - number of z planes: not used by the SD task, still required by the dummy;
   - Hi-M cycles: full run, progress, interrupt, errors, needle position, needle modes, SD (fake ZEN),
     RAMM placeholder;
   - probe valve read from the injections file (plan, needle, valve, obsolete option).
 Short settings and test data: tests/_short.py, tests/data/ (him_injections.yml, rois_2.json), docs/TESTING.md.
 """
-import sys, os, re, weakref, logging, importlib, tempfile, threading, copy, glob, shutil
+import sys, os, re, csv, weakref, logging, logging.handlers, importlib, tempfile, threading, copy, glob, shutil
 from time import monotonic, sleep
 from importlib.metadata import version
 
@@ -30,6 +33,22 @@ import numpy as np  # noqa: E402
 import qudi.core  # noqa: E402
 from qudi.core.connector import Connector  # noqa: E402
 from qudi.tasks import him  # noqa: E402
+_short.use_npy_autofocus_images()  # test autofocus images: .npy content (no czifile)
+
+# one helper process pool of the autofocus check shared by the tasks of this suite (starting a 'spawn' process takes
+# about a second); a pool shut down by a task (cleanup, crash of its process) is replaced by a new one
+_AF_POOL = [None]
+_new_af_pool = him.HiMSDTask._new_af_pool
+
+
+def _shared_af_pool():
+    pool = _AF_POOL[0]
+    if pool is None or pool._shutdown_thread or pool._broken:
+        pool = _AF_POOL[0] = _new_af_pool()
+    return pool
+
+
+him.HiMSDTask._new_af_pool = staticmethod(_shared_af_pool)
 
 np.random.seed(0)
 results = []
@@ -228,11 +247,83 @@ def end_state_ok(label, t0):
 
 
 QUICK = 'quick' in sys.argv[1:]
-ONLY = set(sys.argv[1:]) & {'metadata', 'sd_z_planes'}  # run only these blocks, then stop
+ONLY = set(sys.argv[1:]) & {'metadata', 'sd_z_planes', 'sd_zen_folder', 'autofocus', 'transfer'}  # only these blocks
 
 
 def selected(block):
     return not ONLY or block in ONLY
+
+
+SD_DAY = __import__('datetime').datetime.now().strftime('%Y-%m-%d')  # <save_path>/<YYYY-MM-DD>/ of the SD runs
+
+
+class ZenSim:
+    """Fake ZEN saving folder: when "ready" is raised (the user starts the ZEN experiment), ZEN creates its data
+    folder there - one new folder ('one'), none ('none') or two ('two')."""
+    def __init__(self, root):
+        self.root, self.mode, self.created = root, 'one', []
+        for old in ('2026-11-01_old_experiment', '2026-11-02_old_experiment'):
+            os.makedirs(os.path.join(root, old), exist_ok=True)
+        open(os.path.join(root, 'notes.txt'), 'w').close()  # a file: not counted as a folder
+
+    def ready(self):
+        for _ in range({'one': 1, 'none': 0, 'two': 2}[self.mode]):
+            path = os.path.join(self.root, f'2026-11-04_HiM_test_{len(self.created) + 1:02d}')
+            os.makedirs(path)
+            self.created.append(path)
+
+    def folders(self):
+        return [n for n in os.listdir(self.root) if os.path.isdir(os.path.join(self.root, n))]
+
+    def tree(self):
+        return sorted(os.path.relpath(os.path.join(d, n), self.root)
+                      for d, dirs, fs in os.walk(self.root) for n in dirs + fs)
+
+
+class ZenTriggerLogic:
+    """Fake TriggerLogic: ZEN ready / done answered at once; "ready" makes the fake ZEN create its data folder; at
+    each autofocus block (every other start trigger: autofocus, acquisition, ...) ZEN saves an autofocus image
+    there (images(k) for the k-th one, default: the reference image of the tests)."""
+    _meta = {'mro': ('TriggerLogic',)}
+
+    def __init__(self, zen, images=None):
+        self.zen, self.sent, self.images, self.written, self.acquired = zen, [], images, [], []
+        self.placeholder = False  # True: at "ready", ZEN creates the (empty) image file of the first autofocus block
+        self.starts = 0  # start triggers of the current run (counted again for each run, at ZEN "ready")
+
+    def send_trigger(self, name):
+        self.sent.append(name)
+        if name != 'trigger_ZEN_start_block' or not self.zen.created:
+            return
+        self.starts += 1
+        if self.starts % 2 == 1:  # autofocus block: autofocus image (AcquisitionBlock1)
+            k = len(self.written)
+            self.written.append(_short.write_autofocus_image(self.zen.created[-1], k + 1,
+                                                             self.images(k) if self.images else None))
+        else:  # acquisition block: the stack of the ROI (AcquisitionBlock2)
+            folder = os.path.join(self.zen.created[-1], 'acquisition')
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, f'experiment_AcquisitionBlock2_pt{len(self.acquired) + 1}.czi')
+            with open(path, 'wb') as f:
+                f.write(os.urandom(2048))
+            self.acquired.append(path)
+
+    def is_triggered(self, name):
+        if name == 'trigger_ZEN_ready':
+            self.zen.ready()
+            self.starts = 0  # new run: the next start trigger is an autofocus block
+            if self.placeholder and self.zen.created:
+                path = os.path.join(self.zen.created[-1], 'autofocus',
+                                    f'experiment_AcquisitionBlock1_pt{len(self.written) + 1}.czi')
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, 'wb').close()
+        return True
+
+
+def run_log_handlers():
+    """Log handlers of a Hi-M run still attached to the qudi logger (none after the cleanup)."""
+    return [h for h in logging.getLogger('qudi').handlers
+            if isinstance(h, (logging.handlers.MemoryHandler, logging.FileHandler))]
 
 
 # --- run files: experiment copy and metadata.yml ---
@@ -240,7 +331,11 @@ if selected('metadata'):
     # Hi-M dummy, 1 probe, 2 ROIs, metadata_template of dummy_config.cfg (template of the repository)
     meta_inj = copy.deepcopy(EXAMPLE)
     meta_inj['probes'] = {1: 'RT1'}
-    meta_exp = files(meta_inj, 'metadata')
+    from qudi.tasks.common import sample_info as _si
+    meta_sample = os.path.join(TMP, 'sample_dummy_run.yml')
+    _si.save_sample_file(meta_sample, {'experiment_type': 'DNA-FISH', 'experimenter': 'X'})
+    meta_exp = files(meta_inj, 'metadata', extra={'operator_note': 'kept in HiM_parameters.yml',
+                                                  'sample_file': meta_sample})
     task = make_task(user_config_path=meta_exp)
     t0 = monotonic()
     result, err, _, _ = run(task)
@@ -251,20 +346,35 @@ if selected('metadata'):
     section = lambda m, name: {k: v for item in m[name] for k, v in item.items()}  # noqa: E731
     acq = section(meta, 'Acquisition') if meta else {}
     fluidics_meta = section(meta, 'Fluidics') if meta else {}
-    check('(run files) 1 cycle done; experiment_config.yaml byte-identical to the experiment file',
+    exp_content = yaml.safe_load(open(meta_exp))
+    him_global = (yaml.safe_load(open(os.path.join(run_folder, 'experiment_parameters', 'HiM_parameters.yml'))) or {}).get(
+        '1- global parameters', {}) if run_folder else {}
+    check('(run files) 1 cycle done; no experiment_config.yaml; HiM_parameters.yml "1- global parameters" = every key '
+          'of the experiment file with its value (incl. operator_note, not in _EXPERIMENT_KEYS), known keys first',
           err is None and result and result['cycles_done'] == 1
-          and open(os.path.join(run_folder, 'experiment_config.yaml'), 'rb').read() == open(meta_exp, 'rb').read(),
-          (err, result))
+          and not os.path.exists(os.path.join(run_folder, 'experiment_config.yaml'))
+          and him_global == exp_content and him_global.get('operator_note') == 'kept in HiM_parameters.yml'
+          and list(him_global)[:len(task._EXPERIMENT_KEYS)] == list(task._EXPERIMENT_KEYS)
+          and list(him_global)[-2:] == ['operator_note', 'sample_file'], (err, result, list(him_global)))
     check('(run files) metadata.yml: Fluidics hybridization / photobleaching = the lists of the injections file',
           fluidics_meta.get('hybridization') == meta_inj['hybridization list']
           and fluidics_meta.get('photobleaching') == meta_inj['photobleaching list'], fluidics_meta)
     check(f'(run files) metadata.yml: Time, sample name, laser lines / powers, 5 z planes, the {N} ROIs with their '
-          f'positions; other sections as in the template',
+          f'positions; other sections as in the template, then the Sample section (sample file of the run)',
           meta is not None and meta['Time'] and acq['sample_name'] == 'Mysample' and acq['laser_lines'] == [488, 561]
           and acq['laser_power_(%)'] == [50.0, 80.0] and acq['number_z_planes'] == 5
           and acq['roi_list_(xyz)'] == [{n: [float(v) for v in roi.get_roi_position(n)]} for n in NAMES]
-          and list(meta) == list(template) and meta['Camera'] == template['Camera'], acq)
-    him_params = yaml.safe_load(open(os.path.join(run_folder, 'HiM_parameters.yml'))) if run_folder else {}
+          and list(meta) == list(template) + ['Sample'] and meta['Camera'] == template['Camera'], acq)
+    check('(run files, dummy) HiM_parameters.yml, injections.yml and sample.yml in <run folder>/experiment_parameters/ '
+          'and not at the top; metadata.yml, movie_name.txt and HiM_task.log at the top; no fluidics/ (other setups '
+          'record nothing)',
+          run_folder and sorted(os.listdir(os.path.join(run_folder, 'experiment_parameters')))
+          == ['HiM_parameters.yml', 'injections.yml', 'sample.yml']
+          and not {'HiM_parameters.yml', 'injections.yml', 'sample.yml'} & set(os.listdir(run_folder))
+          and 'fluidics' not in os.listdir(run_folder)  # fluidics record: spinning disk only
+          and {'metadata.yml', 'movie_name.txt', 'HiM_task.log'} <= set(os.listdir(run_folder)),
+          sorted(os.listdir(run_folder)) if run_folder else None)
+    him_params = yaml.safe_load(open(os.path.join(run_folder, 'experiment_parameters', 'HiM_parameters.yml'))) if run_folder else {}
     check('(run files) HiM_parameters.yml as before (global, fluidic, imaging parameters, ROIs) and movie_name.txt',
           list(him_params) == ['1- global parameters', '2- fluidic parameters', '3- imaging parameters', '4- ROIs']
           and him_params['2- fluidic parameters']['probes'] == {1: 'RT1'} and list(him_params['4- ROIs']) == NAMES
@@ -274,22 +384,10 @@ if selected('metadata'):
 
 # --- number of z planes: not used by the SD task, still required by the dummy ---
 if selected('sd_z_planes'):
-    class ZenTrigger:  # fake TriggerLogic: ZEN ready / done answered at once
-        _meta = {'mro': ('TriggerLogic',)}
-
-        def __init__(self):
-            self.sent = []
-
-        def send_trigger(self, name):
-            self.sent.append(name)
-
-        def is_triggered(self, name):
-            return True
-
-    z_trigger = ZenTrigger()
+    z_zen = ZenSim(os.path.join(TMP, 'zen_z_planes'))
+    z_trigger = ZenTriggerLogic(z_zen)
     z_box = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box ('Done - continue')
-    z_ref = os.path.join(TMP, 'zen_ref_z')
-    os.makedirs(z_ref, exist_ok=True)
+    z_ref = _short.write_autofocus_references(os.path.join(TMP, 'zen_ref_z'), N)
     z_inj = copy.deepcopy(EXAMPLE)
     z_inj['probes'] = {1: 'RT1'}
     template = yaml.safe_load(open(_short.local_options(repo, ENTRY['options'])['metadata_template'], encoding='utf-8'))
@@ -314,13 +412,14 @@ if selected('sd_z_planes'):
         t0 = monotonic()
         result, err, _, _ = run(task)
         folder = result.get('directory') if result else None
-        params = yaml.safe_load(open(os.path.join(folder, 'HiM_parameters.yml'))) if folder else {}
+        params = yaml.safe_load(open(os.path.join(folder, 'experiment_parameters', 'HiM_parameters.yml'))) if folder else {}
         meta = yaml.safe_load(open(os.path.join(folder, 'metadata.yml'), encoding='utf-8')) if folder else {}
         acq = {k: v for item in meta['Acquisition'] for k, v in item.items()} if meta else {}
         logs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
         return task, result, err, params, acq, logs, t0
 
-    sd_extra = {'zen_ref_images_path': z_ref, 'correlation_threshold': 0.6}
+    sd_extra = {'zen_ref_images_path': z_ref, 'correlation_threshold': 0.6, 'zen_saving_path': z_zen.root,
+                'autofocus_min_fraction': _short.AUTOFOCUS_MIN_FRACTION}
     # (1) SD experiment file without num_z_planes
     task, result, err, params, acq, logs, t0 = z_run(him.HiMSDTask, 'sd_no_z', True, **sd_extra)
     check(f'(SD, no num_z_planes in the file) 1 cycle x {N} ROIs done; HiM_parameters.yml without "number of z planes"; '
@@ -382,8 +481,7 @@ if selected('sd_z_planes'):
     shown = {}
     for definitions, experiments, name in (('spinning_disk', ['him_epi.yaml'], 'him_epi_sd'),
                                            ('dummy', ['him.yaml'], 'Hi-M Dummy')):
-        gui = configurator(definitions, experiments)
-        gui.show()
+        gui = configurator(definitions, experiments)  # not shown: isVisibleTo needs no window on screen
         gui.start_new_experiment_config(name)
         app.processEvents()
         mw = gui._mw
@@ -392,6 +490,1171 @@ if selected('sd_z_planes'):
         mw.close()
     check('(configurator) SD Hi-M experiment: number-of-planes field and label hidden; Hi-M dummy: still shown',
           shown['him_epi_sd'][:2] == (False, False) and shown['Hi-M Dummy'][:2] == (True, True), shown)
+
+# --- spinning disk: folder named after the ZEN data folder, log file of the run ---
+if selected('sd_zen_folder'):
+    zen = ZenSim(os.path.join(TMP, 'zen_saving_hm'))
+    zen_trigger = ZenTriggerLogic(zen)
+    zen_box = _short.AutoAnswer('ZEN settings')  # answers the ZEN settings box ('Done - continue')
+    zen_ref = _short.write_autofocus_references(os.path.join(TMP, 'zen_ref_hm'), N)
+    one_probe = copy.deepcopy(EXAMPLE)
+    one_probe['probes'] = {1: 'RT1'}
+    def sd_folder(local, zen_folder):
+        return os.path.join(local, SD_DAY, os.path.basename(zen_folder), 'metadata')
+
+    LOG_LINE = re.compile(r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ - [A-Za-z]+ - qudi\.\S+ - ')  # qudi: lower-case levels
+
+    def zen_case(name, interrupt_when=None, injections=None, **extra):
+        server, local = os.path.join(TMP, f'server_{name}'), os.path.join(TMP, f'local_{name}')
+        os.makedirs(server)
+        os.makedirs(local)
+        values = {'save_network_path': server, 'zen_saving_path': zen.root, 'zen_ref_images_path': zen_ref,
+                  'correlation_threshold': 0.6, 'autofocus_min_fraction': _short.AUTOFOCUS_MIN_FRACTION}
+        values.update(extra)
+        exp = files(injections or one_probe, name, save_path=local,
+                    extra={k: v for k, v in values.items() if v is not None})
+        task = him.HiMSDTask()
+        for k, v in _short.local_options(repo, ENTRY['options']).items():
+            setattr(task, k, v)
+        task.user_config_path = exp
+        _short.shorten(task, progress_interval_s=0.2)
+        task.connect_modules(dict(MODS, trigger_logic=zen_trigger))
+        if not any(isinstance(h, H) for h in task.log.handlers):
+            task.log.addHandler(H())
+        folders_before = len(zen.folders())
+        tree_before = zen.tree()
+        result, err, t0, t_int = run(task, interrupt_when=interrupt_when)
+        return task, result, err, t0, t_int, server, local, folders_before, tree_before, exp
+
+    def log_lines(folder):
+        path = os.path.join(folder, 'HiM_task.log')
+        return open(path, encoding='utf-8').read().splitlines() if os.path.exists(path) else []
+
+    def fluidics_rows(folder):
+        path = os.path.join(folder, 'fluidics', 'fluidics_log.csv')
+        return list(csv.reader(open(path, newline=''))) if os.path.exists(path) else []
+
+    # (2) Hi-M SD, 1 probe, 2 ROIs, server reachable
+    server_at_cleanup = []
+    original_end_files = him.HiMSDTask._end_of_run_files
+
+    def spy_end_files(self):  # what the server holds when the cleanup starts its copies
+        server_at_cleanup.append(sorted(f for d, _, fs in os.walk(self.save_network_path) for f in fs))
+        return original_end_files(self)
+    him.HiMSDTask._end_of_run_files = spy_end_files
+    try:
+        task, result, err, t0, _, server, local, before, tree_before, exp = zen_case('zen_ok')
+    finally:
+        him.HiMSDTask._end_of_run_files = original_end_files
+    check('(live copy) transfer_data off: nothing on the server before the cleanup (no live copy of the metadata)',
+          server_at_cleanup == [[]], server_at_cleanup)
+    zen_folder = zen.created[-1] if zen.created else ''
+    folder = sd_folder(local, zen_folder)
+    prefix = str(before + 1).zfill(3)
+    names = open(os.path.join(folder, 'movie_name.txt')).read().split() if os.path.isdir(folder) else []
+    check(f'(ZEN folder) Hi-M SD, 1 probe, {N} ROIs: files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata '
+          f'(local, save_network_path set, no transfer): movie_name.txt, metadata.yml, HiM_task.log at the top (no '
+          f'experiment_config.yaml), experiment_parameters/ with HiM_parameters.yml and injections.yml (copy of the '
+          f'injections file), autofocus/ with every autofocus file (no autofocus_scores.csv); prefix '
+          f'{prefix} (folders before + 1), names scan_{prefix}_RT1_<roi>_ROI',
+          err is None and result and result['cycles_done'] == 1 and result['directory'] == folder
+          and sorted(os.listdir(folder)) == sorted(['HiM_task.log', 'autofocus', 'experiment_parameters', 'fluidics',
+                                                    'metadata.yml', 'movie_name.txt'])
+          and sorted(os.listdir(os.path.join(folder, 'experiment_parameters'))) == ['HiM_parameters.yml',
+                                                                                    'injections.yml']
+          and sorted(os.listdir(os.path.join(folder, 'autofocus'))) == sorted(
+              ['autofocus_reference.npy', 'correlation.npy', 'reference_images_RT1.npy',
+               'ROI_probe_autofocus_summary.csv', 'autofocus_correlation_heatmap.png', 'autofocus_drift.png'])
+          and open(os.path.join(folder, 'experiment_parameters', 'injections.yml'), 'rb').read() == open(task.injections_path, 'rb').read()
+          and task.prefix == prefix and names == [f'scan_{prefix}_RT1_{n[4:]}_ROI' for n in NAMES],
+          (err, result, os.listdir(folder) if os.path.isdir(folder) else None, names))
+    zen_files = [os.path.relpath(p, zen.root) for p in zen_trigger.written + zen_trigger.acquired
+                 if p.startswith(zen_folder)]
+    zen_name = os.path.basename(zen_folder)
+    check('(ZEN folder) nothing created or modified in the ZEN saving folder by qudi (only the ZEN folder and the '
+          'images the fake ZEN saved); transfer_data off + save_network_path: only the metadata folder and the log '
+          'copied to <server>/<ZEN folder name>/metadata at the end, no image',
+          zen.tree() == sorted(tree_before + [zen_name, os.path.join(zen_name, 'autofocus'),
+                                              os.path.join(zen_name, 'acquisition')] + zen_files)
+          and len(zen_files) == 2 * N and os.listdir(server) == [zen_name]
+          and os.listdir(os.path.join(server, zen_name)) == ['metadata']
+          and sorted(os.listdir(os.path.join(server, zen_name, 'metadata'))) == sorted(os.listdir(folder))
+          and sorted(os.listdir(os.path.join(server, zen_name, 'metadata', 'experiment_parameters')))
+          == sorted(os.listdir(os.path.join(folder, 'experiment_parameters')))  # experiment_parameters/ copied
+          and sorted(os.listdir(os.path.join(server, zen_name, 'metadata', 'autofocus')))
+          == sorted(os.listdir(os.path.join(folder, 'autofocus')))  # the autofocus/ subfolder is copied too
+          and open(os.path.join(server, zen_name, 'metadata', 'HiM_task.log'), 'rb').read()
+          == open(os.path.join(folder, 'HiM_task.log'), 'rb').read(), (zen.tree(), os.listdir(server)))
+    lines = log_lines(folder)
+    plan = [k for k, l in enumerate(lines) if ' - qudi.tasks.him.HiMSDTask - ' in l and 'ZEN: select the channels' in l]
+    hardware = [k for k, l in enumerate(lines) if 'Waiting for ZEN to signal' in l or 'Triggering ZEN' in l
+                or 'Moving to' in l]
+    print('    HiM_task.log, first / last lines:', *lines[:3], '...', *lines[-2:], sep='\n      ')
+    check('(log file) HiM_task.log: every line "time - level - logger - message"; starts with "Hi-M task started" and '
+          'the check messages of the run (ROI list loaded ...) before the ZEN settings and any hardware step; messages of other qudi modules included; last '
+          'line "Hi-M task ended after 1/1 cycle(s)."; handlers removed',
+          lines and all(LOG_LINE.match(l) for l in lines if not l.startswith((' ', '\t')))
+          and lines[0].endswith(f' - qudi.tasks.him.HiMSDTask - Hi-M task started - experiment file {exp}')
+          and any('Loaded ROI list' in l for l in lines[:plan[0]] if plan) and plan and plan[0] > 0
+          and (not hardware or hardware[0] > plan[0])
+          and any(' - qudi.logic.' in l for l in lines)
+          and lines[-1].endswith(' - qudi.tasks.him.HiMSDTask - Hi-M task ended after 1/1 cycle(s).')
+          and not run_log_handlers(), (lines[:2], lines[-1:], run_log_handlers()))
+    end_state_ok('ZEN folder', t0)
+
+    # fluidics record of the zen_ok run (dummy flow chain, sampling interval 0.1 s)
+    rows = fluidics_rows(folder)
+    unit = MODS['flow_logic'].get_pressure_unit()
+    unit = str((list(unit.values()) if isinstance(unit, dict) else list(unit))[0])
+    suffix = f'_{unit}' if unit.replace('_', '').isalnum() else ''
+    columns = ['time', 'elapsed_s', 'RT', 'step', 'buffer', 'flowrate_setpoint_ul_min', f'pressure_setpoint{suffix}',
+               'flowrate_ul_min', f'pressure{suffix}', 'volume_ul']
+    steps = {}
+    for row in rows[1:]:
+        steps.setdefault(row[3], []).append(row)
+    elapsed = [float(r[1]) for r in rows[1:] if r[3] == 'hybridization 1/4']
+    check('(fluidics record) fluidics/fluidics_log.csv: header in order (pressure unit of the flow logic); rows for '
+          'every injection (hybridization 1/4, 2/4, 4/4, photobleaching 1/2, 2/2) and the needle rinse, none for the '
+          'incubation; RT1 in every row; buffer SSC / RT1 (probe of the cycle) / Wash buffer ...; setpoint 1000 for the '
+          'injections; one row per sampling interval (>= 0.09 s apart); ISO time',
+          rows and rows[0] == columns
+          and set(steps) == {'hybridization 1/4', 'hybridization 2/4', 'hybridization 4/4', 'photobleaching 1/2',
+                             'photobleaching 2/2', 'rinse'}
+          and all(r[2] == 'RT1' for r in rows[1:])
+          and steps['hybridization 1/4'][0][4] == 'SSC' and steps['hybridization 2/4'][0][4] == 'RT1'
+          and steps['hybridization 4/4'][0][4] == 'Wash buffer' and steps['photobleaching 2/2'][0][4] == 'Imaging buffer'
+          and steps['rinse'][0][4] == 'rinse' and steps['rinse'][0][5] == ''
+          and all(float(r[5]) == 1000 for k, rs in steps.items() if k != 'rinse' for r in rs)
+          and all(b - a >= 0.09 for a, b in zip(elapsed, elapsed[1:]))
+          and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d', rows[1][0]),
+          (rows[:1], {k: len(v) for k, v in steps.items()}, rows[1:3]))
+
+    # fluidics record: write error -> one warning, the run goes on
+    original_create = him.HiMSDTask._create_fluidics_log
+
+    def unwritable_record(self, directory):
+        original_create(self, directory)
+        if self._fluidics_path:  # the file becomes a folder: every append fails
+            os.remove(self._fluidics_path)
+            os.makedirs(self._fluidics_path)
+    him.HiMSDTask._create_fluidics_log = unwritable_record
+    try:
+        task, result, err, t0, *_ = zen_case('zen_fluidics_error')
+    finally:
+        him.HiMSDTask._create_fluidics_log = original_create
+    record_warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING and m.startswith('Fluidics record')]
+    check('(fluidics record) write error: one warning "recording stopped for this run", the run completes',
+          err is None and result and result['cycles_done'] == 1 and len(record_warnings) == 1
+          and 'recording stopped' in record_warnings[0], (err, record_warnings))
+
+    # (3) sample file (sample_file): sample.yml and the Sample section of metadata.yml; missing file -> error
+    from qudi.tasks.common import sample_info
+    sample_path = os.path.join(TMP, 'sample_him.yml')
+    sample_info.save_sample_file(sample_path, {'experiment_type': 'DNA-FISH', 'organism': 'Mus musculus',
+                                               'experimenter': 'X', 'old_field': 'kept'})
+    task, result, err, t0, _, server, local, *_ = zen_case('zen_sample', sample_file=sample_path)
+    folder = sd_folder(local, zen.created[-1]) if zen.created else ''
+    meta_path = os.path.join(folder, 'metadata.yml')
+    meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else {}
+    check('(sample file) Hi-M SD: sample.yml (exact copy) in metadata/experiment_parameters/ (not at the top); '
+          'metadata.yml (top) ends with a Sample '
+          'section holding the values of the file (field not in the template included)',
+          err is None and result and result['cycles_done'] == 1
+          and open(os.path.join(folder, 'experiment_parameters', 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
+          and not os.path.exists(os.path.join(folder, 'sample.yml'))
+          and list(meta)[-1] == 'Sample'
+          and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Mus musculus'}, {'experimenter': 'X'},
+                                 {'old_field': 'kept'}],
+          (err, result, os.listdir(folder) if os.path.isdir(folder) else None, meta.get('Sample')))
+    end_state_ok('sample file', t0)
+    missing_sample = os.path.join(TMP, 'no_sample_him.yml')
+    task, result, err, t0, *_ = zen_case('zen_sample_missing', sample_file=missing_sample)
+    check('(sample file missing) reported with the other problems, before any hardware call',
+          err is not None and 'Hi-M task not started' in str(err) and missing_sample in str(err)
+          and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+
+    # (3b) photobleaching_imaging true: not implemented, one warning at the start (run stopped here before any
+    #      hardware call by a missing zen_saving_path, to keep the case short)
+    task, result, err, t0, *_ = zen_case('zen_pb_imaging', photobleaching_imaging=True, zen_saving_path=None)
+    pb_warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING
+                   and m == 'photobleaching_imaging is not implemented yet - ignored']
+    check('(photobleaching_imaging true) warning "photobleaching_imaging is not implemented yet - ignored" once at the '
+          'start; flag read as True', len(pb_warnings) == 1 and task.photobleaching_imaging is True, (pb_warnings, err))
+    check('(photobleaching_imaging absent) no such warning in the normal run above',
+          not any(m == 'photobleaching_imaging is not implemented yet - ignored' for t, lvl, m in LOGS if t < t0))
+
+    # (4) zen_saving_path missing / not a folder -> error before any hardware call
+    for label, value, fragment in (('missing', None, "'zen_saving_path' missing"),
+                                   ('not a folder', os.path.join(TMP, 'nowhere_zen'), 'is not an existing folder')):
+        task, result, err, t0, _, server, local, *_ = zen_case(f'zen_{label[:3]}', zen_saving_path=value)
+        check(f'(zen_saving_path {label}) error "{fragment}" before any hardware call; no log file, handlers removed',
+              err is not None and fragment in str(err) and not [n for n, _ in calls(t0) if n in HARDWARE]
+              and not glob.glob(os.path.join(server, '**', 'HiM_task.log'), recursive=True)
+              and not run_log_handlers(), (err, run_log_handlers()))
+    # (4) no / two new ZEN folders -> clear error, cleanup, log handlers closed
+    for mode, fragment in (('none', 'No new file was created by ZEN'), ('two', 'More than one folder were found')):
+        zen.mode = mode
+        HiMSDTaskAttempts = him.HiMSDTask._ZEN_FOLDER_ATTEMPTS
+        him.HiMSDTask._ZEN_FOLDER_ATTEMPTS = 2  # shorter wait for the missing folder (2 attempts, 1 s apart)
+        try:
+            task, result, err, t0, _, server, local, *_ = zen_case(f'zen_{mode}')
+        finally:
+            him.HiMSDTask._ZEN_FOLDER_ATTEMPTS = HiMSDTaskAttempts
+        msgs = [m for t, lvl, m in LOGS if t >= t0]
+        check(f'({mode} new ZEN folder) clear error "{fragment}...", no ROI imaged, cleanup ran (last line "Hi-M task '
+              f'ended after 0/1"), no qudi folder, log handlers closed',
+              err is not None and fragment in str(err) and not any('Triggering ZEN' in m for m in msgs)
+              and msgs and msgs[-1] == 'Hi-M task ended after 0/1 cycle(s).'
+              and not glob.glob(os.path.join(server, '*', 'metadata')) and not run_log_handlers(), (err, msgs[-1:]))
+        end_state_ok(f'{mode} new ZEN folder', t0)
+    zen.mode = 'one'
+
+    # (5) interrupt during hybridization -> log file closed, last line present
+    cond = (lambda: any(t.startswith('Hybridization 2/4') for _, s, t in PROGRESS)
+            and any('Injecting Probe -' in t for _, s, t in PROGRESS))
+    task, result, err, t0, t_int, server, local, *_ = zen_case('zen_int', interrupt_when=cond)
+    folder = sd_folder(local, zen.created[-1])
+    lines = log_lines(folder)
+    check('(interrupt during hybridization) task stopped; HiM_task.log closed (handlers removed), last line "Hi-M task '
+          'ended after 0/1 cycle(s)."',
+          t_int is not None and result is None and not task.success and lines
+          and lines[-1].endswith(' - Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
+          (t_int, result, lines[-1:], run_log_handlers()))
+    check('(autofocus report) not made after an interrupt (no heatmap / drift figure in metadata/autofocus/)',
+          not any(os.path.exists(os.path.join(folder, 'autofocus', n)) for n in ('autofocus_correlation_heatmap.png',
+                                                                                'autofocus_drift.png')),
+          os.listdir(os.path.join(folder, 'autofocus')) if os.path.isdir(os.path.join(folder, 'autofocus')) else None)
+    end_state_ok('interrupt during hybridization (ZEN folder)', t0)
+
+    # autofocus: reference count != ROI count -> the task stops before any hardware call, clear message
+    bad_ref = _short.write_autofocus_references(os.path.join(TMP, 'zen_ref_bad'), N + 1)
+    task, result, err, t0, _, server, local, *_ = zen_case('zen_badref', zen_ref_images_path=bad_ref)
+    check(f'(autofocus setup) {N + 1} reference images for {N} ROIs -> error before any hardware call giving both '
+          f'numbers',
+          err is not None and f'{N + 1} reference image(s)' in str(err) and f'for {N} ROI(s)' in str(err)
+          and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+    # autofocus: first check fails with autofocus_min_fraction 0.9 -> abort at once, the next ROI is not checked
+    zen_trigger.images = lambda k: np.random.default_rng(100 + k).random(_short.AUTOFOCUS_SIZE)  # unrelated image
+    try:
+        task, result, err, t0, _, server, local, *_ = zen_case('zen_af_abort', autofocus_min_fraction=0.9)
+    finally:
+        zen_trigger.images = None
+    folder = sd_folder(local, zen.created[-1])
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    af_folder = os.path.join(folder, 'autofocus')
+    rows = list(csv.reader(open(os.path.join(af_folder, 'ROI_probe_autofocus_summary.csv')))) \
+        if os.path.isdir(af_folder) else []
+    scores = np.load(os.path.join(af_folder, 'correlation.npy')) if os.path.isdir(af_folder) else None
+    lines = log_lines(folder)
+    check(f'(autofocus abort) {N} ROIs, min fraction 0.9, the first check fails -> warning "Autofocus check failed for '
+          f'{NAMES[0]}", error with the counts, experiment stopped before the next ROI; autofocus/'
+          f'ROI_probe_autofocus_summary.csv (new columns, 1 row, written by the task and not rewritten by the report) '
+          f'and correlation.npy (NaN for {NAMES[1]}) kept; no autofocus_scores.csv; log file closed',
+          err is not None and 'Autofocus check: 1 of 2 ROI(s) failed in cycle 1' in str(err)
+          and any(lvl == logging.WARNING and m.startswith(f'Autofocus check failed for {NAMES[0]} (score ')
+                  for lvl, m in msgs)
+          and any(lvl == logging.ERROR and 'below the minimum fraction 90%' in m for lvl, m in msgs)
+          and sum(m.startswith('Autofocus check cycle') for _, m in msgs) == 1
+          and not any('Triggering ZEN acquisition' in m for _, m in msgs)
+          and rows[0] == ['experiment_folder', 'roi_name', 'probe_name', 'correlation', 'cycle', 'shift_y_px',
+                          'shift_x_px', 'passed'] and len(rows) == 2
+          and rows[1][:3] == [os.path.basename(zen.created[-1]), NAMES[0], 'RT1'] and rows[1][4] == '1'
+          and float(rows[1][3]) < 0.9 and rows[1][-1] == 'False'
+          and not glob.glob(os.path.join(folder, '**', 'autofocus_scores.csv'), recursive=True)
+          and scores is not None and scores.shape == (1, N) and not np.isnan(scores[0, 0]) and np.isnan(scores[0, 1])
+          and lines and lines[-1].endswith('Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
+          (err, rows, scores, lines[-1:]))
+    check('(autofocus report) made after an autofocus abort: heatmap and drift figure in metadata/autofocus/, no second '
+          'CSV; listed in the log',
+          all(os.path.isfile(os.path.join(af_folder, n)) for n in ('autofocus_correlation_heatmap.png',
+                                                                  'autofocus_drift.png'))
+          and any(m == 'Autofocus report: autofocus_correlation_heatmap.png, autofocus_drift.png' for _, m in msgs),
+          (os.listdir(af_folder) if os.path.isdir(af_folder) else None, [m for _, m in msgs if 'report' in m]))
+    end_state_ok('autofocus abort', t0)
+
+    # autofocus report failing: warning only, the cleanup goes on
+    original_report = him.autofocus_report.report_run
+
+    def broken_report(*args, **kwargs):
+        raise RuntimeError('report failure (test)')
+
+    him.autofocus_report.report_run = broken_report
+    try:
+        task, result, err, t0, _, server, local, *_ = zen_case('zen_report_error')
+    finally:
+        him.autofocus_report.report_run = original_report
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    folder = sd_folder(local, zen.created[-1])
+    lines = log_lines(folder)
+    check('(autofocus report) an exception in report_run -> warning "Autofocus report could not be created: ..."; run '
+          'completed, cleanup to the end (last log line), log file closed',
+          err is None and result and result['cycles_done'] == 1
+          and any(lvl == logging.WARNING and m.startswith('Autofocus report could not be created: ')
+                  and 'report failure (test)' in m for lvl, m in msgs)
+          and lines and lines[-1].endswith('Hi-M task ended after 1/1 cycle(s).') and not run_log_handlers(),
+          (err, [m for lvl, m in msgs if lvl >= logging.WARNING]))
+    end_state_ok('autofocus report failing', t0)
+
+    # autofocus image of the first ROI created (empty) by ZEN before "ready", filled after the trigger
+    zen_trigger.placeholder = True
+    try:
+        task, result, err, t0, *_ = zen_case('af_placeholder')
+    finally:
+        zen_trigger.placeholder = False
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    checks_af = [m for m in msgs if m.startswith('Autofocus check cycle')]
+    check(f'(autofocus image) the image file of the first ROI exists before "ready": run completed, {N} checks '
+          f'passed, the first ROI uses that file',
+          err is None and result and result['cycles_done'] == 1 and len(checks_af) == N
+          and all(m.endswith(' - pass') for m in checks_af)
+          and any(m.startswith(f'Autofocus image of {NAMES[0]}: experiment_AcquisitionBlock1_pt') for m in msgs),
+          (err, checks_af))
+    end_state_ok('autofocus image before ready', t0)
+
+    # online transfer: setup check, server reachable, server unreachable, interrupt
+    task, result, err, t0, *_ = zen_case('tr_noserver', transfer_data=True, save_network_path='')
+    check("(transfer) transfer_data on and save_network_path empty -> error before any hardware call",
+          err is not None and "transfer_data is on but 'save_network_path' is empty" in str(err)
+          and not [n for n, _ in calls(t0) if n in HARDWARE], err)
+
+    def server_files(server):
+        return sorted(os.path.relpath(os.path.join(d, n), server) for d, _, fs in os.walk(server) for n in fs)
+
+    acquired_before = len(zen_trigger.acquired)
+    task, result, err, t0, _, server, local, *_ = zen_case('tr_ok', transfer_data=True)
+    zen_name = os.path.basename(zen.created[-1])
+    folder = sd_folder(local, zen.created[-1])
+    on_server = server_files(server)
+    acquired = [os.path.join(zen_name, os.path.relpath(p, zen.created[-1])) for p in zen_trigger.acquired[acquired_before:]]
+    metadata = sorted(os.path.join(zen_name, 'metadata', f) for f in server_files(folder))  # recursive
+    check(f'(transfer, server reachable) metadata folder local (<save_path>/<YYYY-MM-DD>/...); on the server '
+          f'<save_network_path>/<ZEN folder name>/: the {N} *_AcquisitionBlock2_pt*.czi with their relative path, '
+          f'every metadata file incl. metadata/autofocus/ and HiM_task.log (metadata/...), no autofocus image '
+          f'(Block1), no .part file',
+          err is None and result and result['directory'] == folder and len(acquired) == N
+          and on_server == sorted(acquired + metadata) and os.path.join(zen_name, 'metadata', 'HiM_task.log') in on_server
+          and os.path.join(zen_name, 'metadata', 'autofocus', 'correlation.npy') in on_server
+          and not any('AcquisitionBlock1' in f or f.endswith('.part') for f in on_server),
+          (err, on_server, acquired, metadata))
+    check('(transfer, server reachable) the copies are identical to the local files',
+          all(open(os.path.join(server, f), 'rb').read() == open(os.path.join(zen.root, f), 'rb').read() for f in acquired)
+          and open(os.path.join(server, zen_name, 'metadata', 'experiment_parameters', 'HiM_parameters.yml'), 'rb').read()
+          == open(os.path.join(folder, 'experiment_parameters', 'HiM_parameters.yml'), 'rb').read())
+    end_state_ok('transfer, server reachable', t0)
+
+    # 2 cycles: server folder created early; the Block2 files of cycle 1 sent during the fluidics of cycle 2
+    two_probes = copy.deepcopy(EXAMPLE)
+    two_probes['probes'] = {1: 'RT1', 2: 'RT2'}
+    seen_at = {}
+    original_hyb, original_start = him.HiMSDTask._hybridization, him.HiMSDTask._start_autofocus_cycle
+
+    def spy_hyb(self, label, rt, tube, hyb_steps):
+        if rt not in seen_at:  # first hybridization step of the cycle: is the server folder there?
+            seen_at[rt] = {'server_folder': os.path.isdir(os.path.join(self.save_network_path, self._server_path()))}
+        return original_hyb(self, label, rt, tube, hyb_steps)
+
+    def spy_start(self, rt):  # start of the imaging of the cycle (after the pause of the transfer)
+        seen_at.setdefault(rt, {})['on_server'] = sorted(
+            f for d, _, fs in os.walk(self.save_network_path) for f in fs if 'AcquisitionBlock2' in f)
+        seen_at[rt]['acquired'] = [os.path.basename(p) for p in zen_trigger.acquired]
+        return original_start(self, rt)
+
+    from qudi.tasks.common import data_transfer as dt
+
+    def wait_until(cond, timeout=5.0):
+        end = monotonic() + timeout
+        while monotonic() < end:
+            if cond():
+                return True
+            sleep(0.02)
+        return bool(cond())
+
+    live = {}
+    original_image_roi = him.HiMSDTask._image_roi
+
+    def spy_image_roi(self, roi_name, file_name):  # live copy after the first ROI, while the image copies are paused
+        original_image_roi(self, roi_name, file_name)
+        if 'first_roi' in live:
+            return
+        base = os.path.join(self.save_network_path, self._server_path('metadata'))
+        wanted = [os.path.join('autofocus', 'ROI_probe_autofocus_summary.csv'), 'movie_name.txt', 'HiM_task.log']
+        arrived = wait_until(lambda: all(os.path.isfile(os.path.join(base, w)) for w in wanted), 5.0)
+        live['first_roi'] = {'arrived': arrived, 'image_copies_paused': not self._transfer._allowed.is_set(),
+                             'movie_lines': open(os.path.join(base, 'movie_name.txt')).read().split()
+                             if arrived else None}
+    copy_log = []
+    real_copy = dt.DataTransfer._copy
+
+    def logged_copy(transfer, src, relative_dest):
+        role = 'live' if transfer is getattr(live.get('task'), '_metadata_transfer', None) else 'other'
+        copy_log.append((role, os.path.basename(src)))
+        return real_copy(transfer, src, relative_dest)
+    original_setup_transfer = him.HiMSDTask._start_transfer
+
+    def spy_start_transfer(self):
+        original_setup_transfer(self)
+        live['task'] = self
+    him.HiMSDTask._hybridization, him.HiMSDTask._start_autofocus_cycle = spy_hyb, spy_start
+    him.HiMSDTask._image_roi, him.HiMSDTask._start_transfer = spy_image_roi, spy_start_transfer
+    dt.DataTransfer._copy = logged_copy
+    acquired_before = len(zen_trigger.acquired)
+    try:
+        task, result, err, t0, _, server, local, *_ = zen_case('tr_two', transfer_data=True, injections=two_probes)
+    finally:
+        him.HiMSDTask._hybridization, him.HiMSDTask._start_autofocus_cycle = original_hyb, original_start
+        him.HiMSDTask._image_roi, him.HiMSDTask._start_transfer = original_image_roi, original_setup_transfer
+        dt.DataTransfer._copy = real_copy
+    first = live.get('first_roi', {})
+    check('(live copy, transfer_data on) after the first ROI: the score file, movie_name.txt (1 line) and the log are on '
+          'the server before the end of the run, while the image copies are paused (imaging)',
+          first.get('arrived') and first.get('image_copies_paused') and first.get('movie_lines')
+          and len(first['movie_lines']) == 1, first)
+    live_refs = [n for role, n in copy_log if role == 'live' and n == 'autofocus_reference.npy']
+    end_refs = [n for role, n in copy_log if role == 'other' and n == 'autofocus_reference.npy']
+    cycle_refs = sorted(n for role, n in copy_log if role == 'live' and n.startswith('reference_images_'))
+    check('(live copy) autofocus_reference.npy copied at the start (live, once) and in the cleanup (once) only; '
+          'reference_images_<RT>.npy copied live once per cycle (RT1, RT2); the fluidics record copied live',
+          live_refs == ['autofocus_reference.npy'] and end_refs == ['autofocus_reference.npy']
+          and cycle_refs == ['reference_images_RT1.npy', 'reference_images_RT2.npy']
+          and ('live', 'fluidics_log.csv') in copy_log and task._metadata_transfer is None,
+          (live_refs, end_refs, cycle_refs, sorted(set(copy_log))[:12]))
+    zen_name_two = os.path.basename(os.path.dirname(os.path.dirname(zen_trigger.acquired[-1])))
+    local_meta = sd_folder(local, os.path.join(zen.root, zen_name_two))
+    server_meta = os.path.join(server, zen_name_two, 'metadata')
+    same_files = all(open(os.path.join(server_meta, rel), 'rb').read() == open(os.path.join(local_meta, rel), 'rb').read()
+                     for rel in server_files(local_meta) if rel != 'HiM_task.log')
+    check('(live copy) at the end the server holds the final version of every metadata file (cleanup with update=True)',
+          os.path.isdir(server_meta) and server_files(server_meta) == server_files(local_meta) and same_files,
+          (server_files(server_meta)[:6], server_files(local_meta)[:6]))
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    cycle1_files = [os.path.basename(p) for p in zen_trigger.acquired[acquired_before:acquired_before + N]]
+    check('(transfer, 2 cycles) the server folder <server>/<ZEN folder name>/ exists before the first fluidics step '
+          '(created by the transfer thread when the run folder is created; info logged)',
+          err is None and seen_at.get('RT1', {}).get('server_folder') is True
+          and any(m.startswith('Data transfer: server folder ') and m.endswith(' requested') for m in msgs),
+          (err, seen_at))
+    check(f'(transfer, 2 cycles) after the imaging of cycle 1 and the hybridization of cycle 2, the {N} Block2 files of '
+          f'cycle 1 are on the server (start of the imaging of cycle 2); each listing logged with the counts',
+          result and result['cycles_done'] == 2 and seen_at.get('RT2', {}).get('on_server') == sorted(cycle1_files)
+          and any(m.startswith('Data transfer: ') and 'acquisition file(s) (*_AcquisitionBlock2_pt*.czi)' in m
+                  and f', {N} newly queued, ' in m for m in msgs), (result, seen_at.get('RT2'), cycle1_files))
+    end_state_ok('transfer, 2 cycles', t0)
+
+    popups = []
+    original_popup = him.show_warning_popup
+    him.show_warning_popup = lambda title, text: popups.append((title, text)) or True  # pop-up recorded
+    try:
+        unreachable = os.path.join(TMP, 'a_file_tr.txt')
+        open(unreachable, 'w').close()
+        task, result, err, t0, _, server, local, *_ = zen_case('tr_down', transfer_data=True,
+                                                               save_network_path=os.path.join(unreachable, 'server'))
+    finally:
+        him.show_warning_popup = original_popup
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    folder = sd_folder(local, zen.created[-1])
+    check('(transfer, server unreachable) setup continues: one warning pop-up ("... is not reachable. The experiment '
+          'continues; the data will be transferred when the server is back."), run completed, files kept locally, '
+          'warning with the number of files not sent and their local paths',
+          err is None and result and result['cycles_done'] == 1 and len(popups) == 1
+          and popups[0][1].endswith('is not reachable. The experiment continues; the data will be transferred when '
+                                    'the server is back.')
+          and os.path.isfile(os.path.join(folder, 'HiM_task.log'))
+          and any(lvl == logging.WARNING and 'file(s) not sent to' in m and folder in m for lvl, m in msgs),
+          (err, popups, [m for lvl, m in msgs if lvl == logging.WARNING][-2:]))
+    end_state_ok('transfer, server unreachable', t0)
+
+    acquired_before = len(zen_trigger.acquired)
+    task, result, err, t0, t_int, server, local, *_ = zen_case(
+        'tr_int', transfer_data=True, interrupt_when=lambda: any(t == f'ROI 2/{N}' for _, s, t in PROGRESS))
+    zen_name = os.path.basename(zen.created[-1])
+    on_server = server_files(server)
+    check('(transfer, interrupt during the imaging) cleanup sends the metadata files and HiM_task.log, not the czi '
+          'files (left in the ZEN folder)',
+          t_int is not None and result is None and len(zen_trigger.acquired) > acquired_before
+          and os.path.join(zen_name, 'metadata', 'HiM_task.log') in on_server
+          and os.path.join(zen_name, 'metadata', 'experiment_parameters', 'HiM_parameters.yml') in on_server
+          and not any(f.endswith('.czi') for f in on_server), on_server)
+    end_state_ok('transfer, interrupt', t0)
+    zen_box.stop()
+
+    # (6) Hi-M dummy: run folder as before, with HiM_task.log
+    task = make_task(user_config_path=files(one_probe, 'dummy_log'))
+    result, err, t0, _ = run(task)
+    folder = result['directory'] if result else ''
+    lines = log_lines(folder)
+    check('(dummy) run folder as before (save_path/YYYY_MM_DD/001_HiM_<sample>), with HiM_task.log ending with '
+          '"Hi-M task ended after 1/1 cycle(s)."; handlers removed',
+          err is None and result and os.path.basename(folder) == '001_HiM_Mysample'
+          and os.path.dirname(os.path.dirname(folder)) == os.path.join(TMP, 'data_dummy_log')
+          and lines and lines[-1].endswith(' - qudi.tasks.him.HiMDummyTask - Hi-M task ended after 1/1 cycle(s).')
+          and not run_log_handlers(), (err, result, lines[-1:]))
+
+# --- autofocus check of the SD: score, abort rule, wait loop (functions called directly, stand-ins) ---
+if selected('autofocus'):
+    from scipy.ndimage import gaussian_filter
+    from qudi.tasks.common import autofocus_check as af
+
+    base = _short.autofocus_image(seed=7, shape=(256, 256))
+    score, sy, sx = af.autofocus_score(base, base)
+    check('(autofocus_score) same image -> score ~1, shift (0, 0)', score > 0.999 and (sy, sx) == (0, 0), (score, sy, sx))
+    moved = np.roll(np.roll(base, 8, axis=0), -12, axis=1)
+    score, sy, sx = af.autofocus_score(base, moved)
+    check('(autofocus_score) image shifted by (8, -12) px -> score ~1, shift recovered', score > 0.99
+          and (sy, sx) == (8, -12), (score, sy, sx))
+    score_scaled, *_ = af.autofocus_score(base, base * 3 + 500)
+    check('(autofocus_score) image x 3 + offset -> same score', abs(score_scaled - 1.0) < 1e-6, score_scaled)
+    score_blur, *_ = af.autofocus_score(base, gaussian_filter(base, 8))
+    check('(autofocus_score) heavily blurred image -> clearly lower score', score_blur < 0.8, score_blur)
+    try:
+        af.autofocus_score(base, base[:200])
+        shape_err = None
+    except ValueError as err:
+        shape_err = err
+    check('(autofocus_score) shape mismatch -> ValueError naming both shapes',
+          shape_err is not None and '(256, 256)' in str(shape_err) and '(200, 256)' in str(shape_err), shape_err)
+    rect = _short.autofocus_image(seed=8, shape=(192, 320))
+    score, sy, sx = af.autofocus_score(rect, np.roll(rect, 6, axis=1))
+    check('(autofocus_score) non-square image (192 x 320) works, shift recovered', score > 0.99 and (sy, sx) == (0, 6),
+          (score, sy, sx))
+    y0, x0, th, tw = af._template_box((1024, 1024))
+    check('(autofocus_score) template of a 1024 px binned image = legacy crop [262:762]',
+          (y0, y0 + th, x0, x0 + tw) == (262, 762, 262, 762), (y0, th))
+
+    def af_task(n_rois, min_fraction, threshold=0.6, n_cycles=2):
+        """HiMSDTask with the state of a run after its setup (no module, no hardware): n_rois references, the
+        metadata folder and the ZEN folder in TMP; the autofocus image read is the one given to next_image."""
+        task = him.HiMSDTask()
+        task.log.addHandler(H()) if not any(isinstance(h, H) for h in task.log.handlers) else None
+        task._check_interrupt = lambda: None  # not run by the task runner: no interrupt
+        task.roi_names = [f'ROI_{k:03d}' for k in range(n_rois)]
+        task._cycles = [(k + 1, f'RT{k + 1}') for k in range(n_cycles)]
+        task._cycles_done = 0
+        task.correlation_threshold, task.autofocus_min_fraction = threshold, min_fraction
+        task.directory = tempfile.mkdtemp(dir=TMP)
+        task._zen_directory = tempfile.mkdtemp(dir=TMP)
+        task._af_refs = np.stack([base] * n_rois)
+        task._af_scores = np.full((n_cycles, n_rois), np.nan)
+        task._af_failed_rois = set()
+        with open(task._af_path(task._AF_CSV), 'w', newline='') as f:  # <directory>/autofocus/
+            csv.writer(f).writerow(task._AF_CSV_COLUMNS)
+        task._af_seen = set()
+        task.FILE_STABLE_PERIOD_S = 0.05  # short settings
+        return task
+
+    def check_rois(task, images):
+        """_check_autofocus for the ROIs in order, ZEN saving images[k] for ROI k; returns (ROIs checked, error)."""
+        checked = []
+        for roi_name, image in zip(task.roi_names, images):
+            _short.write_autofocus_image(task._zen_directory, len(task._af_seen) + 1, image)
+            try:
+                task._check_autofocus(roi_name)
+            except RuntimeError as err:
+                checked.append(roi_name)
+                return checked, err
+            checked.append(roi_name)
+        return checked, None
+
+    bad = gaussian_filter(base, 8)  # fails the check
+    task = af_task(10, 0.7)
+    task._start_autofocus_cycle('RT1')
+    t0 = monotonic()
+    checked, err = check_rois(task, [bad, base, bad, base, bad, base, base, base, base, base])
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    check('(abort rule) 10 ROIs, min fraction 0.7: 3 failures -> no abort, all 10 ROIs checked, 7/10 passed',
+          err is None and len(checked) == 10 and task._af_failures == 3 and task._af_passed == 7, (err, checked))
+    task._end_autofocus_cycle('RT1')
+    task._cycles_done = 1
+    task._start_autofocus_cycle('RT2')
+    check('(abort rule) counter reset at the start of the next cycle; the ROIs of the previous cycle are remembered',
+          task._af_failures == 0 and task._af_passed == 0 and task._af_failed_before == {'ROI_000', 'ROI_002', 'ROI_004'},
+          (task._af_failures, task._af_failed_before))
+    t0 = monotonic()
+    checked, err = check_rois(task, [bad, base, bad, bad, bad, base, base, base, base, base])
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    check('(abort rule) next cycle: the 4th failure (ROI_004) aborts at once - no further ROI checked; error with '
+          'the counts and the fraction; warnings for the ROIs that also failed in the previous cycle',
+          err is not None and checked == ['ROI_000', 'ROI_001', 'ROI_002', 'ROI_003', 'ROI_004']
+          and '4 of 10 ROI(s) failed in cycle 2 (RT2)' in str(err) and 'at most 60% can pass' in str(err)
+          and 'minimum fraction 70%' in str(err)
+          and any(lvl == logging.ERROR and '4 of 10 ROI(s) failed' in m for lvl, m in msgs)
+          and sum(lvl == logging.WARNING and 'in the previous cycle too' in m for lvl, m in msgs) == 3
+          and np.isnan(task._af_scores[1, 5:]).all(), (err, checked))
+    refs_file = np.load(os.path.join(task.directory, 'autofocus', af.REFERENCE_FILE_NAME))
+    check('(abort rule) pass: the new image replaced the reference and autofocus_reference.npy was saved again; '
+          'fail: reference kept; reference_images_RT1.npy written at the end of cycle 1',
+          np.array_equal(refs_file[1], base) and np.array_equal(task._af_refs[0], base)
+          and os.path.isfile(os.path.join(task.directory, 'autofocus', 'reference_images_RT1.npy'))
+          and not os.path.exists(os.path.join(task.directory, af.REFERENCE_FILE_NAME)))
+    rows = list(csv.reader(open(os.path.join(task.directory, 'autofocus', 'ROI_probe_autofocus_summary.csv'))))
+    zen_name = os.path.basename(task._zen_directory)
+    check('(abort rule) autofocus/ROI_probe_autofocus_summary.csv: header experiment_folder, roi_name, probe_name, '
+          'correlation, cycle, shift_y_px, shift_x_px, passed; one row per check as they happen (10 + 5, incl. the '
+          'check that aborted)',
+          rows[0] == list(af.SCORES_COLUMNS) and len(rows) == 1 + 15
+          and rows[1][:3] == [zen_name, 'ROI_000', 'RT1'] and rows[1][4] == '1'
+          and rows[-1][:3] == [zen_name, 'ROI_004', 'RT2'] and rows[-1][4] == '2' and rows[-1][-1] == 'False',
+          rows[-1])
+
+    # wait loop: no new image -> polls until an interrupt is requested
+    task = af_task(2, 0.5)
+    polls = []
+
+    from qudi.core.scripting.modulescript import ModuleScriptInterrupted
+
+    def fake_interrupt():
+        polls.append(monotonic())
+        if len(polls) >= 3:  # the user clicks Interrupt during the 3rd poll
+            raise ModuleScriptInterrupted()
+
+    task._check_interrupt = fake_interrupt
+    task._AF_POLL_S = 0.05
+    try:
+        task._wait_for_autofocus_image('ROI_000')
+        stopped = None
+    except ModuleScriptInterrupted as exc:
+        stopped = exc
+    check('(wait loop) no new autofocus image: the loop waits (no timeout) and stops as soon as an interrupt is '
+          'requested (ModuleScriptInterrupted)', stopped is not None and len(polls) == 3, (stopped, len(polls)))
+    _short.write_autofocus_image(task._zen_directory, 1)
+    _short.write_autofocus_image(task._zen_directory, 2)
+    task._check_interrupt = lambda: None
+    done = []
+    waiter = threading.Thread(target=lambda: done.append(task._wait_for_autofocus_image('ROI_000')), daemon=True)
+    task._af_seen = set()
+    waiter.start()
+    sleep(0.3)
+    two_new = waiter.is_alive()  # two new files (ZEN still writing): keeps waiting
+    os.remove(sorted(glob.glob(os.path.join(task._zen_directory, '**', '*.czi'), recursive=True))[0])
+    waiter.join(2)
+    check('(wait loop) two new files -> keeps waiting; exactly one new file -> returns it',
+          two_new and done and done[0].endswith('_pt2.czi'), (two_new, done))
+
+    # image file of the first ROI created by ZEN before "ready" (still empty), filled at the end of the autofocus
+    task = af_task(2, 0.5)
+    task._zen_folders_before, task._data_root = set(), tempfile.mkdtemp(dir=TMP)
+    placeholder = os.path.join(task._zen_directory, 'autofocus', 'experiment_AcquisitionBlock1_pt1.czi')
+    os.makedirs(os.path.dirname(placeholder))
+    open(placeholder, 'wb').close()  # ZEN reached the autofocus block of the first ROI
+    task.directory = task._create_data_folder()
+    seen_after_setup = set(task._af_seen)
+    _short.write_autofocus_image(task._zen_directory, 1)  # ZEN writes the image of the first ROI (same file)
+    t0 = monotonic()
+    first = task._wait_for_autofocus_image('ROI_000')
+    _short.write_autofocus_image(task._zen_directory, 2)  # second ROI
+    second = task._wait_for_autofocus_image('ROI_001')
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    check('(autofocus image) the image file already in the ZEN folder when the run folder is created (first ROI) is '
+          'the image of the first ROI after the "done" trigger (snapshot empty at the start); the second ROI gets '
+          'the next image (snapshot kept); wait / found logged',
+          seen_after_setup == set() and first == placeholder and second.endswith('_pt2.czi')
+          and f'Waiting for the autofocus image of ROI_000 ({af.AUTOFOCUS_IMAGE_PATTERN}) in {task._zen_directory}' in msgs
+          and 'Autofocus image of ROI_000: experiment_AcquisitionBlock1_pt1.czi' in msgs
+          and 'Autofocus image of ROI_001: experiment_AcquisitionBlock1_pt2.czi' in msgs, (first, second, msgs))
+
+    # still waiting: a warning every _AF_WAIT_WARNING_S with the new matching files, then the interrupt
+    task = af_task(2, 0.5)
+    _short.write_autofocus_image(task._zen_directory, 1)
+    _short.write_autofocus_image(task._zen_directory, 2)  # two new files: ZEN still writing
+    task._AF_POLL_S, task._AF_WAIT_WARNING_S = 0.05, 0.2
+    polls = []
+
+    wait_start = monotonic()
+
+    def interrupt_late():
+        polls.append(monotonic())
+        if monotonic() - wait_start > 0.65:  # the user clicks Interrupt after about 0.65 s
+            raise ModuleScriptInterrupted()
+
+    task._check_interrupt = interrupt_late
+    t0 = monotonic()
+    try:
+        task._wait_for_autofocus_image('ROI_000')
+        stopped = None
+    except ModuleScriptInterrupted as exc:
+        stopped = exc
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(autofocus image) still waiting: warning every _AF_WAIT_WARNING_S (0.2 s here) "Still waiting for the '
+          'autofocus image of ROI_000 after <t> s: 2 new matching file(s)" with their names; stops on interrupt',
+          stopped is not None and len(warnings) >= 2
+          and all(m.startswith('Still waiting for the autofocus image of ROI_000 after ') for m in warnings)
+          and all(': 2 new matching file(s) (experiment_AcquisitionBlock1_pt1.czi, experiment_AcquisitionBlock1_pt2.czi)'
+                  in m for m in warnings), (stopped, warnings))
+
+    # reading in the helper process (job raising an exception): fails twice then succeeds; always fails
+    def with_worker(task, worker):
+        task._af_worker = worker  # instance attribute: plain function, no binding
+        return task
+
+    task = with_worker(af_task(2, 0.5), _short.read_and_score_failing)
+    task._AF_READ_RETRY_S = 0.01
+    task._start_autofocus_cycle('RT1')
+    path = _short.write_autofocus_image(task._zen_directory, 1, base)
+    open(path + '.failures', 'w').write('2')
+    t0 = monotonic()
+    try:
+        task._check_autofocus('ROI_000')
+        read_err = None
+    except Exception as exc:
+        read_err = exc
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(autofocus image) read failing twice in the helper process, then working: score computed (pass), two '
+          'warnings (attempts 1/5, 2/5)',
+          read_err is None and open(path + '.failures').read() == '0' and task._af_passed == 1
+          and not np.isnan(task._af_scores[0, 0])
+          and len(warnings) == 2 and 'attempt 1/5' in warnings[0] and 'attempt 2/5' in warnings[1], (read_err, warnings))
+
+    task = with_worker(af_task(2, 0.5), _short.read_and_score_failing)
+    task._AF_READ_RETRY_S = 0.01
+    task._start_autofocus_cycle('RT1')
+    path = _short.write_autofocus_image(task._zen_directory, 1, base)
+    open(path + '.failures', 'w').write('99')
+    t0 = monotonic()
+    try:
+        task._check_autofocus('ROI_000')
+        read_err = None
+    except OSError as exc:
+        read_err = exc
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(autofocus image) read always failing in the helper process: 4 warnings, then the error of the 5th attempt '
+          'is raised', read_err is not None and 'file still being written' in str(read_err) and len(warnings) == 4,
+          (read_err, warnings))
+
+    # --- reader: one decoding thread, both czifile API forms (czifile replaced by a stand-in module) ---
+    import types
+    calls_czi = []
+
+    class FakeCzi:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def asarray(self, resize=True, order=0, out=None, max_workers=None):  # czifile 2019 signature
+            calls_czi.append(('asarray', max_workers))
+            return np.arange(20, dtype=np.uint16).reshape(1, 1, 4, 5, 1)
+
+    class FakeCziRecent(FakeCzi):
+        def asarray(self, *, maxworkers=None):
+            calls_czi.append(('asarray-recent', maxworkers))
+            return np.arange(20, dtype=np.uint16).reshape(1, 1, 4, 5, 1)
+
+    def fake_imread(filename, *args, **kwargs):  # czifile 2019 imread: kwargs passed to asarray
+        calls_czi.append(('imread', kwargs.get('max_workers')))
+        return np.arange(20, dtype=np.uint16).reshape(1, 1, 4, 5, 1)
+
+    forms = {'CziFile.asarray(max_workers)': types.SimpleNamespace(CziFile=FakeCzi, imread=fake_imread),
+             'CziFile.asarray(maxworkers)': types.SimpleNamespace(CziFile=FakeCziRecent, imread=fake_imread),
+             'imread(**kwargs)': types.SimpleNamespace(imread=fake_imread)}
+    read_forms, planes = {}, {}
+    saved_czifile = sys.modules.get('czifile')
+    try:
+        for label, module in forms.items():
+            sys.modules['czifile'] = module
+            calls_czi.clear()
+            planes[label] = _short.real_read_autofocus_image('fake.czi')
+            read_forms[label] = (list(calls_czi), af.single_thread_read_form())
+    finally:
+        if saved_czifile is None:
+            sys.modules.pop('czifile', None)
+        else:
+            sys.modules['czifile'] = saved_czifile
+    check('(reader) read_autofocus_image decodes with ONE thread: CziFile(path).asarray(max_workers=1) (czifile 2019), '
+          'asarray(maxworkers=1) (recent form), imread(path, max_workers=1) without the class; first plane (H, W)',
+          read_forms == {'CziFile.asarray(max_workers)': ([('asarray', 1)], 'CziFile(path).asarray(max_workers=1)'),
+                         'CziFile.asarray(maxworkers)': ([('asarray-recent', 1)], 'CziFile(path).asarray(maxworkers=1)'),
+                         'imread(**kwargs)': ([('imread', 1)], 'imread(path, max_workers=1)')}
+          and all(p.shape == (4, 5) and p[1, 2] == 7 for p in planes.values()), read_forms)
+    versions = af.reader_versions()
+    check('(reader) reader_versions: czifile, imagecodecs (or imagecodecs-lite), numpy; "not installed" when missing',
+          re.fullmatch(r'czifile \S+( installed)?, imagecodecs(-lite)? \S+( installed)?, numpy \S+', versions)
+          and versions.endswith(f'numpy {np.__version__}')
+          and (importlib.util.find_spec('czifile') is not None or versions.startswith('czifile not installed')),
+          versions)
+
+    # --- the new file is read only once its size is stable ---
+    task = af_task(2, 0.5)
+    task._start_autofocus_cycle('RT1')
+    path = _short.write_autofocus_image(task._zen_directory, 1, base)
+    full = open(path, 'rb').read()
+    open(path, 'wb').write(full[:len(full) // 2])  # ZEN still writing: half of the file
+    waits = []
+    real_wait = task._zen_wait
+
+    def zen_writing(duration):
+        waits.append(os.path.getsize(path))
+        if len(waits) == 1:
+            open(path, 'wb').write(full)  # ZEN finishes the file during the first wait
+        real_wait(min(duration, 0.01))
+    task._zen_wait = zen_writing
+    t0 = monotonic()
+    task._check_autofocus('ROI_000')
+    expected_score = af.autofocus_score(base, base)[0]
+    check('(stable size) a file whose size changes once is read only after two equal sizes (2 waits: half size, then '
+          'full size); the complete image is scored (same score as autofocus_score in the test process)',
+          waits == [len(full) // 2, len(full)] and abs(task._af_scores[0, 0] - expected_score) < 1e-9
+          and task._af_passed == 1, (waits, task._af_scores[0, 0]))
+
+    # --- helper process: normal check, crash, timeout, interrupt (each new process: about 1 s to start) ---
+    task = af_task(2, 0.5)
+    task._start_autofocus_cycle('RT1')
+    noisy = base + np.random.default_rng(3).normal(0, 0.05 * float(base.std()), base.shape)
+    _short.write_autofocus_image(task._zen_directory, 1, noisy)
+    task._check_autofocus('ROI_000')
+    in_process = af.autofocus_score(base, noisy)
+    check('(helper process) normal check: same score as autofocus_score in the test process; the image returned by the '
+          'helper becomes the reference',
+          abs(task._af_scores[0, 0] - in_process[0]) < 1e-12 and np.array_equal(task._af_refs[0], noisy),
+          (task._af_scores[0, 0], in_process))
+
+    def af_rows(task):
+        return list(csv.reader(open(task._af_path(task._AF_CSV))))[1:]
+
+    # crash once: error, new pool, second attempt works
+    task = with_worker(af_task(2, 0.5), _short.helper_exit_once)
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    pool_before = task._af_executor()
+    t0 = monotonic()
+    task._check_autofocus('ROI_000')
+    errors = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.ERROR]
+    check('(helper process) crash once (os._exit in the job): error "the image reader process crashed (or timed out) - '
+          'process died ...", new pool, second attempt scored (pass)',
+          len(errors) == 1 and errors[0].startswith('Autofocus check of ROI_000: the image reader process crashed (or '
+                                                    'timed out) - process died')
+          and task._af_pool is not pool_before and task._af_passed == 1 and not np.isnan(task._af_scores[0, 0]),
+          (errors, task._af_passed))
+
+    # crash twice: the ROI counts as failed, the task goes on
+    task = with_worker(af_task(4, 0.5), _short.helper_exit)
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    t0 = monotonic()
+    try:
+        task._check_autofocus('ROI_000')
+        crash_err = None
+    except Exception as exc:
+        crash_err = exc
+    errors = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.ERROR]
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(helper process) crash twice: no exception, 3 errors (crash, crash, failed twice), the ROI counts as FAILED '
+          '(reference kept, row with empty score and passed False, NaN), warning "Autofocus check failed for ROI_000 '
+          '(the image could not be read)"',
+          crash_err is None and len(errors) == 3 and 'failed twice' in errors[2] and task._af_failures == 1
+          and np.isnan(task._af_scores[0, 0]) and np.array_equal(task._af_refs[0], base)
+          and af_rows(task) == [[os.path.basename(task._zen_directory), 'ROI_000', 'RT1', '', '1', '', '', 'False']]
+          and 'Autofocus check failed for ROI_000 (the image could not be read)' in warnings,
+          (crash_err, errors, af_rows(task)))
+    del task._af_worker  # back to the class worker (read_and_score_npy): the next ROI is checked normally
+    _short.write_autofocus_image(task._zen_directory, 2, base)
+    task._check_autofocus('ROI_001')
+    check('(helper process) after two crashes the next ROI is checked with a new process (pass)',
+          task._af_passed == 1 and not np.isnan(task._af_scores[0, 1]))
+    # crash twice on most ROIs: the minimum-fraction rule decides as usual
+    task = with_worker(af_task(2, 0.9), _short.helper_exit)
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    try:
+        task._check_autofocus('ROI_000')
+        rule_err = None
+    except RuntimeError as exc:
+        rule_err = exc
+    check('(helper process) crash twice with min fraction 0.9: the failed check triggers the abort rule (RuntimeError)',
+          rule_err is not None and 'below the minimum fraction' in str(rule_err), rule_err)
+
+    # timeout: same handling
+    task = with_worker(af_task(4, 0.5), _short.helper_sleep)
+    task.AUTOFOCUS_JOB_TIMEOUT_S = 3.0
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    t0 = monotonic()
+    task._check_autofocus('ROI_000')
+    elapsed = monotonic() - t0
+    errors = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.ERROR]
+    check('(helper process) job that never ends (timeout 3 s): two timeouts, then the ROI counts as failed; no '
+          'exception; the stuck processes are stopped',
+          len(errors) == 3 and all('timeout: no result after 3 s' in m for m in errors[:2])
+          and task._af_failures == 1 and np.isnan(task._af_scores[0, 0]) and elapsed < 15,
+          (errors, elapsed))
+
+    # interrupt while waiting for the helper: the task stops, the cleanup shuts the pool down
+    task = with_worker(af_task(2, 0.5), _short.helper_sleep)
+    task._start_autofocus_cycle('RT1')
+    _short.write_autofocus_image(task._zen_directory, 1, base)
+    interrupt_at = [None]
+
+    def interrupt_after_start():
+        processes = (getattr(task._af_pool, '_processes', None) or {}) if getattr(task, '_af_pool', None) else {}
+        if processes and interrupt_at[0] is None:
+            interrupt_at[0] = monotonic() + 0.5  # the job is running
+        if interrupt_at[0] is not None and monotonic() >= interrupt_at[0]:
+            raise ModuleScriptInterrupted()
+    task._check_interrupt = interrupt_after_start
+    try:
+        task._check_autofocus('ROI_000')
+        stop_err = None
+    except ModuleScriptInterrupted as exc:
+        stop_err = exc
+    helper_processes = list((task._af_pool._processes or {}).values()) if task._af_pool else []
+    task._check_interrupt = lambda: None
+    task._cleanup()
+    check('(helper process) interrupt while waiting for the helper: ModuleScriptInterrupted (task stops), _cleanup '
+          'shuts the pool down and the running helper process is stopped',
+          isinstance(stop_err, ModuleScriptInterrupted) and task._af_pool is None and helper_processes
+          and not any(p.is_alive() for p in helper_processes), (stop_err, helper_processes))
+
+# --- online data transfer: DataTransfer (common/data_transfer.py), small files in temporary folders ---
+if selected('transfer'):
+    from qudi.tasks.common import data_transfer as dt
+    tr_log = logging.getLogger('qudi.tests.data_transfer')
+    tr_log.addHandler(H()) if not any(isinstance(h, H) for h in tr_log.handlers) else None
+    tr_log.setLevel(logging.INFO)
+    real_copy = dt.shutil.copyfile
+    real_retry = dt.RETRY_PERIOD_S
+
+    def tr_files(name, n=2):
+        src = os.path.join(TMP, f'tr_src_{name}')
+        os.makedirs(os.path.join(src, 'sub'), exist_ok=True)
+        paths = []
+        for k in range(n):
+            path = os.path.join(src, 'sub', f'file_{k}.bin')
+            with open(path, 'wb') as f:
+                f.write(os.urandom(1024 * (k + 1)))
+            paths.append(path)
+        return src, paths, os.path.join(TMP, f'tr_dest_{name}')
+
+    def wait_until(cond, timeout=5.0):
+        t_end = monotonic() + timeout
+        while not cond() and monotonic() < t_end:
+            sleep(0.02)
+        return cond()
+
+    def tree_of(root):
+        return sorted(os.path.relpath(os.path.join(d, n), root) for d, _, fs in os.walk(root) for n in fs) \
+            if os.path.isdir(root) else []
+
+    # copy with the same relative path, no .part left, a file already sent is not copied again
+    src, paths, dest = tr_files('copy')
+    tr = dt.DataTransfer(tr_log, dest)
+    for p_ in paths:
+        tr.add(p_, os.path.relpath(p_, src))
+    left = tr.flush(5)
+    copies = []
+    dt.shutil.copyfile = lambda a, b: (copies.append(a), real_copy(a, b))[1]
+    tr.add(paths[0], os.path.relpath(paths[0], src))  # already sent: ignored
+    tr2 = dt.DataTransfer(tr_log, dest)               # new transfer, destination already has the file
+    tr2.add(paths[1], os.path.relpath(paths[1], src))
+    left2 = tr2.flush(5)
+    dt.shutil.copyfile = real_copy
+    check('(DataTransfer) files copied with the same relative path, identical, no .part left; a file already sent '
+          'is not copied again (same transfer: ignored; destination with the same size: counted as sent)',
+          left == [] and left2 == [] and tree_of(dest) == ['sub/file_0.bin', 'sub/file_1.bin']
+          and all(open(p_, 'rb').read() == open(os.path.join(dest, os.path.relpath(p_, src)), 'rb').read() for p_ in paths)
+          and copies == [] and tr2.is_sent(paths[1]), (left, left2, tree_of(dest), copies))
+    tr.stop(), tr2.stop()
+
+    # paused: no copy starts; allowed: copied
+    src, paths, dest = tr_files('pause', 1)
+    tr = dt.DataTransfer(tr_log, dest)
+    tr.add(paths[0], 'f.bin')
+    sleep(0.4)
+    paused_ok = tree_of(dest) == [] and tr.pending() == paths
+    tr.allow()
+    check('(DataTransfer) paused at creation: no copy starts while paused; copied once allowed',
+          paused_ok and wait_until(lambda: tr.is_sent(paths[0])) and tree_of(dest) == ['f.bin'], tree_of(dest))
+    tr.stop()
+
+    # server down: the copy raises -> no exception in the caller, server_ok False, file kept in the queue; copy
+    # working again + write test passing -> file sent, server_ok True
+    src, paths, dest = tr_files('down', 1)
+    dt.RETRY_PERIOD_S = 0.3
+    dt.shutil.copyfile = lambda a, b: (_ for _ in ()).throw(OSError('server gone (test)'))
+    tr = dt.DataTransfer(tr_log, dest)
+    t0 = monotonic()
+    tr.add(paths[0], 'f.bin')
+    tr.allow()
+    down = wait_until(lambda: not tr.server_ok)
+    still_queued = tr.pending() == paths and not tr.is_sent(paths[0]) and not os.path.exists(os.path.join(dest, 'f.bin.part'))
+    left_down = tr.flush(1)  # server down: returns at once with the files not sent
+    idle_t0 = monotonic()
+    idle_down = tr.wait_idle(5)
+    idle_dt = monotonic() - idle_t0
+    dt.shutil.copyfile = real_copy
+    back = wait_until(lambda: tr.is_sent(paths[0]), timeout=5)
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    check('(DataTransfer, server down) the copy raises: no exception in the caller, server_ok False, the file stays in '
+          'the queue, no .part left; flush returns the files not sent',
+          down and still_queued and left_down == paths, (down, still_queued, left_down))
+    check('(DataTransfer, server down) wait_idle returns True at once while the server is down',
+          idle_down is True and idle_dt < 0.2, idle_dt)
+    check('(DataTransfer, server back) copy working + write test passing (RETRY_PERIOD_S shortened) -> file sent, '
+          'server_ok True; one warning "not reachable" and one info "reachable again" (no repeated message)',
+          back and tr.server_ok and tree_of(dest) == ['f.bin']
+          and sum(lvl == logging.WARNING and 'not reachable' in m for lvl, m in msgs) == 1
+          and sum('reachable again' in m for _, m in msgs) == 1, (back, tree_of(dest), msgs))
+    tr.stop()
+    dt.RETRY_PERIOD_S = real_retry
+
+    # a copy that hangs: wait_idle(short) returns False within the timeout, server_ok False
+    src, paths, dest = tr_files('hang', 1)
+    release = threading.Event()
+    dt.shutil.copyfile = lambda a, b: (release.wait(10), real_copy(a, b))[1]
+    tr = dt.DataTransfer(tr_log, dest)
+    tr.add(paths[0], 'f.bin')
+    tr.allow()
+    started = wait_until(lambda: tr._current is not None)
+    t_start = monotonic()
+    idle = tr.wait_idle(0.3)
+    waited = monotonic() - t_start
+    check('(DataTransfer) a copy that hangs: wait_idle(0.3 s) returns False within the timeout, server_ok False',
+          started and idle is False and 0.25 < waited < 1.0 and not tr.server_ok, (started, idle, waited, tr.server_ok))
+    release.set()
+    dt.shutil.copyfile = real_copy
+    tr.stop()
+
+    # copy_metadata_to_server: relative paths kept, excluded names left out, server down -> files not sent
+    meta_src, meta_paths, server = tr_files('meta', n=3)
+    open(os.path.join(meta_src, 'HiM_task.log'), 'w').write('log\n')
+    open(os.path.join(meta_src, 'metadata.yml'), 'w').write('Time: now\n')
+    t0 = monotonic()
+    left = dt.copy_metadata_to_server(tr_log, meta_src, server, os.path.join('zen_exp', 'metadata'), 5,
+                                      exclude=('HiM_task.log',))
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    check('(copy_metadata_to_server) every file under <server>/<relative_dir>/ with its relative path, excluded name '
+          'not copied, same content; info with the number of files sent; returns []',
+          left == [] and tree_of(os.path.join(server, 'zen_exp', 'metadata'))
+          == sorted(['metadata.yml'] + [os.path.join('sub', f'file_{k}.bin') for k in range(3)])
+          and open(os.path.join(server, 'zen_exp', 'metadata', 'sub', 'file_2.bin'), 'rb').read()
+          == open(meta_paths[2], 'rb').read()
+          and any(m.startswith('Metadata copy: 4 file(s) sent to') for m in msgs), (left, tree_of(server), msgs))
+
+    def failing_copy(*args, **kwargs):
+        raise OSError('server down (test)')
+    dt.shutil.copyfile = failing_copy
+    t0 = monotonic()
+    try:
+        left = dt.copy_metadata_to_server(tr_log, meta_src, os.path.join(TMP, 'tr_server_down'), 'zen/metadata', 2)
+        raised = None
+    except Exception as err:
+        left, raised = None, err
+    finally:
+        dt.shutil.copyfile = real_copy
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    check('(copy_metadata_to_server) server down (copy raising): no exception, the 5 local files returned as not sent, '
+          'warning with their number and the local folder, within the timeout',
+          raised is None and left is not None and len(left) == 5 and monotonic() - t0 < 3
+          and any(lvl == logging.WARNING and m.startswith('Metadata copy: 5 of 5 file(s) not sent')
+                  and m.endswith(f'they are in {meta_src}') for lvl, m in msgs), (raised, left, msgs[-2:]))
+
+    # HiMSDTask._queue_acquisitions: Block2 files only, the first N (acquisitions done) in pt order, logs
+    q_zen = os.path.join(TMP, 'q_zen', '2026-11-05_HiM_q')
+    os.makedirs(os.path.join(q_zen, 'acquisition'))
+    os.makedirs(os.path.join(q_zen, 'autofocus'))
+    for k in (5, 1, 4, 2, 3):  # created out of order
+        open(os.path.join(q_zen, 'acquisition', f'experiment_AcquisitionBlock2_pt{k}.czi'), 'wb').write(b'x' * k)
+    open(os.path.join(q_zen, 'autofocus', 'experiment_AcquisitionBlock1_pt1.czi'), 'wb').write(b'af')
+    q_task = him.HiMSDTask()
+    q_task.log.addHandler(H()) if not any(isinstance(h, H) for h in q_task.log.handlers) else None
+    q_task._zen_directory = q_zen
+    q_task._transfer = dt.DataTransfer(tr_log, os.path.join(TMP, 'q_server'))  # paused: files stay queued
+    q_task._acquisitions_done = 3
+    t0 = monotonic()
+    q_task._queue_acquisitions()
+    queued = [os.path.basename(p) for p in q_task._transfer.pending()]
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    check('(queue acquisitions) 3 acquisitions done, 5 Block2 files: only pt1..pt3 queued (pt order), no Block1 file; '
+          'info "5 acquisition file(s) (*_AcquisitionBlock2_pt*.czi) in <ZEN folder>, 3 newly queued, 3 waiting, 0 sent"',
+          sorted(queued) == [f'experiment_AcquisitionBlock2_pt{k}.czi' for k in (1, 2, 3)]
+          and (logging.INFO, f'Data transfer: 5 acquisition file(s) (*_AcquisitionBlock2_pt*.czi) in {q_zen}, 3 newly '
+                             f'queued, 3 waiting, 0 sent') in msgs, (queued, msgs))
+    q_task._acquisitions_done = 5
+    t0 = monotonic()
+    q_task._queue_acquisitions()
+    msgs = [m for t, lvl, m in LOGS if t >= t0]
+    check('(queue acquisitions) 5 done: pt4 and pt5 added ("2 newly queued, 5 waiting"); files already queued are not '
+          'counted again', any(m.endswith(', 2 newly queued, 5 waiting, 0 sent') for m in msgs), msgs)
+    q_task._transfer.stop()
+    empty_zen = os.path.join(TMP, 'q_zen', 'empty')
+    os.makedirs(empty_zen)
+    q_task._zen_directory = empty_zen
+    q_task._transfer = dt.DataTransfer(tr_log, os.path.join(TMP, 'q_server'))
+    q_task._acquisitions_done = 2
+    t0 = monotonic()
+    q_task._queue_acquisitions()
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(queue acquisitions) 2 acquisitions done and no Block2 file: one warning "no ZEN acquisition file matches '
+          '... check the ZEN block numbers"',
+          warnings == [f'Data transfer: no ZEN acquisition file matches *_AcquisitionBlock2_pt*.czi in {empty_zen} '
+                       f'although 2 acquisition(s) were done - check the ZEN block numbers'], warnings)
+    q_task._transfer.stop()
+
+    # DataTransfer.add(update=True): modified file sent again, unchanged one not, no duplicate in the queue
+    up_src = os.path.join(TMP, 'up_src')
+    os.makedirs(up_src)
+    up_file = os.path.join(up_src, 'scores.csv')
+    open(up_file, 'w').write('a,b\n')
+    up_server = os.path.join(TMP, 'up_server')
+    tr = dt.DataTransfer(tr_log, up_server)
+    tr.allow()
+    copies = []
+    real_copyfile = dt.shutil.copyfile
+
+    def counting_copy(src, dst, *a, **k):
+        copies.append(os.path.basename(src))
+        return real_copyfile(src, dst, *a, **k)
+    dt.shutil.copyfile = counting_copy
+    try:
+        tr.add(up_file, 'x/scores.csv')
+        sent1 = wait_until(lambda: tr.is_sent(up_file), 3.0)
+        unchanged = tr.add(up_file, 'x/scores.csv', update=True)
+        open(up_file, 'a').write('1,2\n')
+        tr.pause()  # keep the new version queued to look at the queue
+        queued_first = tr.add(up_file, 'x/scores.csv', update=True)
+        queued_again = tr.add(up_file, 'x/scores.csv', update=True)
+        in_queue = tr.pending().count(up_file)
+        tr.allow()
+        sent2 = wait_until(lambda: tr.is_sent(up_file), 3.0)
+        content2 = open(os.path.join(up_server, 'x', 'scores.csv')).read()
+        # same size, new content (e.g. an .npy of the same shape): sent again despite the same size on the server
+        sleep(0.01)
+        open(up_file, 'w').write('A,B\n1,2\n')
+        same_size = tr.add(up_file, 'x/scores.csv', update=True)
+        sent3 = wait_until(lambda: tr.is_sent(up_file) and open(os.path.join(up_server, 'x', 'scores.csv')).read()
+                           == 'A,B\n1,2\n', 3.0)
+        not_update = tr.add(up_file, 'x/scores.csv')  # without update: a sent file is never sent again
+    finally:
+        dt.shutil.copyfile = real_copyfile
+        tr.stop()
+    check('(DataTransfer.add update=True) unchanged file not sent again; modified file queued once (no duplicate) and '
+          'sent again; same-size modification sent again; without update=True a sent file is ignored',
+          sent1 and unchanged is False and queued_first is True and queued_again is False and in_queue == 1
+          and sent2 and content2 == 'a,b\n1,2\n' and same_size is True and sent3 and not_update is False
+          and copies == ['scores.csv'] * 3,
+          (sent1, unchanged, queued_first, queued_again, in_queue, sent2, same_size, sent3, not_update, copies))
+
+    # DataTransfer.make_dir: created by the thread; a failure only marks the server as down
+    md_root = os.path.join(TMP, 'md_server')
+    tr = dt.DataTransfer(tr_log, md_root)
+    t0 = monotonic()
+    tr.make_dir(os.path.join('2026-11-05_HiM_md'))
+    made = wait_until(lambda: os.path.isdir(os.path.join(md_root, '2026-11-05_HiM_md')), 3.0)
+    returned_at_once = monotonic() - t0
+    tr.stop()
+    blocked = os.path.join(TMP, 'md_file.txt')
+    open(blocked, 'w').close()
+    tr = dt.DataTransfer(tr_log, os.path.join(blocked, 'server'))
+    try:
+        tr.make_dir('x')
+        md_err = None
+    except Exception as exc:
+        md_err = exc
+    down = wait_until(lambda: not tr.server_ok, 3.0)
+    tr.stop()
+    check('(DataTransfer.make_dir) folder created by the transfer thread; a folder that cannot be created: no exception, '
+          'server marked as down', made and returned_at_once < 3.0 and md_err is None and down, (made, md_err, down))
 
 if ONLY:
     print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)
@@ -441,7 +1704,7 @@ movies = open(os.path.join(folder, 'movie_name.txt')).read().split() if folder e
 exp_movies = [f'scan_001_{rt}_{n[4:]}_ROI' for rt in ('RT1', 'RT2') for n in NAMES]
 check(f'(full run) data folder {os.path.relpath(folder, TMP) if folder else None} = data/<day>/001_HiM_Mysample; '
       f'movie_name.txt = {movies[:2]}...', folder.endswith('001_HiM_Mysample') and movies == exp_movies, movies)
-params = yaml.safe_load(open(os.path.join(folder, 'HiM_parameters.yml'))) if folder else {}
+params = yaml.safe_load(open(os.path.join(folder, 'experiment_parameters', 'HiM_parameters.yml'))) if folder else {}
 check('(full run) HiM_parameters.yml: global parameters, probes, both lists, imaging parameters, ROI positions',
       list(params) == ['1- global parameters', '2- fluidic parameters', '3- imaging parameters', '4- ROIs']
       and params['2- fluidic parameters']['probes'] == {1: 'RT1', 2: 'RT2'}
@@ -574,6 +1837,8 @@ if not QUICK:
 
         def send_trigger(self, name):
             self.sent.append(name)
+            if name == 'trigger_ZEN_start_block' and self.sent.count(name) % 2 == 1 and self.created:
+                _short.write_autofocus_image(self.created[-1], self.sent.count(name))  # ZEN autofocus image
 
         def is_triggered(self, name):
             if name == 'trigger_ZEN_ready':
@@ -588,14 +1853,15 @@ if not QUICK:
     ZEN_SAVE = os.path.join(TMP, 'zen_saving')
     ZEN_REF = os.path.join(TMP, 'zen_ref')
     os.makedirs(os.path.join(ZEN_SAVE, 'old_experiment'))
-    os.makedirs(ZEN_REF)
+    _short.write_autofocus_references(ZEN_REF, N)
     open(os.path.join(ZEN_SAVE, 'a_file.txt'), 'w').close()
     sd_inj = copy.deepcopy(EXAMPLE)
     sd_inj['probes'] = {1: 'RT1'}
     sd_inj['hybridization list'] = [{'product': 'SSC', 'volume': _short.INJECTION_UL, 'flowrate': _short.HIM_FLOWRATE, 'time': None}]
     sd_inj['photobleaching list'] = []
     sd_exp = files(sd_inj, 'sd', extra={'zen_saving_path': ZEN_SAVE, 'zen_ref_images_path': ZEN_REF,
-                                        'correlation_threshold': 0.6, 'transfer_data': False, 'email': ''})
+                                        'correlation_threshold': 0.6, 'transfer_data': False, 'email': '',
+                                        'autofocus_min_fraction': _short.AUTOFOCUS_MIN_FRACTION})
     trigger = TriggerLogic()
     KEEP = [trigger]
 
@@ -624,20 +1890,20 @@ if not QUICK:
           and not any(m.startswith('ZEN: number of acquisition loops =') for m in msgs),
           (ZEN_BOX.texts, [m for m in msgs if 'ZEN' in m][:4]))
     run_folder = result['directory'] if result else ''
-    check('(SD) run folder created by qudi in save_path (no server folder): YYYY_MM_DD/001_HiM_<sample>; the folder '
-          'created by ZEN is not used',
-          err is None and os.path.isdir(run_folder) and os.path.basename(run_folder).startswith('001_HiM_')
-          and os.path.dirname(os.path.dirname(run_folder)) == os.path.join(TMP, 'data_sd')
-          and not os.path.exists(os.path.join(zen, 'metadata')), (result, err))
+    check('(SD) files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata; nothing written by qudi in the ZEN '
+          'folder',
+          err is None and run_folder == os.path.join(TMP, 'data_sd', SD_DAY, os.path.basename(zen), 'metadata')
+          and os.path.isdir(run_folder) and os.listdir(zen) == ['autofocus'], (result, err))  # images of the fake ZEN
     movies = open(os.path.join(run_folder, 'movie_name.txt')).read().split() if run_folder else []
-    check(f'(SD) HiM_parameters.yml and movie_name.txt in the run folder; names scan_001_RT1_<roi>_ROI ({movies[:1]})',
-          os.path.exists(os.path.join(run_folder, 'HiM_parameters.yml'))
-          and movies == [f'scan_001_RT1_{n[4:]}_ROI' for n in NAMES], movies)
-    ph = [m for lvl, m in logs if 'Autofocus check not implemented yet' in m]
-    check(f'(SD) autofocus placeholder logged once per run ({N} ROIs)', ph == [
-          'Autofocus check not implemented yet (zen_ref_images_path, correlation_threshold)'], ph)
+    check(f'(SD) HiM_parameters.yml and movie_name.txt in that folder; prefix 002 (1 folder in zen_saving_path before '
+          f'ZEN started + 1), names scan_002_RT1_<roi>_ROI ({movies[:1]})',
+          os.path.exists(os.path.join(run_folder, 'experiment_parameters', 'HiM_parameters.yml'))
+          and movies == [f'scan_002_RT1_{n[4:]}_ROI' for n in NAMES], movies)
+    ph = [m for lvl, m in logs if m.startswith('Autofocus check cycle')]
+    check(f'(SD) autofocus check logged once per ROI ({N} ROIs), all passed (same image as the reference)',
+          len(ph) == N and all(m.endswith(' - pass') for m in ph), ph)
     i_af = [k for k, m in enumerate(msgs) if 'autofocus confirmed done by ZEN' in m]
-    i_ph = [k for k, m in enumerate(msgs) if 'Autofocus check not implemented' in m]
+    i_ph = [k for k, m in enumerate(msgs) if m.startswith('Autofocus check cycle')]
     i_acq = [k for k, m in enumerate(msgs) if 'Triggering ZEN acquisition' in m]
     check('(SD) order: autofocus done -> autofocus check -> acquisition block; 2 ZEN blocks per ROI',
           i_af and i_ph and i_acq and i_af[0] < i_ph[0] < i_acq[0] and trigger.sent.count('trigger_ZEN_start_block') == 2 * N)

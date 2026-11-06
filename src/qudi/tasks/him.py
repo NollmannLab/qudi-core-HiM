@@ -18,8 +18,9 @@ by logic/taskrunner_logic.py). The valve outlet of the probe needle is read from
 (its 'Probe' buffer entry, written by the injections configurator from its option probe_valve_outlet).
 
 Translated from the legacy qudi tasks tasks/legacy/HiM_imaging_SD.py and
-tasks/legacy/HiM_imaging_RAMM.py. Not in this version: email alert, task log file, data transfer
-to the network, resume, autofocus image comparison (HiMSDTask._check_autofocus is a placeholder).
+tasks/legacy/HiM_imaging_RAMM.py. Not in this version: email alert, resume. The task log file is
+HiM_task.log (all setups); the autofocus check and the online data transfer to the server
+(common/data_transfer.py) are done on the spinning disk (HiMSDTask).
 
 Modified with Claude code (Anthropic)
 
@@ -34,19 +35,39 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
+import concurrent.futures
 import copy
+import csv
+import logging
+import logging.handlers
 import math
+import multiprocessing
 import os
+import shutil
+import sys
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
+from datetime import datetime
+from glob import glob
 from time import monotonic
+
+import numpy as np
 
 import yaml
 from qtpy import QtCore
 
 from qudi.core.connector import Connector
-from qudi.tasks.common.data_folders import choose_data_root, create_run_folder
+from qudi.core.scripting.modulescript import ModuleScriptInterrupted
+from qudi.tasks.common import autofocus_check
+from qudi.tasks.common import run_metadata as run_metadata_module
+from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder, local_dated_root
+from qudi.tasks.common.data_transfer import DataTransfer
+from qudi.tasks.common.popups import show_warning_popup
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
-from qudi.tasks.common.run_metadata import (copy_experiment_file, fill_run_metadata, optional_metadata_template,
+from qudi.util import autofocus_report
+from qudi.tasks.common.run_metadata import (experiment_parameters_folder, fill_run_metadata, optional_metadata_template,
                                             set_metadata_field, write_metadata)
+from qudi.tasks.common.sample_info import add_sample_to_run, optional_sample
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
 from qudi.tasks.fluidics import FluidicsSDTask, FluidicsRAMMTask
@@ -103,18 +124,27 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     Experiment YAML (user_config_path): sample_name, roi_list_path, injections_path,
     imaging_sequence ([[wavelength, intensity %], ...]), num_z_planes, save_path (local data folder),
-    save_network_path (server data folder, optional), and the keys read by the subclass
-    (_read_microscope_parameters).
+    save_network_path (server data folder, optional), sample_file (optional; required by the SD definitions:
+    YAML describing the sample, tasks/common/sample_info.py; read before any hardware call, a missing or
+    unreadable file is reported with the other problems; absent or empty: no sample file), and the keys read
+    by the subclass (_read_microscope_parameters). photobleaching_imaging (optional, default false; declared by
+    the SD definitions): image after the photobleaching - not implemented, True only gives the warning
+    "photobleaching_imaging is not implemented yet - ignored" at the start of the run.
 
     Data folder (all setups): <root>/YYYY_MM_DD/NNN_HiM_<sample_name>, created by qudi
     (tasks/common/data_folders.py); self.prefix = NNN. <root> is chosen before any hardware call
     (choose_data_root): save_network_path when it is set and writable, otherwise save_path (a server
-    folder that is not reachable gives a warning in the log and a non-modal pop-up). qudi writes
-    HiM_parameters.yml, movie_name.txt, experiment_config.yaml (byte copy of the experiment file) and, with
-    a metadata template, metadata.yml there: the template with Time, the Acquisition fields sample_name,
+    folder that is not reachable gives a warning in the log and a non-modal pop-up). qudi writes there:
+        <run folder>/
+            movie_name.txt, metadata.yml, HiM_task.log
+            experiment_parameters/   HiM_parameters.yml (every key of the experiment file, which is not copied),
+                                     injections.yml (byte copy of the injections file), sample.yml
+    With a metadata template, metadata.yml: the template with Time, the Acquisition fields sample_name,
     laser_lines, laser_power_(%), number_z_planes and roi_list_(xyz) (all ROIs with their positions), and
     Fluidics: hybridization and photobleaching (the lists of the injections file); other fields as in the
-    template.
+    template. With a sample file: experiment_parameters/sample.yml (exact copy of the file read before the run)
+    and its content as the 'Sample' section of metadata.yml (appended after the template sections, or filled in the template's
+    'Sample' section).
     Injections file (injections configurator): buffer {outlet: name}, probes {tube: name},
     hybridization list, photobleaching list, probe_needle_mode 'next' | 'same' (missing -> 'next').
 
@@ -135,6 +165,12 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     ends the imaging, moves the stage back to the first ROI, restores the stage velocity and
     unlocks the GUIs.
 
+    Log file (all setups): the log records of the run (the task and every qudi module: fluidics, robot, ROI,
+    lasers, triggers) are kept in memory from the start of _run; as soon as the run folder exists they are
+    written to <run folder>/HiM_task.log ('time - level - logger - message', level INFO), then the records go
+    straight to the file. _cleanup writes the line 'Hi-M task ended ...' last and closes the file (also after an
+    error or an interrupt); without a run folder the records kept in memory are dropped.
+
     Hi-M hooks (overridden by the setup subclasses):
         _read_microscope_parameters(params)  extra keys of the experiment YAML
         _check_microscope() -> list          problems found (checked with the other problems)
@@ -142,8 +178,12 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
                                              lock; False cancels the experiment (result
                                              {'cancelled': True, 'cycles_done': 0}, nothing to restore).
                                              Default: True (no question)
+        _choose_data_root() -> str           root of the run folder, before any hardware call (default:
+                                             choose_data_root)
         _create_data_folder() -> str         run folder where qudi writes its files (self.directory)
         _file_name(rt, roi_name) -> str      name of the stack of one ROI for one probe
+        _end_of_run_files()                  in _cleanup, after the hardware reset, before the last log line
+        _after_run_log_closed()              in _cleanup, after HiM_task.log is closed
     Imaging hooks (imaging mixin): _prepare_imaging(), _image_roi(roi, file_name),
     _end_imaging(), scan_stage_velocity.
     """
@@ -168,6 +208,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # HiM_parameters.yml and in metadata.yml only when it is one of these keys.
     _EXPERIMENT_KEYS = ('sample_name', 'roi_list_path', 'injections_path', 'imaging_sequence', 'num_z_planes',
                         'save_path')
+    PHOTOBLEACHING_IMAGING_WARNING = 'photobleaching_imaging is not implemented yet - ignored'
     _RINSE_TIMEOUT_MARGIN_S = 30.0  # the rinse must end within needle_rinsing_duration_s + this margin
     # problems of FluidicsStepsMixin._validate checked once for the whole experiment instead
     _SKIPPED_VALIDATION_PROBLEMS = ('robot origin', 'probe list is empty', 'probe injection(s) from tube')
@@ -177,6 +218,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         # connector fails
         self._hardware_touched = False
         self._gui_locked = False
+        self._log_buffer = None        # records of the run kept until HiM_task.log is opened
+        self._log_file_handler = None  # HiM_task.log
         self._arrival_slot = None
         self._needle_arrived_at = None
         self._needle_mode = None
@@ -186,12 +229,15 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self._cycles = []
         self.roi_names = []
         self.directory = None
+        self._parameters_dir = None  # <metadata folder>/experiment_parameters
         self.prefix = ''
         self.sample_name = None
         self.save_path = None
         self.save_network_path = ''
         self._data_root = None
         self._metadata_template = None
+        self._sample = None  # sample file of the run (sample_info.SampleFile; None: no sample file)
+        self.photobleaching_imaging = False  # image after the photobleaching (not implemented)
         self.imaging_sequence = None
         self.num_z_planes = None
         self._valve = self._flow = self._robot = None
@@ -209,6 +255,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # ==============================================================================================
 
     def _run(self) -> dict:
+        self._start_run_log()
+        self.log.info(f'Hi-M task started - experiment file {self.user_config_path}')
         self._check_options()
 
         # 1. parameters: experiment YAML and injections file, no hardware call
@@ -226,6 +274,15 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.num_z_planes = params.get('num_z_planes') if self._uses_z_planes() else None
         self.save_path = params.get('save_path')
         self.save_network_path = params.get('save_network_path') or ''
+        # image after the photobleaching (optional key photobleaching_imaging): not implemented, only a warning
+        self.photobleaching_imaging = bool(params.get('photobleaching_imaging') or False)
+        if self.photobleaching_imaging:
+            self.log.warning(self.PHOTOBLEACHING_IMAGING_WARNING)
+        # sample file (optional key sample_file): read before any hardware call, copied with the run files
+        try:
+            self._sample = optional_sample(params.get('sample_file'))
+        except RuntimeError as err:
+            problems.append(str(err))
         self._read_microscope_parameters(params)
 
         # injections file; the probe valve is its 'Probe' buffer entry (None: no probe injection)
@@ -294,7 +351,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         # 3. plan and data root (server folder or local folder, write-tested), before any hardware call
         self._log_plan(hyb_steps, pb_steps, probe_valve)
         self._check_interrupt()
-        self._data_root = choose_data_root(self, self.save_network_path, self.save_path)
+        self._data_root = self._choose_data_root()
 
         # 4. lock the GUIs, lasers off, scan stage velocity (restored in _cleanup)
         self._check_interrupt()
@@ -314,6 +371,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         # 5. imaging preparation, data folder, parameters file
         self._prepare_imaging()
         self.directory = self._create_data_folder()
+        self._parameters_dir = experiment_parameters_folder(self.directory)  # parameter files of the run
+        self._open_run_log()
         self._save_parameters(params, injections)
         self._save_run_files(injections)
 
@@ -402,8 +461,78 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
                     self.log.error(f'Cleanup: could not unlock the {name} GUI: {err}')
             self._gui_locked = False
 
+        # files of the run handled by a setup subclass (e.g. copy to the server), before the last log line
+        try:
+            self._end_of_run_files()
+        except Exception as err:
+            self.log.error(f'Cleanup: end-of-run files: {err}')
         self.log.info(f'Hi-M task ended after {getattr(self, "_cycles_done", 0)}/{len(getattr(self, "_cycles", []))} '
                       f'cycle(s).')
+        self._close_run_log()
+        try:
+            self._after_run_log_closed()
+        except Exception as err:
+            self.log.error(f'Cleanup: after the log of the run: {err}')
+
+    def _end_of_run_files(self) -> None:
+        """Hook of _cleanup, after the hardware reset and before the last log line. Default: nothing."""
+        pass
+
+    def _after_run_log_closed(self) -> None:
+        """Hook of _cleanup, after HiM_task.log is closed. Default: nothing."""
+        pass
+
+    # ==============================================================================================
+    # Log file of the run (HiM_task.log)
+    # ==============================================================================================
+
+    _LOG_FILE_NAME = 'HiM_task.log'
+    _LOG_FORMAT = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+    _LOG_BUFFER_CAPACITY = 100000  # records kept in memory before the run folder exists
+
+    @staticmethod
+    def _qudi_logger():
+        """Common parent of the qudi module loggers (qudi.core.logger.get_logger: 'qudi.<module>.<Class>')."""
+        return logging.getLogger('qudi')
+
+    def _start_run_log(self) -> None:
+        """Keep the log records of the run (INFO and above) in memory until HiM_task.log is opened."""
+        self._close_run_log()
+        buffer = logging.handlers.MemoryHandler(self._LOG_BUFFER_CAPACITY, flushLevel=logging.CRITICAL + 1,
+                                                flushOnClose=False)
+        buffer.setLevel(logging.INFO)
+        self._qudi_logger().addHandler(buffer)
+        self._log_buffer = buffer
+
+    def _open_run_log(self) -> None:
+        """Open <self.directory>/HiM_task.log, write the records kept in memory, then log straight to the file."""
+        handler = logging.FileHandler(os.path.join(self.directory, self._LOG_FILE_NAME), encoding='utf-8')
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter(self._LOG_FORMAT))
+        buffer, self._log_buffer = self._log_buffer, None
+        if buffer is not None:
+            self._qudi_logger().removeHandler(buffer)
+            buffer.setTarget(handler)
+            buffer.flush()
+            buffer.close()
+        self._qudi_logger().addHandler(handler)
+        self._log_file_handler = handler
+
+    def _close_run_log(self) -> None:
+        """Remove and close the log handlers of the run; records still in memory (no run folder) are dropped.
+        Never raises."""
+        for name in ('_log_buffer', '_log_file_handler'):
+            handler = getattr(self, name, None)
+            setattr(self, name, None)
+            if handler is None:
+                continue
+            try:
+                self._qudi_logger().removeHandler(handler)
+                if isinstance(handler, logging.handlers.MemoryHandler):
+                    handler.buffer.clear()
+                handler.close()
+            except Exception as err:
+                self.log.error(f'Cleanup: could not close the log of the run: {err}')
 
     # ==============================================================================================
     # Cycle steps
@@ -478,13 +607,17 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         duration = float(self.needle_rinsing_duration_s)
         self._report_progress(label, f'Rinsing needle ({duration:g} s)')
         _call_in_thread_of(self._flow, lambda: self._flow.start_rinsing(duration))
+        step_info = {'kind': 'rinse', 'number': None, 'product': 'rinse', 'probe': False, 'flowrate': None,
+                     'volume': None, 'label': label}
         start = monotonic()
         while self._flow.rinsing_enabled:
             elapsed = monotonic() - start
             if elapsed > duration + self._RINSE_TIMEOUT_MARGIN_S:
                 raise RuntimeError(f'The needle rinse did not end within {duration + self._RINSE_TIMEOUT_MARGIN_S:g} s.')
             self._report_live(label, f'Rinsing needle - {max(0, math.ceil(duration - elapsed))} s left')
+            self._on_fluidics_sample(step_info, self._fluidics_values())  # optional hook (FluidicsStepsMixin)
             self._interruptible_sleep(self._MAX_WAIT_STEP_S)
+        self._on_fluidics_step_done(step_info)
 
     def _stop_rinsing(self) -> None:
         if self._flow.rinsing_enabled:
@@ -574,15 +707,19 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
             self.log.info(f'    step {number}/{len(pb_steps)}: {self._describe(step)}')
 
     def _save_parameters(self, params, injections) -> None:
-        """Write HiM_parameters.yml in self.directory: experiment parameters, probes, hybridization and
-        photobleaching lists, imaging parameters, ROI positions."""
+        """Write HiM_parameters.yml in <self.directory>/experiment_parameters/: every key of the experiment file ('1- global parameters'),
+        probes, hybridization and photobleaching lists, imaging parameters, ROI positions."""
         _, probes, hyb_list, pb_list, needle_mode = injections
         rois = {}
         for roi_name in self.roi_names:
             pos = list(self._roi_logic.get_roi_position(roi_name))
             z = pos[2] if len(pos) > 2 else None
             rois[roi_name] = f'X={pos[0]} - Y={pos[1]} - Z={z}'
-        param = {'1- global parameters': params,
+        # every key of the experiment file, values as read: the known keys first (_EXPERIMENT_KEYS order), then the
+        # others in file order (the experiment file itself is not copied into the run folder)
+        global_parameters = {key: params[key] for key in self._EXPERIMENT_KEYS if key in params}
+        global_parameters.update({key: value for key, value in params.items() if key not in global_parameters})
+        param = {'1- global parameters': global_parameters,
                  '2- fluidic parameters': {'probes': probes,
                                            'probe_needle_mode': needle_mode,
                                            'hybridization list': hyb_list,
@@ -592,7 +729,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
                  '4- ROIs': rois}
         if self._uses_z_planes():
             param['3- imaging parameters']['number of z planes'] = self.num_z_planes
-        path = os.path.join(self.directory, 'HiM_parameters.yml')
+        path = os.path.join(self._parameters_dir, 'HiM_parameters.yml')
         with open(path, 'w') as outfile:
             yaml.safe_dump(param, outfile, default_flow_style=False, sort_keys=False)
         self.log.info(f'Saved the Hi-M parameters to {path}')
@@ -602,19 +739,28 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         return 'num_z_planes' in self._EXPERIMENT_KEYS
 
     def _save_run_files(self, injections) -> None:
-        """experiment_config.yaml (byte copy of the experiment file) and, with a metadata template, metadata.yml
-        in self.directory."""
-        copy_experiment_file(self.user_config_path, self.directory)
-        if self._metadata_template is None:
-            return
-        _, _, hyb_list, pb_list, _ = injections
-        positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self.roi_names}
-        metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
-                                     self.num_z_planes)
-        set_metadata_field(metadata, 'Fluidics', 'hybridization', hyb_list)
-        set_metadata_field(metadata, 'Fluidics', 'photobleaching', pb_list)
-        path = write_metadata(self.directory, metadata)
-        self.log.info(f'Saved the microscope metadata to {path}')
+        """experiment_parameters/injections.yml (byte copy of the injections file) and, with a sample file,
+        experiment_parameters/sample.yml; with a metadata template, metadata.yml (with the 'Sample' section when
+        there is a sample file) at the top of self.directory. The experiment file is not copied: its keys are in
+        HiM_parameters.yml."""
+        # exact copy of the injections file
+        path = os.path.join(self._parameters_dir, 'injections.yml')
+        shutil.copyfile(self.injections_path, path)
+        self.log.info(f'Saved a copy of the injections file to {path}')
+        metadata = None
+        if self._metadata_template is not None:
+            _, _, hyb_list, pb_list, _ = injections
+            positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self.roi_names}
+            metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
+                                         self.num_z_planes)
+            set_metadata_field(metadata, 'Fluidics', 'hybridization', hyb_list)
+            set_metadata_field(metadata, 'Fluidics', 'photobleaching', pb_list)
+        # sample file: copied as experiment_parameters/sample.yml, its content added as the 'Sample' section of
+        # metadata.yml (top of the metadata folder)
+        add_sample_to_run(self._parameters_dir, self._sample, metadata)
+        if metadata is not None:
+            path = write_metadata(self.directory, metadata)
+            self.log.info(f'Saved the microscope metadata to {path}')
 
     def _append_movie_name(self, movie_name: str) -> None:
         with open(os.path.join(self.directory, 'movie_name.txt'), 'a+') as outfile:
@@ -632,6 +778,11 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     def _check_microscope(self) -> list:
         """Setup-specific checks before any hardware call; return the problems found."""
         return []
+
+    def _choose_data_root(self) -> str:
+        """Root of the run folder, chosen before any hardware call: save_network_path when it is reachable,
+        otherwise save_path (choose_data_root)."""
+        return choose_data_root(self, self.save_network_path, self.save_path)
 
     def _confirm_before_start(self) -> bool:
         """Called after all checks, before any hardware call or GUI lock: False cancels the experiment.
@@ -666,8 +817,10 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     required. Valve layout of FluidicsSDTask.
 
     Experiment YAML: the keys of HiMTaskBase except num_z_planes (not required and not read: the z-stack is
-    set in ZEN; an old file that still has it is accepted, the value is ignored), plus zen_ref_images_path
-    (reference images of the autofocus) and correlation_threshold; zen_saving_path is not read. Without
+    set in ZEN; an old file that still has it is accepted, the value is ignored), plus zen_saving_path
+    (required: the folder where ZEN creates the data folder of the experiment, an existing folder that can be
+    listed; only read), zen_ref_images_path (reference images of the autofocus), correlation_threshold (ZNCC
+    threshold, -1..1) and autofocus_min_fraction (0..1); all checked before any hardware call. Without
     num_z_planes, HiM_parameters.yml has no 'number of z planes' entry and metadata.yml keeps the template's
     number_z_planes field.
 
@@ -678,10 +831,117 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     continue' starts the experiment, Cancel ends the task without touching the hardware (result
     {'cancelled': True, 'cycles_done': 0}). Both values are also logged.
 
-    Data
-    folder created by qudi as on all setups (HiMTaskBase: NNN_HiM_<sample_name> on the server folder or
-    in the local folder, the folder created by ZEN is not used); file names
-    scan_<NNN>_<RT>_<roi number>_ROI.
+    Data folder: named after the folder ZEN creates for the experiment. The folders of zen_saving_path are
+    listed before waiting for ZEN "ready"; once ZEN is ready, the single new folder is the ZEN data folder
+    (SDImagingMixin, shared with the ROI scan; error if there is none or several, then the cleanup runs as
+    usual). qudi creates <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata, always local (local_dated_root,
+    created and write-tested before any hardware call, YYYY-MM-DD = start of the task; create_mirror_folder,
+    metadata_<HHMMSS> if that folder already holds files), and writes there (sample.yml with a sample file: key
+    sample_file, required by the SD definitions; metadata.yml then has the 'Sample' section with its content):
+        metadata/
+            metadata.yml, movie_name.txt, HiM_task.log
+            experiment_parameters/   HiM_parameters.yml, injections.yml (byte copy of the injections file),
+                                     sample.yml
+            autofocus/               files of the autofocus check (below)
+    Nothing is written in the ZEN folder. self.prefix is the number of folders that were in
+    zen_saving_path before ZEN started + 1, on 3 digits; file names scan_<prefix>_<RT>_<roi number>_ROI.
+
+    Autofocus check (common/autofocus_check.py): after the ZEN autofocus block of each ROI, the brightfield
+    image ZEN saves (*_AcquisitionBlock1_pt*.czi in the ZEN data folder, first plane) is compared with the
+    reference image of that ROI by zero-normalised cross-correlation (ZNCC, a Pearson coefficient at every XY
+    shift, independent of the intensity and tolerant to drift).
+      - Before any hardware call: the references are read from zen_ref_images_path (autofocus_reference.npy
+        if present, otherwise the *.czi in acquisition order); their number must equal the number of ROIs
+        and they must all have the same shape. correlation_threshold must be in [-1, 1] (values tuned for
+        the score of the former qudi-HiM task do not apply), autofocus_min_fraction in [0, 1].
+      - Once the ZEN folder is known: copy of the references as autofocus_reference.npy in the metadata
+        folder; the list of the autofocus images already seen starts EMPTY (as the legacy task): ZEN creates the
+        image file of a block (still empty) as soon as it reaches the block, so the image of the first ROI
+        (..._AcquisitionBlock1_pt1.czi) can already exist when ZEN reports "ready".
+      - Each check, after ZEN's "done" trigger of the autofocus block: wait (poll every 0.5 s, no timeout,
+        interruptible; a warning every _AF_WAIT_WARNING_S with the new matching files) until exactly one
+        autofocus image not seen yet exists (several: ZEN is still writing), then that list becomes the
+        snapshot for the next check. Then wait until the file is complete: size non-zero and the same on two
+        checks FILE_STABLE_PERIOD_S apart (no timeout, interruptible, a warning every _AF_WAIT_WARNING_S).
+      - The image is read (first plane, czifile with one decoding thread) and scored in a helper process
+        (ProcessPoolExecutor, one 'spawn' process created in _setup, shut down in _cleanup; job
+        autofocus_check.read_and_score, waited for at most AUTOFOCUS_JOB_TIMEOUT_S, interruptible), so that a
+        native crash of the .czi reader cannot kill qudi. An exception raised by the job (e.g. file not readable
+        yet): up to _AF_READ_ATTEMPTS attempts, _AF_READ_RETRY_S apart, a warning each time, the last one stops
+        the run. The helper process dies or times out: error, new process, one more try; if that fails too, the
+        check counts as FAILED (reference kept, row with an empty score and passed False, NaN in
+        correlation.npy) and the minimum-fraction rule below decides. The versions of the reader (czifile,
+        imagecodecs, numpy) are logged at the start. Score and shift (px) logged. Pass (score >= correlation_threshold): the image becomes the
+        reference of the ROI (autofocus_reference.npy saved again). Fail: the reference is kept, warning
+        (and a second one if the ROI already failed in the previous cycle).
+      - Abort: as soon as (ROIs - failures of the cycle) / ROIs < autofocus_min_fraction, an error gives the
+        counts and the experiment stops (error, cleanup as usual). The counter restarts at each cycle.
+      - Files (<metadata folder>/autofocus/, created with the metadata folder; copied to the server with it):
+        autofocus_reference.npy, ROI_probe_autofocus_summary.csv (header at creation, one row per check written as
+        the run goes: experiment_folder (ZEN folder name), roi_name, probe_name (RT), correlation (score, empty
+        when the image could not be read), cycle, shift_y_px, shift_x_px, passed),
+        reference_images_<RT>.npy (end of each cycle), correlation.npy (cycles x ROIs, written by the
+        cleanup; NaN for the checks not done). Report (qudi.util.autofocus_report, written by the cleanup
+        after a normal end or an autofocus abort, not after an interrupt or another error; before the copy of
+        the metadata to the server), in autofocus/: autofocus_correlation_heatmap.png (ROIs x probes) and
+        autofocus_drift.png (drift of the autofocus images per ROI and cycle); no second CSV. An error while
+        making the report is logged as a warning only.
+
+    Copy of the metadata to the server: whenever save_network_path is set (with or without transfer_data), the
+    metadata folder is copied to <save_network_path>/<ZEN folder name>/metadata by the cleanup, after the
+    hardware reset and the autofocus report, in all cases (normal end, interrupt, error) once the folder exists;
+    HiM_task.log is sent last, after its handler is closed. Without transfer_data the background helper
+    (common/data_transfer.py) is created only in the cleanup, for these files. The destination is logged once
+    the ZEN folder is known. A server problem only gives warnings.
+
+    Fluidics record: <metadata folder>/fluidics/fluidics_log.csv (FLUIDICS_SUBFOLDER / FLUIDICS_LOG_NAME), created
+    with the metadata folder, header at creation, rows appended at once: time (ISO, local, s), elapsed_s (since the
+    start of the run), RT, step ('hybridization 2/3', 'photobleaching 1/1', 'rinse'), buffer (product of the step,
+    the probe of the cycle for a probe injection), flowrate_setpoint_ul_min, pressure_setpoint, flowrate_ul_min,
+    pressure (pressure columns with the unit of the flow logic, e.g. pressure_mbar), volume_ul. One row per
+    sampling interval of the flow logic during every injection and needle rinse, read in the task thread by the
+    FluidicsStepsMixin hooks (_on_fluidics_sample at each poll of the wait; the injection wait polls at most at
+    the flow logic's sampling_interval, the rinse wait faster and rows are written once per interval) from the
+    values the flow logic keeps (total_volume, latest_flowrate, latest_pressure, pressure_setpoint; flowrate
+    setpoint of the step). A write error: one warning, no more record for the run.
+
+    Live copy of the metadata (transfer_data on): a second DataTransfer (_metadata_transfer, same server folder,
+    always allowed - local files, no load on the ZEN disk) copies the metadata files to
+    <save_network_path>/<ZEN folder name>/metadata/ right after qudi updates them (add(update=True): sent again
+    when changed; the task thread never touches the server and never waits):
+      - after the run files are written: metadata.yml, experiment_parameters/ (all files),
+        autofocus/autofocus_reference.npy (initial references), the empty score and fluidics files;
+      - after each ROI (autofocus check and acquisition): the score file, movie_name.txt, the log;
+      - at the end of each injection and needle rinse: fluidics/fluidics_log.csv, the log;
+      - at the end of each cycle: autofocus/reference_images_<RT>.npy (once), the log; autofocus_reference.npy,
+        rewritten after every passed check, is copied at the start and in the cleanup only;
+      - cleanup: pending live copies sent (at most transfer_timeout) and that thread stopped, then the full copy of
+        the metadata folder below (update=True: the final versions replace the live ones), the log last.
+    With transfer_data off: no live copy (copy in the cleanup only).
+
+    Online data transfer (experiment key transfer_data, TransferData_checkBox of the experiment configurator;
+    common/data_transfer.py): copies of the ZEN acquisition images to <save_network_path>/<ZEN folder name>/
+    during the fluidics steps, in a background thread, so that a server or network problem never stops or
+    blocks the experiment.
+      - transfer_data with an empty save_network_path: error before any hardware call. Then, still before any
+        hardware call, the transfer is started on save_network_path with a write test (at most
+        _TRANSFER_TEST_S); if it fails, a warning pop-up and the experiment continues (the files go when the
+        server is back; test every RETRY_PERIOD_S). The files go to <save_network_path>/<ZEN folder name>/,
+        the ZEN folder name being known once ZEN is ready.
+      - Server folder <save_network_path>/<ZEN folder name>/ created by the transfer thread as soon as the ZEN
+        folder is known (DataTransfer.make_dir: no wait; a failure only marks the server as down).
+      - Files sent during the run: the ZEN acquisitions *_AcquisitionBlock2_pt*.czi (recursive, same path
+        relative to the ZEN folder), listed at the start of the hybridization and of the photobleaching of each
+        cycle and in the cleanup: sorted by their pt number, only the first N are queued (N = ZEN acquisitions
+        confirmed done in this run, counted when _image_roi returns), each listing logged (files found, newly
+        queued, waiting, sent; a warning when acquisitions were done but no file matches the pattern); copies
+        only during the fluidics steps (hybridization; photobleaching + needle rinse). Before the
+        imaging of a cycle: pause, and wait for the copy in progress (at most transfer_timeout, not while the
+        server is down). Other ZEN files (e.g. the autofocus images) are not sent.
+      - Cleanup (after the hardware reset): normal end -> the last czi files are sent (flush, at most
+        transfer_timeout); interrupt / error -> no czi file (left for a manual copy); then the metadata as
+        above (metadata/..., HiM_task.log once closed), with the same helper. Files not sent: one warning with
+        their number and local paths.
 
     Config example for copy-paste (logic: task_runner: options: module_tasks:):
 
@@ -697,9 +957,16 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
           options:
             user_config_path: '/path/to/qudi_task_config_files/him_task_sd_epi.yaml'
             metadata_template: '/path/to/custom_metadata_templates/Spinning_Disk_setup.cfg'  # optional
+            transfer_timeout: 300          # optional, s: max wait for a copy to the server (imaging, end of run)
     """
 
     trigger_logic = Connector(interface='TriggerLogic')
+
+    transfer_timeout = 300  # s, longest wait for the copies to the server (before an imaging, at the end of the run)
+    _TRANSFER_PATTERN = '*_AcquisitionBlock2_pt*.czi'  # ZEN acquisitions copied to the server during the run
+    # (the autofocus images are *_AcquisitionBlock1_pt*.czi, not sent)
+    _TRANSFER_TEST_S = 10   # first write test of the server folder
+    _LOG_TRANSFER_S = 30    # copy of HiM_task.log at the end of the run
 
     # the z planes are set in ZEN: num_z_planes is not part of the SD experiment file
     _EXPERIMENT_KEYS = tuple(key for key in HiMTaskBase._EXPERIMENT_KEYS if key != 'num_z_planes')
@@ -712,9 +979,36 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
     cleanup_valve_positions = FluidicsSDTask.cleanup_valve_positions
 
     def _read_microscope_parameters(self, params) -> None:
+        self.zen_saving_path = params.get('zen_saving_path')
+        self._zen_folders_before = set()
+        self._zen_directory = None
         self.zen_ref_images_path = params.get('zen_ref_images_path')
         self.correlation_threshold = params.get('correlation_threshold')
-        self._autofocus_check_logged = False
+        self.autofocus_min_fraction = params.get('autofocus_min_fraction')
+        self.transfer_data = bool(params.get('transfer_data') or False)
+        self._acquisitions_done = 0    # ZEN acquisition blocks confirmed done in this run
+        self._metadata_transfer = None  # live copy of the metadata to the server (transfer_data on)
+        # fluidics record: one row per sampling interval of the flow logic (the injection wait polls at most at
+        # that interval)
+        self._fluidics_path = None
+        self._fluidics_context = ('', '', 0)  # (kind, RT, number of steps) of the current fluidics step
+        self._fluidics_last_sample = None
+        self._fluidics_t0 = monotonic()
+        self._fluidics_interval = float(getattr(self._flow, 'sampling_interval', 1.0) or 1.0)
+        self.volume_poll_interval_s = min(self.volume_poll_interval_s, self._fluidics_interval)
+        self.log.info(f'Autofocus image reader: {autofocus_check.reader_versions()}; single-thread read: '
+                      f'{autofocus_check.single_thread_read_form()}; read and scored in a helper process')
+        self._transfer = None          # DataTransfer to <save_network_path>/<ZEN folder name>
+        self._run_completed = False    # True when _run ended normally (no interrupt, no error)
+        self._af_aborted = False       # True when the autofocus check stopped the experiment
+        self._af_refs = None           # reference image of each ROI (n_rois, H, W)
+        self._af_seen = set()          # autofocus images already used (empty at the start of the run)
+        self._af_scores = None         # correlation.npy: cycles x ROIs
+        self._af_failures = 0          # failed checks in the current cycle
+        self._af_failed_rois = set()   # ROIs that failed in the current cycle
+        self._af_failed_before = set()  # ROIs that failed in the previous cycle
+        self._af_passed = 0            # passed checks in the current cycle
+        self._af_rt = None             # probe of the current cycle
 
     def _confirm_before_start(self) -> bool:
         """ZEN settings box (SDImagingMixin._confirm_zen_settings) with loops = number of cycles x number of
@@ -722,40 +1016,674 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         return self._confirm_zen_settings(len(self._cycles) * len(self.roi_names))
 
     def _check_microscope(self) -> list:
-        problems = []
+        problems = self._zen_saving_path_problems()
         for key in ('zen_ref_images_path',):
             path = getattr(self, key)
             if not path:
                 problems.append(f'experiment file: {key!r} missing')
             elif not os.path.isdir(path):
                 problems.append(f'{key} {path} is not an existing folder')
+        # online data transfer
+        if self.transfer_data and not self.save_network_path:
+            problems.append("transfer_data is on but 'save_network_path' is empty")
+        if isinstance(self.transfer_timeout, bool) or not isinstance(self.transfer_timeout, (int, float)) \
+                or self.transfer_timeout <= 0:
+            problems.append(f'transfer_timeout must be a number of seconds > 0 (got {self.transfer_timeout!r})')
+        # autofocus check settings
+        for key, low, high in (('correlation_threshold', -1.0, 1.0), ('autofocus_min_fraction', 0.0, 1.0)):
+            value = getattr(self, key)
+            if value is None:
+                problems.append(f'experiment file: {key!r} missing')
+            elif isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+                problems.append(f'{key} must be a number between {low:g} and {high:g} (got {value!r})')
+        # reference images: one per ROI, all of the same shape
+        if self.zen_ref_images_path and os.path.isdir(self.zen_ref_images_path) and self.roi_names:
+            try:
+                self._af_refs = autofocus_check.load_reference_images(self.zen_ref_images_path)
+            except Exception as err:
+                problems.append(f'autofocus reference images: {err}')
+            else:
+                if len(self._af_refs) != len(self.roi_names):
+                    problems.append(f'autofocus reference images: {len(self._af_refs)} reference image(s) in '
+                                    f'{self.zen_ref_images_path} for {len(self.roi_names)} ROI(s) - one reference '
+                                    f'per ROI is required')
+                h, w = self._af_refs.shape[1:]
+                self.log.info(f'Autofocus references: {len(self._af_refs)} image(s) {h}x{w} loaded from '
+                              f'{self.zen_ref_images_path}')
         return problems
 
     def _prepare_imaging(self) -> None:
-        """SD imaging preparation (laser source, wait for ZEN "ready")."""
-        # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-        # folders_before = self._zen_folders()
+        """List the folders of zen_saving_path, SD imaging preparation (laser source, wait for ZEN "ready"),
+        then the new folder created by ZEN."""
+        self._zen_folders_before = self._zen_folders()
         super()._prepare_imaging()
-        # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-        # self._zen_directory = self._find_new_zen_folder(folders_before)
+        self._zen_directory = self._find_new_zen_folder(self._zen_folders_before)
+
+    def _create_data_folder(self) -> str:
+        """<root>/<ZEN folder name>/metadata (create_mirror_folder) and its autofocus/ subfolder; self.prefix =
+        folders in zen_saving_path before ZEN started + 1, on 3 digits. Then the autofocus check files, in
+        autofocus/: copy of the references, the score file with its header; empty list of the autofocus images seen
+        (the image of the first ROI may already exist, still empty), empty score table."""
+        self.prefix = str(len(self._zen_folders_before) + 1).zfill(3)
+        directory = create_mirror_folder(self._data_root, self._zen_directory, self.log)
+        # fluidics record: <metadata folder>/fluidics/fluidics_log.csv with its header
+        self._create_fluidics_log(directory)
+        # online transfer: the server folder <save_network_path>/<ZEN folder name>/ created now by the transfer
+        # thread (no wait here; a failure marks the server as down)
+        if getattr(self, '_transfer', None) is not None:
+            try:
+                self._transfer.make_dir(self._server_path())
+                self.log.info(f'Data transfer: server folder {os.path.join(self.save_network_path, self._server_path())}'
+                              f' requested')
+            except Exception as err:  # the transfer never stops the experiment
+                self.log.warning(f'Data transfer: could not request the server folder: {err}')
+        # server copy of the metadata announced now that the ZEN folder name is known
+        if getattr(self, 'save_network_path', ''):
+            self.log.info(f'Metadata will also be copied to '
+                          f'{os.path.join(self.save_network_path, self._server_path("metadata"))} at the end of the run')
+        # autofocus check files: <metadata folder>/autofocus/
+        os.makedirs(os.path.join(directory, autofocus_check.AUTOFOCUS_SUBFOLDER), exist_ok=True)
+        np.save(os.path.join(directory, autofocus_check.AUTOFOCUS_SUBFOLDER, autofocus_check.REFERENCE_FILE_NAME),
+                self._af_refs)
+        self._af_seen = set()  # empty: the image file of the first ROI is created by ZEN before "ready"
+        self._af_scores = np.full((len(self._cycles), len(self.roi_names)), np.nan)
+        with open(os.path.join(directory, autofocus_check.AUTOFOCUS_SUBFOLDER, self._AF_CSV), 'w', newline='') as f:
+            csv.writer(f).writerow(self._AF_CSV_COLUMNS)
+        return directory
+
+    def _choose_data_root(self) -> str:
+        """<save_path>/<YYYY-MM-DD> (start of the task), always local; the server only gets copies. Before any
+        hardware call: also the start of the online transfer (transfer_data)."""
+        root = local_dated_root(self.save_path)
+        self._start_transfer()
+        return root
+
+    def _run(self) -> dict:
+        result = super()._run()
+        self._run_completed = True  # normal end: the cleanup sends the last acquisitions
+        return result
+
+    # ----------------------------------------------------------------------------------------------
+    # Online data transfer (common/data_transfer.py)
+    # ----------------------------------------------------------------------------------------------
+
+    def _start_transfer(self) -> None:
+        """DataTransfer on save_network_path (files under <ZEN folder name>/); first write test, pop-up if it fails.
+        Called before any hardware call; never stops the experiment."""
+        if not self.transfer_data:
+            return
+        self._transfer = DataTransfer(self.log, self.save_network_path, timeout_s=self.transfer_timeout)
+        # live copy of the metadata: a second transfer thread, always allowed (local files only, no load on the
+        # ZEN disk), same server folder
+        self._metadata_transfer = DataTransfer(self.log, self.save_network_path, timeout_s=self.transfer_timeout)
+        self._metadata_transfer.allow()
+        if not self._transfer.test(self._TRANSFER_TEST_S):
+            show_warning_popup('Server folder not reachable',
+                               f'The server folder {self.save_network_path} is not reachable. The experiment '
+                               f'continues; the data will be transferred when the server is back.')
+
+    def _server_path(self, *parts) -> str:
+        """Path relative to save_network_path: <ZEN folder name>/<parts>."""
+        return os.path.join(os.path.basename(os.path.normpath(self._zen_directory)), *parts)
+
+    def _queue_acquisitions(self) -> None:
+        """Queue the ZEN acquisitions (_TRANSFER_PATTERN, recursive) of the ROIs already imaged: the matching files
+        sorted by their pt number, the first N only (N = acquisitions confirmed done in this run; a later file is
+        still being written by ZEN), with their path relative to the ZEN folder. One info line with the counts;
+        a warning when acquisitions were done but no file matches the pattern."""
+        if getattr(self, '_transfer', None) is None or not getattr(self, '_zen_directory', None):
+            return
+        done = getattr(self, '_acquisitions_done', 0)
+        found = autofocus_check.sort_czi_paths(
+            glob(os.path.join(self._zen_directory, '**', self._TRANSFER_PATTERN), recursive=True))
+        if done > 0 and not found:
+            self.log.warning(f'Data transfer: no ZEN acquisition file matches {self._TRANSFER_PATTERN} in '
+                             f'{self._zen_directory} although {done} acquisition(s) were done - check the ZEN block '
+                             f'numbers')
+        new = 0
+        for path in found[:done]:
+            if self._transfer.add(path, self._server_path(os.path.relpath(path, self._zen_directory))):
+                new += 1
+        self.log.info(f'Data transfer: {len(found)} acquisition file(s) ({self._TRANSFER_PATTERN}) in '
+                      f'{self._zen_directory}, {new} newly queued, {self._transfer.pending_count} waiting, '
+                      f'{self._transfer.sent_count} sent')
+
+    def _image_roi(self, roi_name: str, file_name: str) -> None:
+        """Imaging of one ROI (SDImagingMixin: autofocus check, acquisition), then one more ZEN acquisition counted
+        as done (its file can be sent to the server) and the live copy of the score file, movie_name.txt and the
+        log."""
+        super()._image_roi(roi_name, file_name)
+        self._acquisitions_done = getattr(self, '_acquisitions_done', 0) + 1
+        self._sync_metadata(os.path.join(autofocus_check.AUTOFOCUS_SUBFOLDER, self._AF_CSV), 'movie_name.txt',
+                            self._LOG_FILE_NAME)
+
+    # ----------------------------------------------------------------------------------------------
+    # Fluidics record (<metadata folder>/fluidics/fluidics_log.csv)
+    # ----------------------------------------------------------------------------------------------
+
+    def _fluidics_columns(self) -> tuple:
+        """Columns of fluidics_log.csv; pressure columns with the unit of the flow logic when it gives one."""
+        unit = ''
+        try:
+            units = self._flow.get_pressure_unit()
+            unit = str((list(units.values()) if isinstance(units, dict) else list(units))[0]).strip()
+        except Exception:
+            unit = ''
+        suffix = f'_{unit}' if unit and unit.replace('_', '').isalnum() else ''
+        return ('time', 'elapsed_s', 'RT', 'step', 'buffer', 'flowrate_setpoint_ul_min', f'pressure_setpoint{suffix}',
+                'flowrate_ul_min', f'pressure{suffix}', 'volume_ul')
+
+    def _create_fluidics_log(self, directory) -> None:
+        """<directory>/fluidics/fluidics_log.csv with its header; an error: one warning, no record for the run."""
+        try:
+            folder = os.path.join(directory, self.FLUIDICS_SUBFOLDER)
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, self.FLUIDICS_LOG_NAME)
+            with open(path, 'w', newline='') as f:
+                csv.writer(f).writerow(self._fluidics_columns())
+            self._fluidics_path = path
+        except Exception as err:
+            self._fluidics_path = None
+            self.log.warning(f'Fluidics record: could not create {self.FLUIDICS_LOG_NAME} ({err!r}) - no fluidics '
+                             f'record for this run')
+
+    def _hybridization(self, label, rt, tube, hyb_steps) -> None:
+        """Hybridization with the copies to the server allowed; fluidics record context."""
+        self._fluidics_context = ('hybridization', rt, len(hyb_steps))
+        self._transfer_open()
+        try:
+            super()._hybridization(label, rt, tube, hyb_steps)
+        finally:
+            self._transfer_pause()
+
+    def _photobleaching(self, label, rt, pb_steps) -> None:
+        """Photobleaching with the copies allowed (until the end of the needle rinse); fluidics record context."""
+        self._fluidics_context = ('photobleaching', rt, len(pb_steps or []))
+        self._transfer_open()
+        super()._photobleaching(label, rt, pb_steps)
+
+    def _on_fluidics_sample(self, step_info, values) -> None:
+        """One row of fluidics_log.csv per sampling interval of the flow logic (FluidicsStepsMixin hook, task
+        thread): time, elapsed time, RT, step, buffer (probe of the cycle for a probe injection), setpoints and
+        values of the flow logic. A write error: one warning, then no more record for the run."""
+        if not self._fluidics_path:
+            return
+        now = monotonic()
+        if self._fluidics_last_sample is not None and now - self._fluidics_last_sample < 0.9 * self._fluidics_interval:
+            return  # one row per sampling interval (the rinse wait polls faster)
+        self._fluidics_last_sample = now
+        kind, rt, total = self._fluidics_context
+        if step_info['kind'] == 'rinse':
+            step, buffer = 'rinse', 'rinse'
+        else:
+            step = f'{kind} {step_info["number"]}/{total}'
+            buffer = rt if step_info['probe'] else step_info['product']
+
+        def number(value, digits=3):
+            return '' if value is None else round(float(value), digits)
+        row = (datetime.now().isoformat(timespec='seconds'), f'{now - self._fluidics_t0:.1f}', rt, step, buffer,
+               number(step_info['flowrate']), number(values.get('pressure_setpoint')), number(values.get('flowrate')),
+               number(values.get('pressure')), number(values.get('total_volume')))
+        try:
+            with open(self._fluidics_path, 'a', newline='') as f:
+                csv.writer(f).writerow(row)
+        except Exception as err:
+            self.log.warning(f'Fluidics record: could not write {self._fluidics_path} ({err!r}) - recording stopped '
+                             f'for this run')
+            self._fluidics_path = None
+
+    def _on_fluidics_step_done(self, step_info) -> None:
+        """End of an injection or of the needle rinse: next row at once; live copy of the fluidics record and
+        the log."""
+        self._fluidics_last_sample = None
+        self._sync_metadata(os.path.join(self.FLUIDICS_SUBFOLDER, self.FLUIDICS_LOG_NAME), self._LOG_FILE_NAME)
+
+    # ----------------------------------------------------------------------------------------------
+    # Live copy of the metadata (transfer_data on)
+    # ----------------------------------------------------------------------------------------------
+
+    def _sync_metadata(self, *relative_paths) -> None:
+        """Queue these files of the metadata folder (paths relative to it) on the metadata transfer, to
+        <save_network_path>/<ZEN folder name>/metadata/<path>, sent again when they changed (update=True). The
+        log file handler is flushed before the log is queued. Nothing without transfer_data; warning only."""
+        transfer = getattr(self, '_metadata_transfer', None)
+        if transfer is None or not getattr(self, 'directory', None):
+            return
+        try:
+            for relative in relative_paths:
+                path = os.path.join(self.directory, relative)
+                if relative == self._LOG_FILE_NAME and getattr(self, '_log_file_handler', None) is not None:
+                    self._log_file_handler.flush()
+                if os.path.isfile(path):
+                    transfer.add(path, self._server_path('metadata', relative), update=True)
+        except Exception as err:
+            self.log.warning(f'Data transfer: live copy of the metadata: {err!r}')
+
+    def _save_run_files(self, injections) -> None:
+        """Run files of all setups, then their live copy: metadata.yml, experiment_parameters/ (all files), the
+        initial autofocus references, the empty score and fluidics files."""
+        super()._save_run_files(injections)
+        parameters = [os.path.join(run_metadata_module.EXPERIMENT_PARAMETERS_SUBFOLDER, name)
+                      for name in sorted(os.listdir(self._parameters_dir))] if self._parameters_dir else []
+        self._sync_metadata('metadata.yml', *parameters,
+                            os.path.join(autofocus_check.AUTOFOCUS_SUBFOLDER, autofocus_check.REFERENCE_FILE_NAME),
+                            os.path.join(autofocus_check.AUTOFOCUS_SUBFOLDER, self._AF_CSV),
+                            os.path.join(self.FLUIDICS_SUBFOLDER, self.FLUIDICS_LOG_NAME))
+
+    def _transfer_open(self) -> None:
+        """Start of a fluidics step of the cycle: list the acquisitions, allow the copies."""
+        if getattr(self, '_transfer', None) is None:
+            return
+        try:
+            self._queue_acquisitions()
+            self._transfer.allow()
+        except Exception as err:  # the transfer never stops the experiment
+            self.log.warning(f'Data transfer: could not start the copies of this step: {err}')
+
+    def _transfer_pause(self) -> None:
+        if getattr(self, '_transfer', None) is None:
+            return
+        try:
+            self._transfer.pause()
+        except Exception as err:
+            self.log.warning(f'Data transfer: could not pause the copies: {err}')
+
+    def _rinse_needle(self, label) -> None:
+        """Needle rinse, then the copies are paused."""
+        try:
+            super()._rinse_needle(label)
+        finally:
+            self._transfer_pause()
+
+    def _end_of_run_files(self) -> None:
+        """Cleanup, after the hardware reset: autofocus report (normal end or autofocus abort), then, with
+        transfer_data, the last acquisitions (normal end only), and, whenever save_network_path is set, the
+        metadata files to the server."""
+        self._make_autofocus_report()
+        if getattr(self, '_transfer', None) is not None:
+            # a. normal end: the acquisitions of the last cycle
+            if self._run_completed:
+                try:
+                    self._queue_acquisitions()
+                    self._transfer.flush(self.transfer_timeout)
+                except Exception as err:
+                    self.log.error(f'Cleanup: transfer of the acquisitions: {err}')
+            # b. interrupt / error: the acquisitions stay local (manual copy)
+            else:
+                try:
+                    skipped = self._transfer.discard([p for p in self._transfer.pending()
+                                                      if p.startswith(self._zen_directory)])
+                    self.log.info(f'Data transfer: run not completed - the ZEN acquisitions are not sent '
+                                  f'({len(skipped)} queued file(s) left); copy them from {self._zen_directory}')
+                except Exception as err:
+                    self.log.error(f'Cleanup: data transfer: {err}')
+        # c. the metadata folder, except the log: whenever save_network_path is set (none when the run stopped
+        #    before the ZEN folder was known)
+        self._stop_metadata_transfer()  # live copies done or stopped before the final versions are sent
+        if not getattr(self, 'directory', None) or not getattr(self, 'save_network_path', ''):
+            return
+        if getattr(self, '_transfer', None) is None:
+            # transfer_data off: the background helper is created now, for the metadata only (no write test)
+            try:
+                self._transfer = DataTransfer(self.log, self.save_network_path, timeout_s=self.transfer_timeout)
+            except Exception as err:
+                self.log.error(f'Cleanup: transfer of the metadata: {err}')
+                return
+        try:
+            log_path = os.path.join(self.directory, self._LOG_FILE_NAME)
+            for folder, _, names in os.walk(self.directory):
+                for name in names:
+                    path = os.path.join(folder, name)
+                    if path != log_path:  # final versions replace the live copies (update=True)
+                        self._transfer.add(path, self._server_path('metadata', os.path.relpath(path, self.directory)),
+                                           update=True)
+            self._transfer.flush(self.transfer_timeout)
+        except Exception as err:
+            self.log.error(f'Cleanup: transfer of the metadata: {err}')
+
+    def _make_autofocus_report(self) -> None:
+        """Autofocus report in <metadata folder>/autofocus/ (qudi.util.autofocus_report.report_run) after a normal end or an
+        autofocus abort; any error is logged as a warning only."""
+        if not (getattr(self, '_run_completed', False) or getattr(self, '_af_aborted', False)) \
+                or not getattr(self, 'directory', None):
+            return
+        try:
+            written = autofocus_report.report_run(self.directory, log=self.log)
+            self.log.info('Autofocus report: ' + ', '.join(os.path.basename(path) for path in written))
+        except Exception as err:
+            self.log.warning(f'Autofocus report could not be created: {err!r}')
+
+    def _stop_metadata_transfer(self) -> None:
+        """Live metadata copies: pending ones sent (at most transfer_timeout), then the thread is stopped (the two
+        transfer threads never write the same server file at the same time). Never raises."""
+        transfer, self._metadata_transfer = getattr(self, '_metadata_transfer', None), None
+        if transfer is None:
+            return
+        try:
+            transfer.flush(self.transfer_timeout)
+        except Exception as err:
+            self.log.warning(f'Cleanup: live copy of the metadata: {err!r}')
+        try:
+            transfer.stop()
+        except Exception as err:
+            self.log.error(f'Cleanup: stop of the metadata transfer: {err}')
+
+    def _after_run_log_closed(self) -> None:
+        """Cleanup, once HiM_task.log is closed: send it, stop the transfer, report the files not sent (only when a
+        transfer exists: transfer_data, or save_network_path with a metadata folder)."""
+        self._stop_metadata_transfer()  # already stopped by _end_of_run_files, unless it did not run
+        if getattr(self, '_transfer', None) is None:
+            return
+        left = []
+        # d. the log (short time limit), then the transfer thread is stopped
+        try:
+            if not self.directory:
+                raise RuntimeError('no run folder - nothing to send')
+            self._transfer.add(os.path.join(self.directory, self._LOG_FILE_NAME),
+                               self._server_path('metadata', self._LOG_FILE_NAME), update=True)
+            left = self._transfer.flush(self._LOG_TRANSFER_S)
+        except Exception as err:
+            self.log.error(f'Cleanup: transfer of the log: {err}')
+        try:
+            self._transfer.stop()
+        except Exception as err:
+            self.log.error(f'Cleanup: stop of the data transfer: {err}')
+        # e. files not sent
+        if left:
+            self.log.warning(f'Data transfer: {len(left)} file(s) not sent to {self._transfer.destination_root} - '
+                             f'they are in: ' + ', '.join(left))
+
+    # ----------------------------------------------------------------------------------------------
+    # Autofocus check
+    # ----------------------------------------------------------------------------------------------
+
+    _AF_CSV = autofocus_check.SCORES_FILE_NAME           # ROI_probe_autofocus_summary.csv, in autofocus/
+    _AF_CSV_COLUMNS = autofocus_check.SCORES_COLUMNS
+    _AF_POLL_S = 0.5  # poll interval while waiting for the new autofocus image
+    _AF_WAIT_WARNING_S = 60  # warning every _AF_WAIT_WARNING_S while the new autofocus image is not found
+    _AF_READ_ATTEMPTS = 5    # attempts to read the new autofocus image (ZEN may still be writing it)
+    _AF_READ_RETRY_S = 1.0   # pause between two read attempts
+    FLUIDICS_SUBFOLDER = 'fluidics'          # <metadata folder>/fluidics/
+    FLUIDICS_LOG_NAME = 'fluidics_log.csv'   # one row per sampling interval of the flow logic
+    FILE_STABLE_PERIOD_S = 0.5      # the new image is read once its size is the same on two checks this far apart
+    AUTOFOCUS_JOB_TIMEOUT_S = 120   # longest wait for the helper process (read + score of one image)
+    _AF_JOB_POLL_S = 0.1            # interrupt check period while waiting for the helper process
+    # function run in the helper process with (path, reference); None: autofocus_check.read_and_score. A module-level
+    # function (it is pickled by name), e.g. a stand-in of the tests.
+    _af_worker = None
+
+    def _setup(self) -> None:
+        """Setup of all setups, plus the helper process pool of the autofocus check (the process itself starts with
+        the first check)."""
+        self._af_pool = None
+        super()._setup()
+        self._af_pool = self._new_af_pool()
+
+    @staticmethod
+    def _new_af_pool():
+        """One helper process, started with 'spawn' (a fresh interpreter: no thread or memory state of qudi)."""
+        return concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context('spawn'))
+
+    def _af_executor(self):
+        """The helper process pool, created when missing (after a crash, or for a task built without _setup)."""
+        if getattr(self, '_af_pool', None) is None:
+            self._af_pool = self._new_af_pool()
+        return self._af_pool
+
+    def _stop_af_pool(self) -> None:
+        """Shut the helper process pool down (pending jobs cancelled); a process still alive after 1 s (stuck
+        read) is terminated. Never raises."""
+        pool, self._af_pool = getattr(self, '_af_pool', None), None
+        if pool is None:
+            return
+        processes = list((getattr(pool, '_processes', None) or {}).values())
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception as err:
+            self.log.error(f'Autofocus check: could not shut the image reader process down: {err!r}')
+        for process in processes:
+            try:
+                process.join(timeout=1.0)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=1.0)
+            except Exception as err:
+                self.log.error(f'Autofocus check: could not stop the image reader process: {err!r}')
+
+    def _af_path(self, name) -> str:
+        """<metadata folder>/autofocus/<name> (the subfolder is created when missing)."""
+        folder = os.path.join(self.directory, autofocus_check.AUTOFOCUS_SUBFOLDER)
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, name)
+
+    def _af_row(self, cycle, roi_name, score, shift_y, shift_x, passed) -> None:
+        """One row of the score file (columns autofocus_check.SCORES_COLUMNS), appended at once (kept after an
+        abort); score None: image not read (empty score and shifts)."""
+        experiment = os.path.basename(os.path.normpath(self._zen_directory)) if self._zen_directory else ''
+        row = (experiment, roi_name, self._af_rt, '' if score is None else f'{score:.6f}', cycle + 1,
+               '' if score is None else shift_y, '' if score is None else shift_x, passed)
+        with open(self._af_path(self._AF_CSV), 'a', newline='') as f:
+            csv.writer(f).writerow(row)
+
+    def _autofocus_images(self) -> list:
+        """Autofocus images (*_AcquisitionBlock1_pt*.czi) of the ZEN data folder, recursive search."""
+        return glob(os.path.join(self._zen_directory, '**', autofocus_check.AUTOFOCUS_IMAGE_PATTERN), recursive=True)
+
+    def _wait_for_autofocus_image(self, roi_name) -> str:
+        """Called after ZEN's "done" trigger of the autofocus block of roi_name: wait until exactly one autofocus
+        image of the ZEN folder is not in the snapshot self._af_seen (empty at the start of the run, so the image
+        of the first ROI is found even if ZEN created its file before "ready"); several new files: ZEN is still
+        writing, wait. Poll every _AF_POLL_S, no timeout, interruptible; a warning every _AF_WAIT_WARNING_S.
+        The listing becomes the snapshot for the next check; returns the path of the new image."""
+        self.log.info(f'Waiting for the autofocus image of {roi_name} ({autofocus_check.AUTOFOCUS_IMAGE_PATTERN}) '
+                      f'in {self._zen_directory}')
+        start = next_warning = monotonic()
+        next_warning += self._AF_WAIT_WARNING_S
+        while True:
+            self._check_interrupt()
+            current = self._autofocus_images()
+            new = sorted(set(current) - self._af_seen)
+            if len(new) == 1:
+                self._af_seen = set(current)
+                self.log.info(f'Autofocus image of {roi_name}: {os.path.basename(new[0])}')
+                return new[0]
+            if monotonic() >= next_warning:
+                next_warning += self._AF_WAIT_WARNING_S
+                names = ', '.join(os.path.basename(path) for path in new[:5]) + (', ...' if len(new) > 5 else '')
+                self.log.warning(f'Still waiting for the autofocus image of {roi_name} after {monotonic() - start:.0f} '
+                                 f's: {len(new)} new matching file(s)' + (f' ({names})' if new else ''))
+            self._zen_wait(self._AF_POLL_S)
+
+    def _wait_until_file_stable(self, path, roi_name) -> None:
+        """Wait until the size of the new image is non-zero and the same on two checks FILE_STABLE_PERIOD_S apart
+        (ZEN may still be writing it, through a network mount). No timeout, interruptible; a warning every
+        _AF_WAIT_WARNING_S while it changes."""
+        start = monotonic()
+        next_warning = start + self._AF_WAIT_WARNING_S
+        previous = None
+        while True:
+            self._check_interrupt()
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = None
+            if size and size == previous:
+                return
+            if monotonic() >= next_warning:
+                next_warning += self._AF_WAIT_WARNING_S
+                self.log.warning(f'Autofocus image of {roi_name} ({os.path.basename(path)}) still being written after '
+                                 f'{monotonic() - start:.0f} s (size {size} B)')
+            previous = size
+            self._zen_wait(self.FILE_STABLE_PERIOD_S)
+
+    def _run_in_helper(self, path, ref):
+        """(score, shift_y, shift_x, image) computed by the helper process; waits at most AUTOFOCUS_JOB_TIMEOUT_S,
+        checking for an interrupt every _AF_JOB_POLL_S. Raises BrokenProcessPool (process died),
+        AutofocusReaderTimeout, or the exception raised inside the job."""
+        worker = self._af_worker or autofocus_check.read_and_score
+        with _main_script_hidden():  # the helper process starts here (first job, or after a crash)
+            future = self._af_executor().submit(worker, path, ref)
+        deadline = monotonic() + self.AUTOFOCUS_JOB_TIMEOUT_S
+        while True:
+            self._check_interrupt()
+            try:
+                return future.result(timeout=self._AF_JOB_POLL_S)
+            except concurrent.futures.TimeoutError:
+                if future.done():
+                    raise  # a TimeoutError raised inside the job itself
+                if monotonic() >= deadline:
+                    future.cancel()
+                    raise AutofocusReaderTimeout(f'no result after {self.AUTOFOCUS_JOB_TIMEOUT_S:g} s')
+
+    def _score_in_helper(self, path, ref, roi_name):
+        """_run_in_helper; when the helper process dies or times out: error, new process, one more try. None when
+        the second try fails too (the check then counts as failed). Exceptions raised inside the job go up."""
+        for helper_attempt in (1, 2):
+            try:
+                return self._run_in_helper(path, ref)
+            except (BrokenProcessPool, AutofocusReaderTimeout) as err:
+                details = (f'timeout: {err}' if isinstance(err, AutofocusReaderTimeout)
+                           else f'process died: {err!r}')
+                self.log.error(f'Autofocus check of {roi_name}: the image reader process crashed (or timed out) - '
+                               f'{details}' + (' - new reader process, second attempt' if helper_attempt == 1 else ''))
+                self._stop_af_pool()  # a new pool is created by the next _af_executor()
+        self.log.error(f'Autofocus check of {roi_name}: the image reader process failed twice - the check of '
+                       f'{os.path.basename(path)} counts as failed')
+        return None
+
+    def _read_and_score(self, path, ref, roi_name):
+        """Read and score the new image in the helper process; an exception raised inside the job (e.g. file not
+        readable yet): up to _AF_READ_ATTEMPTS attempts, _AF_READ_RETRY_S apart (interruptible), a warning at each
+        failure, the last one is raised. None when the helper process failed twice."""
+        for attempt in range(1, self._AF_READ_ATTEMPTS + 1):
+            try:
+                return self._score_in_helper(path, ref, roi_name)
+            except ModuleScriptInterrupted:
+                raise
+            except Exception as err:
+                if attempt == self._AF_READ_ATTEMPTS:
+                    raise
+                self.log.warning(f'Could not read the autofocus image {os.path.basename(path)} (attempt {attempt}/'
+                                 f'{self._AF_READ_ATTEMPTS}): {err!r} - new attempt in {self._AF_READ_RETRY_S:g} s')
+                self._zen_wait(self._AF_READ_RETRY_S)
+
+    def _imaging(self, label, rt) -> None:
+        """Imaging of the cycle between the start and the end of its autofocus checks; before it, the copies to the
+        server are paused and the copy in progress is waited for (at most transfer_timeout; not when the server
+        is down)."""
+        if getattr(self, '_transfer', None) is not None:
+            try:
+                self._transfer.pause()
+                if self._transfer.server_ok:
+                    self._transfer.wait_idle(self.transfer_timeout)
+            except Exception as err:  # the transfer never stops the experiment
+                self.log.warning(f'Data transfer: {err}')
+        self._start_autofocus_cycle(rt)
+        super()._imaging(label, rt)
+        self._end_autofocus_cycle(rt)
+
+    def _start_autofocus_cycle(self, rt) -> None:
+        """Counters of the autofocus checks reset at the start of each cycle."""
+        self._af_rt, self._af_failures, self._af_passed = rt, 0, 0
+        self._af_failed_before, self._af_failed_rois = self._af_failed_rois, set()
+
+    def _end_autofocus_cycle(self, rt) -> None:
+        """References at the end of the cycle (reference_images_<RT>.npy) and fraction of passed checks."""
+        np.save(self._af_path(f'reference_images_{rt}.npy'), self._af_refs)
+        # live copy: the references at the end of this cycle (once) and the log; autofocus_reference.npy (rewritten
+        # after every passed check) is copied at the start and in the cleanup only
+        self._sync_metadata(os.path.join(autofocus_check.AUTOFOCUS_SUBFOLDER, f'reference_images_{rt}.npy'),
+                            self._LOG_FILE_NAME)
+        n = len(self.roi_names)
+        self.log.info(f'Autofocus check {rt}: {self._af_passed}/{n} ROI(s) passed ({self._af_passed / n:.0%})')
 
     def _check_autofocus(self, roi_name: str) -> None:
-        """PLACEHOLDER - logs once per run that the check is not implemented.
+        """Compare the image ZEN saved at the end of its autofocus block with the reference of roi_name (ZNCC,
+        common/autofocus_check.py); see the class docstring for pass / fail and the abort rule."""
+        cycle, index, n = self._cycles_done, self.roi_names.index(roi_name), len(self.roi_names)
+        # wait for the new autofocus image, then until ZEN has finished writing it
+        path = self._wait_for_autofocus_image(roi_name)
+        self._wait_until_file_stable(path, roi_name)
+        # read its first plane and score it against the reference of this ROI, in the helper process (a crash of
+        # the .czi reader cannot kill qudi)
+        result = self._read_and_score(path, self._af_refs[index], roi_name)
+        if result is None:
+            # reader process failed twice: failed check (reference kept, empty score, NaN in correlation.npy)
+            self._af_row(cycle, roi_name, None, None, None, False)
+            self._autofocus_failed(roi_name, cycle, n, 'the image could not be read')
+            return
+        score, shift_y, shift_x, image = result
+        passed = score >= self.correlation_threshold
+        self._af_scores[cycle, index] = score
+        self.log.info(f'Autofocus check cycle {cycle + 1}/{len(self._cycles)} - {self._af_rt} - {roi_name}: score '
+                      f'{score:.3f}, shift (y, x) = ({shift_y}, {shift_x}) px - {"pass" if passed else "FAIL"}')
+        # one row per check, written at once (kept after an abort)
+        self._af_row(cycle, roi_name, score, shift_y, shift_x, passed)
+        if passed:
+            # pass: the new image becomes the reference of this ROI
+            self._af_passed += 1
+            self._af_refs[index] = image
+            np.save(self._af_path(autofocus_check.REFERENCE_FILE_NAME), self._af_refs)
+            return
+        self._autofocus_failed(roi_name, cycle, n, f'score {score:.3f} < threshold {self.correlation_threshold}')
 
-        To do (legacy HiM_imaging_SD.py, check_focus / init_autofocus_safety):
-          - at start, load the reference autofocus images from zen_ref_images_path
-            (autofocus_reference.npy, or the czi images sorted in acquisition order);
-          - after the ZEN autofocus block, wait for the new autofocus image saved by ZEN in the ZEN
-            folder (*_AcquisitionBlock1_pt*.czi);
-          - compute the correlation score between this image and the reference image of this ROI;
-          - score below correlation_threshold: a warning the first time, stop the experiment if it
-            happens twice in a row; otherwise the new image replaces the reference of this ROI;
-          - save the scores (correlation.npy) and the reference images (autofocus_reference.npy,
-            reference_images_<RT>.npy) in the metadata folder.
-        """
-        if not self._autofocus_check_logged:
-            self._autofocus_check_logged = True
-            self.log.warning('Autofocus check not implemented yet (zen_ref_images_path, correlation_threshold)')
+    def _autofocus_failed(self, roi_name, cycle, n, reason) -> None:
+        """Failed check: reference kept, warnings, then the minimum-fraction rule (RuntimeError when the experiment
+        is aborted)."""
+        self._af_failures += 1
+        self._af_failed_rois.add(roi_name)
+        self.log.warning(f'Autofocus check failed for {roi_name} ({reason})')
+        if roi_name in self._af_failed_before:
+            self.log.warning(f'Autofocus check failed for {roi_name} in the previous cycle too')
+        # abort as soon as the minimum fraction of passed ROIs can no longer be reached in this cycle
+        if (n - self._af_failures) / n < self.autofocus_min_fraction:
+            message = (f'Autofocus check: {self._af_failures} of {n} ROI(s) failed in cycle {cycle + 1} '
+                       f'({self._af_rt}) - at most {(n - self._af_failures) / n:.0%} can pass, below the minimum '
+                       f'fraction {self.autofocus_min_fraction:.0%}. The Hi-M experiment is aborted.')
+            self.log.error(message)
+            # TODO: email alert to the user (legacy send_alert_email), not migrated yet
+            self._af_aborted = True  # the cleanup still makes the autofocus report
+            raise RuntimeError(message)
+
+    def _cleanup(self) -> None:
+        """Helper process of the autofocus check stopped, correlation.npy (cycles x ROIs, NaN for the checks not done)
+        in <metadata folder>/autofocus/, then the cleanup of all setups."""
+        try:
+            self._stop_af_pool()
+        except Exception as err:
+            self.log.error(f'Cleanup: could not stop the autofocus image reader process: {err!r}')
+        if getattr(self, '_af_scores', None) is not None and getattr(self, 'directory', None):
+            try:
+                np.save(self._af_path('correlation.npy'), self._af_scores)
+            except Exception as err:
+                self.log.error(f'Cleanup: could not save correlation.npy: {err}')
+        super()._cleanup()
+
+
+class AutofocusReaderTimeout(Exception):
+    """The helper process of the autofocus check gave no result within AUTOFOCUS_JOB_TIMEOUT_S."""
+
+
+@contextmanager
+def _main_script_hidden():
+    """While a helper process is started with the 'spawn' method: the main script of the parent (qudi's start
+    script, a test script) is not imported again in the child - spawn imports it as __mp_main__ when
+    __main__ has a __spec__ name or a __file__. Both are removed for the time of the start and restored."""
+    main = sys.modules.get('__main__')
+    if main is None:
+        yield
+        return
+    saved = {key: main.__dict__[key] for key in ('__file__', '__spec__') if key in main.__dict__}
+    main.__dict__.pop('__file__', None)
+    main.__dict__['__spec__'] = None
+    try:
+        yield
+    finally:
+        for key in ('__file__', '__spec__'):
+            if key in saved:
+                main.__dict__[key] = saved[key]
+            else:
+                main.__dict__.pop(key, None)
 
 
 class HiMRAMMTask(RAMMImagingMixin, HiMTaskBase):

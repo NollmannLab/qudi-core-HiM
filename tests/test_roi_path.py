@@ -518,6 +518,56 @@ def _section_optimize():
     mw.save_list_Action.trigger()
     app.processEvents()
     check('GUI: Save button still saves under the name of the field', os.path.exists(os.path.join(TMP, 'saved_by_button.json')))
+
+    # ------------------------------------------------------------------ close_function / closing qudi
+    import types
+    stops = []
+    gui.sigStopTracking.connect(lambda: stops.append('stop'))
+    real_logic = gui._roi_logic
+
+    class GoneLogic:
+        def __getattr__(self, name):
+            raise AttributeError(f'module deleted ({name})')
+
+    errors = {}
+    for label, logic in (('None', None), ('attribute access raising AttributeError', GoneLogic()),
+                         ('tracking off', types.SimpleNamespace(tracking=False)),
+                         ('tracking on', types.SimpleNamespace(tracking=True))):
+        gui._roi_logic = logic
+        stops.clear()
+        try:
+            gui.close_function()
+            errors[label] = (None, len(stops))
+        except Exception as err:
+            errors[label] = (repr(err), len(stops))
+    gui._roi_logic = real_logic
+    check('close_function: ROI logic None or raising AttributeError -> no exception, nothing emitted; tracking off -> '
+          'nothing; tracking on -> sigStopTracking emitted once',
+          errors == {'None': (None, 0), 'attribute access raising AttributeError': (None, 0),
+                     'tracking off': (None, 0), 'tracking on': (None, 1)}, errors)
+
+    # closing qudi: modules deactivated (the GUI closes its window), then QApplication.closeAllWindows
+    mw.show()
+    app.processEvents()
+    shown_before = mw.isVisible()
+    close_errors = []
+    old_hook = sys.excepthook
+    sys.excepthook = lambda *exc: close_errors.append(exc[1])  # error of a Python override called by Qt
+    try:
+        # on_deactivate called directly: deactivating the modules through module_state would save their status
+        # variables (the test ROI list) in qudi's appdata folder, restored by the next activation
+        gui.on_deactivate()
+        app.processEvents()
+        closed_by_deactivate = not mw.isVisible()
+        gui._roi_logic = None  # connector of a deactivated module
+        QtWidgets.QApplication.closeAllWindows()
+        mw.close()  # a second close of the window: no side effect
+        app.processEvents()
+    finally:
+        sys.excepthook = old_hook
+    check('closing qudi: on_deactivate closes the ROI window; closeAllWindows / a second close after the ROI logic '
+          'is gone raise nothing',
+          shown_before and closed_by_deactivate and not close_errors, (shown_before, close_errors))
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 

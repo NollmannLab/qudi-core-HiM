@@ -67,6 +67,10 @@ Adding a new experiment
              - h5
            default path imagedata: /path/to/local/data
            default network path: /path/to/network/data
+           default zen path: /path/to/zen/folders    # optional: start folder of the ZEN folder dialogs
+           default sample path: /path/to/sample/files    # optional: start folder of the sample file dialogs
+           sample template: /path/to/custom_metadata_templates/sample_template.yml   # optional: fields of the
+                                                         # sample file dialog (without it, "Edit" is disabled)
 
    The hardware connectors are optional and may be omitted when the setup does not provide the corresponding module.
 
@@ -97,6 +101,7 @@ You should have received a copy of the GNU General Public License along with Qud
 """
 
 import os
+import re
 import yaml
 
 from copy import deepcopy
@@ -228,6 +233,14 @@ class ExpConfigLogic(LogicBase):
     supported_fileformats = ConfigOption('supported fileformats')
     default_path_imagedata = ConfigOption('default path imagedata')
     default_network_path = ConfigOption('default network path')
+    default_zen_path = ConfigOption('default zen path', default='')  # start folder of the ZEN folder dialogs
+    default_sample_path = ConfigOption('default sample path', default='')  # start folder of the sample file dialogs
+    sample_template_path = ConfigOption('sample template', default='')  # fields of the sample file dialog
+
+    # sample tag of the ROI scan (experiment key sample_tag): one of these items, or a free tag
+    SAMPLE_TAG_ITEMS = ('DAPI', 'RNA', 'IF')
+    SAMPLE_TAG_FREE = 'Free'
+    SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9]+$'  # letters and digits only (no '-', no space, no '_': file name separator)
 
     # attributes
     _experiment_definitions = {}
@@ -373,6 +386,8 @@ class ExpConfigLogic(LogicBase):
 
         # Replace defaults with values loaded from the file.
         self.config_dict.update(loaded_config)
+        if "sample_tag" in (definition.get("fields") or {}):
+            self._sample_tag_from_old_keys(loaded_config, path)
         self.current_experiment = experiment
         self._restore_imaging_sequence_model()
         self.log.info(f"Experiment configuration loaded from {path}")
@@ -625,6 +640,12 @@ class ExpConfigLogic(LogicBase):
                 f"Experiment configuration not saved. Missing required fields: {missing_text}.")
             return
 
+        if "sample_tag" in fields and not self.is_valid_sample_tag(self.config_dict.get("sample_tag")):
+            self.log.error(
+                f"Experiment configuration not saved. Invalid sample_tag {self.config_dict.get('sample_tag')!r}: "
+                f"only letters and digits are allowed (no '-', no space, no '_').")
+            return
+
         saved_config = {"experiment": experiment,}
 
         for field_name, field_definition in fields.items():
@@ -685,25 +706,41 @@ class ExpConfigLogic(LogicBase):
         self.config_dict['email'] = address
         self.sigConfigDictUpdated.emit()
 
-    @QtCore.Slot(int)
-    def update_is_dapi(self, state):
-        """Convert a Qt check state to the ``dapi`` flag and notify listeners."""
-        if state == 2:  # Enum Qt::CheckState Checked = 2
-            self.config_dict['dapi'] = True
-        elif state == 0:  # Unchecked = 0
-            self.config_dict['dapi'] = False
+    @QtCore.Slot(str)
+    def update_sample_tag(self, tag):
+        """Set the sample tag (DAPI / RNA / IF, or a free tag) written in the ROI scan folder and file names, and
+        notify listeners."""
+        self.config_dict['sample_tag'] = str(tag)
         self.sigConfigDictUpdated.emit()
 
-    @QtCore.Slot(int)
-    def update_is_rna(self, state):
-        """Convert a Qt check state to the ``rna`` flag and notify listeners."""
-        if state == 2:  # Enum Qt::CheckState Checked = 2
-            self.config_dict['rna'] = True
-        elif state == 0:  # Unchecked = 0
-            self.config_dict['rna'] = False
-        self.sigConfigDictUpdated.emit()
+    @classmethod
+    def is_valid_sample_tag(cls, tag) -> bool:
+        """True for a non-empty tag of letters and digits only."""
+        return isinstance(tag, str) and re.fullmatch(cls.SAMPLE_TAG_PATTERN, tag) is not None
+
+    def _sample_tag_from_old_keys(self, loaded_config, path) -> None:
+        """Experiment file of the former format (dapi / rna booleans, no sample_tag): dapi -> DAPI, rna -> RNA,
+        otherwise the default of the definition; a warning says the file uses the old keys."""
+        if 'sample_tag' in loaded_config or not ({'dapi', 'rna'} & set(loaded_config)):
+            return
+        if loaded_config.get('dapi'):
+            self.config_dict['sample_tag'] = 'DAPI'
+        elif loaded_config.get('rna'):
+            self.config_dict['sample_tag'] = 'RNA'
+        self.config_dict.pop('dapi', None)
+        self.config_dict.pop('rna', None)
+        self.log.warning(f"{path} uses the former keys dapi / rna: sample_tag set to "
+                         f"{self.config_dict.get('sample_tag')!r}. Save the configuration again to update the file.")
 
     @QtCore.Slot(int)
+    def update_photobleaching_imaging(self, state):
+        """Store the 'acquire an image after the photobleaching' flag (Hi-M; a Qt check state or a bool) as a bool
+        and notify listeners."""
+        if not isinstance(state, bool) and isinstance(state, int):
+            state = state == 2  # Enum Qt::CheckState Checked = 2
+        self.config_dict['photobleaching_imaging'] = bool(state)
+        self.sigConfigDictUpdated.emit()
+
     def update_data_transfer(self, state):
         """Convert a Qt check state to the data-transfer flag and notify listeners."""
         if state == 2:  # Enum Qt::CheckState Checked = 2
@@ -819,6 +856,13 @@ class ExpConfigLogic(LogicBase):
         self.sigConfigDictUpdated.emit()
 
     @QtCore.Slot(str)
+    def update_sample_file(self, path):
+        """Set the path of the sample file (experiment key sample_file, a YAML file describing the sample, see
+        qudi.tasks.common.sample_info) and notify configuration listeners."""
+        self.config_dict['sample_file'] = path
+        self.sigConfigDictUpdated.emit()
+
+    @QtCore.Slot(str)
     def update_zen_ref_images_path(self, path):
         """Set the ZEN autofocus reference-image path and notify listeners."""
         self.config_dict['zen_ref_images_path'] = path
@@ -834,6 +878,12 @@ class ExpConfigLogic(LogicBase):
     def update_correlation_threshold(self, corr):
         """Set the ZEN autofocus correlation threshold and notify listeners."""
         self.config_dict['correlation_threshold'] = corr
+        self.sigConfigDictUpdated.emit()
+
+    @QtCore.Slot(float)
+    def update_autofocus_min_fraction(self, fraction):
+        """Set the minimum fraction of ROIs per cycle whose autofocus check must pass and notify listeners."""
+        self.config_dict['autofocus_min_fraction'] = fraction
         self.sigConfigDictUpdated.emit()
 
     @QtCore.Slot(str)

@@ -1,6 +1,6 @@
 """Logic helpers: data folders defined in the logic modules (ROI lists, injections files), the random
 ROI list command-line helper (qudi.util.make_random_roi_list) and the local / server folder buttons of the
-experiment configurator.
+experiment configurator, its sample tag and ZEN folder dialogs, the sample file (helper, configurator, dialog), and the autofocus report of Hi-M runs (qudi.util.autofocus_report).
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_logic_helpers.py [<repo_root>]
 Short settings: tests/_short.py (docs/TESTING.md).
@@ -494,10 +494,626 @@ def _section_folder_buttons():
     KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
     return results
 
+# --- configurator: sample tag and ZEN folder dialogs ---
+def _section_sample_tag():
+    """Experiment configurator: sample tag of the ROI scan (combo box DAPI / RNA / IF / Free, free tag in the line
+    edit with a validator, save / load, former dapi / rna keys) and start folder of the two ZEN folder dialogs
+    (option 'default zen path'). Folder dialog replaced by a recorder; SD definitions of the repository."""
+    import os, weakref, importlib, tempfile, logging
+    from qtpy import QtCore, QtGui, QtWidgets
+    import yaml
+    from qudi.core.connector import Connector
+
+    results = []
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond))); print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+    LOGS = []
+    class H(logging.Handler):
+        def emit(self, r): LOGS.append((r.levelno, r.getMessage()))
+    handler = H(); logging.getLogger().addHandler(handler)
+    class FakeMain(QtCore.QObject): pass
+    MAIN = FakeMain()
+    CFG = yaml.safe_load(open(os.path.join(repo, 'custom_config/dummy_config.cfg')))
+    TMP = tempfile.mkdtemp()
+    ZEN_DEF, REF, ZEN = (os.path.join(TMP, n) for n in ('zen_default', 'references', 'zen_saving'))
+    for d in (ZEN_DEF, REF, ZEN): os.makedirs(d)
+    DIALOGS = []
+    def fake(parent, caption='', directory='', *a, **k):
+        DIALOGS.append((caption, directory)); return ''
+    ORIGINAL_DIALOG = QtWidgets.QFileDialog.getExistingDirectory
+    QtWidgets.QFileDialog.getExistingDirectory = staticmethod(fake)
+    MODS = {}
+    def build(name):
+        if name in MODS: return MODS[name]
+        base = next(b for b in ('hardware', 'logic', 'gui') if name in (CFG.get(b) or {}))
+        entry = CFG[base][name]; mod, cls = entry['module.Class'].rsplit('.', 1)
+        klass = getattr(importlib.import_module(f'qudi.{base}.{mod}'), cls)
+        opts = _short.module_options(name, entry.get('options'))
+        if name == 'experiments_configurator_logic':
+            opts['experiment_definitions_directory'] = os.path.join(repo, 'custom_config/custom_experiments_config/spinning_disk') + '/'
+            opts['experiments'] = ['roi_multicolour_scan.yaml', 'him_epi.yaml']
+            opts['default zen path'] = ZEN_DEF
+        m = klass(qudi_main_weakref=weakref.ref(MAIN), name=name, config=opts)
+        by_name = {c.name: c for k in dir(klass) if isinstance(c := getattr(klass, k, None), Connector)}
+        for key, target in (entry.get('connect') or {}).items():
+            m._meta['connectors'][next(k for k in m._meta['connectors'] if by_name[key] is getattr(klass, k))].connect(build(target))
+        m.module_state.activate(); MODS[name] = m; return m
+    gui = build('experiments_configurator_gui'); app.processEvents()
+    mw, logic = gui._mw, gui._exp_logic
+    combo, edit = mw.sample_tag_comboBox, mw.sample_tag_lineEdit
+    def shown(w): return not w.isHidden()
+
+    # ------------------------------------------------------------------ ZEN folder dialogs
+    sd_cfg = yaml.safe_load(open(os.path.join(repo, 'custom_config/Spinning_disk_config.cfg')))
+    check("option 'default zen path' read by the logic; SD configuration sets /mnt/Experiments",
+          logic.default_zen_path == ZEN_DEF
+          and sd_cfg['logic']['experiments_configurator_logic']['options'].get('default zen path') == '/mnt/Experiments',
+          logic.default_zen_path)
+    home = os.path.expanduser('~')
+    check('_dialog_start_folder: existing field folder, else existing default, else home',
+          gui._dialog_start_folder(REF, ZEN_DEF) == REF
+          and gui._dialog_start_folder(os.path.join(TMP, 'missing'), ZEN_DEF) == ZEN_DEF
+          and gui._dialog_start_folder('', ZEN_DEF) == ZEN_DEF
+          and gui._dialog_start_folder('', os.path.join(TMP, 'none')) == home
+          and gui._dialog_start_folder('', '') == home)
+    for click, field, folder in ((gui.load_ref_images_path_clicked, mw.reference_images_lineEdit, REF),
+                                 (gui.load_zen_saving_path_clicked, mw.Zen_saving_folder_lineEdit, ZEN)):
+        starts = []
+        for text in (folder, os.path.join(TMP, 'missing'), ''):
+            field.setText(text); DIALOGS.clear(); click(); starts.append(DIALOGS[-1][1] if DIALOGS else None)
+        logic.default_zen_path = os.path.join(TMP, 'none'); field.setText(''); DIALOGS.clear(); click()
+        starts.append(DIALOGS[-1][1] if DIALOGS else None); logic.default_zen_path = ZEN_DEF
+        check(f'({click.__name__}) start folder: field folder, default zen path (missing / empty field), home',
+              starts == [folder, ZEN_DEF, ZEN_DEF, home], starts)
+    QtWidgets.QFileDialog.getExistingDirectory = ORIGINAL_DIALOG
+
+    # ------------------------------------------------------------------ sample tag in the GUI
+    gui.start_new_experiment_config('roi_multicolor_scan'); app.processEvents()
+    check('(roi_multicolor_scan) items DAPI, RNA, IF, Free; default DAPI in the combo and the configuration; label and '
+          'combo shown, line edit hidden and disabled',
+          [combo.itemText(k) for k in range(combo.count())] == ['DAPI', 'RNA', 'IF', 'Free']
+          and combo.currentText() == 'DAPI' and logic.config_dict.get('sample_tag') == 'DAPI'
+          and shown(mw.sample_tag_label) and shown(combo) and not shown(edit) and not edit.isEnabled(),
+          (combo.currentText(), logic.config_dict.get('sample_tag'), shown(edit), edit.isEnabled()))
+    combo.setCurrentText('Free'); app.processEvents()
+    free_on = shown(edit) and edit.isEnabled()
+    edit.setText('RT1'); app.processEvents()
+    check('Free: line edit shown and enabled; typed tag stored in the configuration',
+          free_on and logic.config_dict.get('sample_tag') == 'RT1' and combo.currentText() == 'Free',
+          logic.config_dict.get('sample_tag'))
+    edit.setText('DAPI2'); app.processEvents()
+    check("free tag 'DAPI2' typed letter by letter keeps 'Free' selected",
+          combo.currentText() == 'Free' and edit.text() == 'DAPI2' and logic.config_dict.get('sample_tag') == 'DAPI2')
+    combo.setCurrentText('IF'); app.processEvents()
+    check('IF: stored, line edit hidden and disabled',
+          logic.config_dict.get('sample_tag') == 'IF' and not shown(edit) and not edit.isEnabled())
+    validator = edit.validator()
+    accept = QtGui.QValidator.State.Acceptable
+    states = {t: validator.validate(t, 0)[0] for t in ('RT 1', 'RT_1', 'IF-2', 'RT1', 'IF')}
+    check("validator: rejects 'RT 1', 'RT_1' and 'IF-2', accepts 'RT1' and 'IF'",
+          all(states[t] != accept for t in ('RT 1', 'RT_1', 'IF-2')) and states['RT1'] == accept and states['IF'] == accept,
+          states)
+    from qudi.tasks import roi_multicolour_scan
+    check('tag pattern of the configurator logic == tag pattern of the ROI scan task',
+          logic.SAMPLE_TAG_PATTERN == roi_multicolour_scan.SAMPLE_TAG_PATTERN == r'^[A-Za-z0-9]+$')
+    check("logic is_valid_sample_tag: 'RT1', 'IF' valid; 'IF-2', 'RT_1', 'RT 1', '' invalid",
+          all(logic.is_valid_sample_tag(t) for t in ('RT1', 'IF'))
+          and not any(logic.is_valid_sample_tag(t) for t in ('IF-2', 'RT_1', 'RT 1', '')))
+    logic.update_sample_tag('RNA')
+    check('logic update_sample_tag stores the tag; GUI follows', logic.config_dict.get('sample_tag') == 'RNA'
+          and combo.currentText() == 'RNA')
+
+    # ------------------------------------------------------------------ save
+    out = os.path.join(TMP, 'out')
+    # other required fields filled: only the sample tag decides
+    for required in ('sample_name', 'roi_list_path', 'zen_saving_path', 'save_path', 'sample_file'):
+        logic.config_dict[required] = logic.config_dict.get(required) or TMP
+    logic.config_dict['imaging_sequence'] = logic.config_dict.get('imaging_sequence') or [['488 nm', 10.0]]
+    for bad in ('', 'RT_1', 'RT 1', 'IF-2'):
+        LOGS.clear(); logic.update_sample_tag(bad)
+        logic.save_to_exp_config_file(out, 'roi_multicolor_scan', filename='bad.yml')
+        errors = [m for lvl, m in LOGS if lvl >= logging.ERROR and 'not saved' in m]
+        check(f'save refused with sample_tag {bad!r} (log error, no file)',
+              errors and 'sample_tag' in errors[-1] and not os.path.exists(os.path.join(out, 'bad.yml')), errors)
+    logic.update_sample_tag('RT1'); LOGS.clear()
+    logic.save_to_exp_config_file(out, 'roi_multicolor_scan', filename='good.yml')
+    saved = yaml.safe_load(open(os.path.join(out, 'good.yml'))) if os.path.exists(os.path.join(out, 'good.yml')) else {}
+    check('save with a valid free tag writes sample_tag, no dapi / rna key',
+          saved.get('sample_tag') == 'RT1' and 'dapi' not in saved and 'rna' not in saved,
+          (saved, [m for _, m in LOGS]))
+
+    # ------------------------------------------------------------------ load
+    def load(name, **values):
+        data = dict(saved); data.pop('sample_tag', None); data.update(values)
+        path = os.path.join(TMP, name); yaml.safe_dump(data, open(path, 'w')); LOGS.clear()
+        logic.load_config_file(path); app.processEvents()
+    load('free.yml', sample_tag='RT1')
+    check("load sample_tag 'RT1': Free selected, line edit 'RT1' shown and enabled",
+          combo.currentText() == 'Free' and edit.text() == 'RT1' and shown(edit) and edit.isEnabled()
+          and logic.config_dict.get('sample_tag') == 'RT1')
+    load('rna.yml', sample_tag='RNA')
+    check("load sample_tag 'RNA': item RNA, line edit hidden", combo.currentText() == 'RNA' and not shown(edit))
+    for fname_old, values, expected in (('old_dapi.yml', {'dapi': True, 'rna': False}, 'DAPI'),
+                                         ('old_rna.yml', {'dapi': False, 'rna': True}, 'RNA'),
+                                         ('old_none.yml', {'dapi': False, 'rna': False}, 'DAPI')):
+        if expected == 'DAPI' and fname_old == 'old_none.yml':
+            combo.setCurrentText('IF'); app.processEvents()
+        load(fname_old, **values)
+        warned = [m for lvl, m in LOGS if lvl == logging.WARNING and 'dapi / rna' in m]
+        check(f'load former file {values}: {expected}, warning in the log, dapi / rna dropped',
+              combo.currentText() == expected and logic.config_dict.get('sample_tag') == expected and warned
+              and 'dapi' not in logic.config_dict and 'rna' not in logic.config_dict,
+              (combo.currentText(), logic.config_dict.get('sample_tag'), warned))
+
+    gui.start_new_experiment_config('him_epi_sd'); app.processEvents()
+    check('(him_epi_sd, no sample_tag) sample tag widgets hidden',
+          not shown(mw.sample_tag_label) and not shown(combo) and not shown(edit))
+    logging.getLogger().removeHandler(handler)
+    KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
+    return results
+
+# --- sample file: helper, configurator, sample dialog ---
+def _section_sample_file():
+    """Sample file (qudi.tasks.common.sample_info): repository template, template validation, required fields,
+    save / load; configurator options 'default sample path' / 'sample template', field sample_file and its
+    widgets; sample dialog (qudi.gui.experiments_setup.sample_dialog). File / message dialogs replaced by
+    recorders."""
+    import os, weakref, importlib, tempfile, logging
+    from qtpy import QtCore, QtWidgets
+    import yaml
+    from qudi.core.connector import Connector
+    from qudi.tasks.common import sample_info as si
+    from qudi.gui.experiments_setup import sample_dialog as sd
+
+    results = []
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond))); print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+    TMP = tempfile.mkdtemp()
+    TEMPLATE = os.path.join(repo, 'custom_config', 'custom_metadata_templates', 'sample_template.yml')
+
+    # ------------------------------------------------------------------ helper
+    template = si.load_sample_template(TEMPLATE)
+    names = [f['name'] for f in template]
+    check('repository template: 20 fields in file order; types / choices / min-max / required as written',
+          len(template) == 20 and names[:3] == ['experiment_type', 'organism', 'sample_type'] and names[-1] == 'project'
+          and template[8] == {'name': 'formamide_percent', 'type': 'number', 'choices': [], 'min': 0, 'max': 100,
+                              'required': False}
+          and [f['name'] for f in template if f['required']] == ['experiment_type', 'organism', 'sample_type',
+                                                                  'experimenter']
+          and template[7]['choices'] == ['4% PFA', 'Live']
+          and template[1]['choices'][-3:] == ['B.subtilis', 'E.coli', 'M.xanthus']
+          and names[names.index('nuclear_stain') + 1:names.index('nuclear_stain') + 4] == ['dye_mask', 'dye_fiducial',
+                                                                                          'dye_barcode'], names)
+    bad_cases = {'unknown type': 'a: {type: date}\n', 'min > max': 'a: {type: number, min: 5, max: 1}\n',
+                 'choices not a list': 'a: {type: choice, choices: DAPI}\n', 'unknown key': 'a: {type: text, size: 3}\n',
+                 'not a mapping': '- a\n- b\n'}
+    errors = {}
+    for label, text in bad_cases.items():
+        path = os.path.join(TMP, f'bad_{len(errors)}.yml'); open(path, 'w').write(text)
+        try:
+            si.load_sample_template(path); errors[label] = None
+        except ValueError as err:
+            errors[label] = str(err)
+    check('invalid templates -> ValueError with a clear message (unknown type, min > max, choices, key, layout)',
+          all(errors.values()) and 'date' in errors['unknown type'] and 'min (5)' in errors['min > max'], errors)
+    values = {'experiment_type': 'DNA-FISH', 'organism': '', 'sample_type': None, 'experimenter': 'X'}
+    check('missing_required: empty / absent required fields, in template order',
+          si.missing_required(template, values) == ['organism', 'sample_type'], si.missing_required(template, values))
+    path = os.path.join(TMP, 'sample.yml')
+    saved = {'organism': 'Mus musculus', 'experiment_type': 'RNA-FISH', 'formamide_percent': 50,
+             'old_field': 'kept', 'genotype': 'yw; +/+ é'}
+    si.save_sample_file(path, saved)
+    loaded = si.load_sample_file(path)
+    check('save then load: same values, same order, field not in the template kept, unicode kept',
+          loaded == saved and list(loaded) == list(saved) and 'é' in open(path, encoding='utf-8').read(), loaded)
+    errs = []
+    for p, text in ((os.path.join(TMP, 'none.yml'), None), (os.path.join(TMP, 'list.yml'), '- a\n')):
+        if text is not None:
+            open(p, 'w').write(text)
+        try:
+            si.load_sample_file(p); errs.append(None)
+        except RuntimeError as err:
+            errs.append(str(err))
+    check('load_sample_file: missing file / not a mapping -> RuntimeError', all(errs) and 'does not exist' in errs[0], errs)
+
+    # ------------------------------------------------------------------ configurator
+    LOGS = []
+    class H(logging.Handler):
+        def emit(self, r): LOGS.append((r.levelno, r.getMessage()))
+    handler = H(); logging.getLogger().addHandler(handler)
+    class FakeMain(QtCore.QObject): pass
+    MAIN = FakeMain()
+    CFG = yaml.safe_load(open(os.path.join(repo, 'custom_config/dummy_config.cfg')))
+    DEF_SAMPLE = os.path.join(TMP, 'samples'); os.makedirs(DEF_SAMPLE)
+    MODS = {}
+    def build(name):
+        if name in MODS: return MODS[name]
+        base = next(b for b in ('hardware', 'logic', 'gui') if name in (CFG.get(b) or {}))
+        entry = CFG[base][name]; mod, cls = entry['module.Class'].rsplit('.', 1)
+        klass = getattr(importlib.import_module(f'qudi.{base}.{mod}'), cls)
+        opts = _short.module_options(name, entry.get('options'))
+        if name == 'experiments_configurator_logic':
+            opts['experiment_definitions_directory'] = os.path.join(repo, 'custom_config/custom_experiments_config/spinning_disk') + '/'
+            opts['experiments'] = ['roi_multicolour_scan.yaml', 'him_epi.yaml', 'photobleaching.yaml']
+            opts['default sample path'] = DEF_SAMPLE; opts['sample template'] = TEMPLATE
+        m = klass(qudi_main_weakref=weakref.ref(MAIN), name=name, config=opts)
+        by_name = {c.name: c for k in dir(klass) if isinstance(c := getattr(klass, k, None), Connector)}
+        for key, target in (entry.get('connect') or {}).items():
+            m._meta['connectors'][next(k for k in m._meta['connectors'] if by_name[key] is getattr(klass, k))].connect(build(target))
+        m.module_state.activate(); MODS[name] = m; return m
+    gui = build('experiments_configurator_gui'); app.processEvents()
+    mw, logic = gui._mw, gui._exp_logic
+    sd_cfg = yaml.safe_load(open(os.path.join(repo, 'custom_config/Spinning_disk_config.cfg')))
+    sd_opts = sd_cfg['logic']['experiments_configurator_logic']['options']
+    check("options 'default sample path' / 'sample template' read; SD configuration sets both",
+          logic.default_sample_path == DEF_SAMPLE and logic.sample_template_path == TEMPLATE
+          and sd_opts.get('default sample path') == '/home/him_spinning/qudi/qudi_sample_preparation/'
+          and sd_opts.get('sample template', '').endswith('custom_config/custom_metadata_templates/sample_template.yml'))
+    widgets = (mw.sample_prep_label, mw.sample_prep_lineEdit, mw.sample_prep_load_pushButton, mw.sample_prep_edit_pushButton)
+    def shown(w): return not w.isHidden()
+    for exp, visible in (('roi_multicolor_scan', True), ('him_epi_sd', True), ('photobleaching', False)):
+        gui.start_new_experiment_config(exp); app.processEvents()
+        check(f'({exp}) sample file widgets {"shown" if visible else "hidden"}', all(shown(w) == visible for w in widgets))
+    # photobleaching_imaging (check box 'Acquire image after photobleaching?'): declared by the SD Hi-M definition only
+    pb_box = mw.photobleaching_imaging_checkBox
+    shown_for = {}
+    for exp in ('roi_multicolor_scan', 'him_epi_sd', 'photobleaching'):
+        gui.start_new_experiment_config(exp); app.processEvents()
+        shown_for[exp] = shown(pb_box)
+    check('photobleaching_imaging_checkBox shown only for him_epi_sd (definition declaring photobleaching_imaging)',
+          shown_for == {'roi_multicolor_scan': False, 'him_epi_sd': True, 'photobleaching': False}, shown_for)
+    gui.start_new_experiment_config('him_epi_sd'); app.processEvents()
+    default = logic.config_dict.get('photobleaching_imaging')
+    pb_box.setChecked(True); app.processEvents()
+    from_box = logic.config_dict.get('photobleaching_imaging')
+    logic.update_photobleaching_imaging(0)
+    from_state = logic.config_dict.get('photobleaching_imaging')
+    check('(him_epi_sd) default False; check box -> True (bool); update_photobleaching_imaging(Qt state 0) -> False, '
+          'box follows', default is False and from_box is True and from_state is False and not pb_box.isChecked(),
+          (default, from_box, from_state))
+    pb_file = os.path.join(TMP, 'him_pb.yml')
+    yaml.safe_dump({'experiment': 'him_epi_sd', 'photobleaching_imaging': True}, open(pb_file, 'w'))
+    logic.load_config_file(pb_file); app.processEvents()
+    check('loading an experiment file with photobleaching_imaging: true checks the box',
+          pb_box.isChecked() and logic.config_dict.get('photobleaching_imaging') is True and shown(pb_box))
+
+    gui.start_new_experiment_config('roi_multicolor_scan'); app.processEvents()
+    logic.update_sample_file(path)
+    check('update_sample_file stores the path; the line edit follows', logic.config_dict.get('sample_file') == path
+          and mw.sample_prep_lineEdit.text() == path)
+    mw.sample_prep_lineEdit.setText('')
+    check('line edit -> logic (empty)', logic.config_dict.get('sample_file') == '')
+
+    OPENS, SAVES, BOXES = [], [], []
+    answers = {'open': '', 'save': ''}
+    originals = (QtWidgets.QFileDialog.getOpenFileName, QtWidgets.QFileDialog.getSaveFileName, QtWidgets.QMessageBox.warning)
+    QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda parent, caption='', directory='', *a, **k: (OPENS.append(directory), (answers['open'], ''))[1])
+    QtWidgets.QFileDialog.getSaveFileName = staticmethod(lambda parent, caption='', directory='', *a, **k: (SAVES.append(directory), (answers['save'], ''))[1])
+    QtWidgets.QMessageBox.warning = staticmethod(lambda parent, title, text, *a, **k: BOXES.append((title, text)))
+    try:
+        gui.load_sample_file_clicked()
+        answers['open'] = path; gui.load_sample_file_clicked()
+        first, second = OPENS[0], OPENS[1]
+        mw.sample_prep_lineEdit.setText(os.path.join(TMP, 'gone', 'x.yml')); answers['open'] = ''; gui.load_sample_file_clicked()
+        check('Load: start in default sample path (empty field), then the folder of the field; *.yml chosen fills the '
+              'field; missing folder -> default sample path',
+              first == DEF_SAMPLE and second == DEF_SAMPLE and OPENS[2] == DEF_SAMPLE and logic.config_dict['sample_file'] != path, OPENS)
+        mw.sample_prep_lineEdit.setText(path); OPENS.clear(); gui.load_sample_file_clicked()
+        check('Load: start in the folder of the file of the field', OPENS == [TMP], OPENS)
+
+        # dialog opened by "Edit": exec replaced by a callback acting on the dialog
+        ACTION = [None]; DIALOGS = []
+        def fake_exec(dialog):
+            DIALOGS.append(dialog)
+            return ACTION[0](dialog) if ACTION[0] else 0
+        orig_exec = sd.SampleDialog.exec
+        sd.SampleDialog.exec = fake_exec
+        # no / invalid template: warning box, no dialog; Load still works
+        for label, value in (('not set', ''), ('invalid', os.path.join(TMP, 'bad_0.yml'))):
+            logic.sample_template_path = value; BOXES.clear(); DIALOGS.clear(); gui.edit_sample_file_clicked()
+            check(f'(Edit, template {label}) warning box, no dialog', BOXES and BOXES[0][0] == 'Sample template' and not DIALOGS, BOXES)
+        logic.sample_template_path = TEMPLATE
+        # existing file: form filled, value not in the choices shown as typed text, extra field kept on Save
+        si.save_sample_file(path, {'experiment_type': 'DNA-FISH', 'organism': 'Danio rerio', 'sample_type': 'embryo',
+                                   'experimenter': 'X', 'old_field': 'kept'})
+        mw.sample_prep_lineEdit.setText(path)
+        def inspect(d):
+            w = d.widgets
+            ACTION.append({'organism': w['organism'].currentText(), 'formamide': w['formamide_percent'].text(),
+                           'save_enabled': d.save_button.isEnabled(), 'label': d.findChildren(QtWidgets.QLabel)[0].text()})
+            return 0
+        ACTION[0] = inspect; gui.edit_sample_file_clicked(); info = ACTION.pop()
+        check('(Edit, existing file) form filled; value not in the choices shown as typed text; empty number field '
+              f'shown as {sd.EMPTY_NUMBER_TEXT!r}; Save enabled; required field labelled with "*"',
+              info['organism'] == 'Danio rerio' and info['formamide'] == sd.EMPTY_NUMBER_TEXT and info['save_enabled']
+              and info['label'] == 'experiment type *', info)
+        def save_with_number(d):
+            d.widgets['formamide_percent'].setValue(40); return 1 if d.save() else 0
+        ACTION[0] = save_with_number; gui.edit_sample_file_clicked()
+        again = si.load_sample_file(path)
+        check('(Edit, Save) file overwritten: number 40, field not in the template kept, empty optional fields None',
+              again.get('formamide_percent') == 40 and again.get('old_field') == 'kept' and again.get('genotype') is None
+              and again.get('organism') == 'Danio rerio', again)
+        def clear_number_and_save(d):
+            d.widgets['formamide_percent'].setValue(d.widgets['formamide_percent'].minimum()); return 1 if d.save() else 0
+        ACTION[0] = clear_number_and_save; gui.edit_sample_file_clicked()
+        check('(Edit, Save) a number field can be emptied again (None in the file)',
+              si.load_sample_file(path).get('formamide_percent') is None)
+        # new sample: Save disabled, Save refused while a required field is empty, Save as writes (.yml added)
+        mw.sample_prep_lineEdit.setText('')
+        def new_sample(d):
+            ACTION.append(d.save_button.isEnabled())
+            BOXES.clear(); answers['save'] = os.path.join(TMP, 'new_sample')
+            refused = not d.save_as() and BOXES and 'experiment type' in BOXES[-1][1] and 'experimenter' in BOXES[-1][1]
+            ACTION.append(bool(refused) and not os.path.exists(os.path.join(TMP, 'new_sample.yml')))
+            d.widgets['experiment_type'].setCurrentText('IF'); d.widgets['organism'].setCurrentText('Homo sapiens')
+            d.widgets['sample_type'].setCurrentText('cells'); d.widgets['experimenter'].setText('X')
+            return 1 if d.save_as() else 0
+        ACTION[0] = new_sample; SAVES.clear(); gui.edit_sample_file_clicked()
+        refused, save_enabled = ACTION.pop(), ACTION.pop()
+        new_path = os.path.join(TMP, 'new_sample.yml')
+        new_values = si.load_sample_file(new_path) if os.path.exists(new_path) else {}
+        check('(Edit, new sample) Save disabled; Save as refused while required fields are empty (box lists them); '
+              'Save as writes <name>.yml in template order, starting in default sample path; the line edit shows it',
+              not save_enabled and refused and list(new_values) == names and new_values['experiment_type'] == 'IF'
+              and SAVES and SAVES[0] == DEF_SAMPLE and mw.sample_prep_lineEdit.text() == new_path
+              and logic.config_dict.get('sample_file') == new_path, (save_enabled, refused, SAVES, new_values))
+        sd.SampleDialog.exec = orig_exec
+    finally:
+        (QtWidgets.QFileDialog.getOpenFileName, QtWidgets.QFileDialog.getSaveFileName,
+         QtWidgets.QMessageBox.warning) = (staticmethod(originals[0]), staticmethod(originals[1]), staticmethod(originals[2]))
+    logging.getLogger().removeHandler(handler)
+    KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
+    return results
+
+# --- autofocus report (qudi.util.autofocus_report) ---
+def _section_autofocus_report():
+    """Autofocus report of Hi-M runs (qudi.util.autofocus_report): synthetic metadata folders (4 ROIs x 3 cycles) of
+    the current qudi-core task (metadata/autofocus/ with correlation.npy and ROI_probe_autofocus_summary.csv written
+    during the run), of the previous qudi-core task (correlation.npy cycles x ROIs + autofocus_scores.csv in
+    metadata/) and of the legacy software (probes x ROIs, no CSV), one run (report_run) and several runs
+    (summarize_folder)."""
+    import csv, logging, os, tempfile
+    import numpy as np
+    import yaml
+    from qudi.util import autofocus_report as ar
+
+    results = []
+
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond)))
+        print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+
+    TMP = tempfile.mkdtemp()
+    LOGS = []
+
+    class H(logging.Handler):
+        def emit(self, r):
+            LOGS.append((r.levelno, r.getMessage()))
+
+    log = logging.getLogger('qudi.tests.autofocus_report')
+    log.setLevel(logging.INFO)
+    log.addHandler(H())
+    ROIS = ['ROI_000', 'ROI_001', 'ROI_002', 'ROI_003']
+
+    def run_folder(name, probes, corr, threshold=None, scores=None, rois=ROIS):
+        """<TMP>/<name>/metadata with HiM_parameters.yml, correlation.npy and (scores: list of rows)
+        autofocus_scores.csv."""
+        folder = os.path.join(TMP, name, 'metadata')
+        os.makedirs(folder)
+        params = {'1- global parameters': {'sample_name': 'S'}, '2- fluidic parameters': {'probes': probes},
+                  '4- ROIs': {roi: f'X={k} - Y=0 - Z=None' for k, roi in enumerate(rois)}}
+        if threshold is not None:
+            params['1- global parameters']['correlation_threshold'] = threshold
+        yaml.safe_dump(params, open(os.path.join(folder, 'HiM_parameters.yml'), 'w'), sort_keys=False)
+        np.save(os.path.join(folder, 'correlation.npy'), np.asarray(corr, dtype=float))
+        if scores is not None:
+            with open(os.path.join(folder, 'autofocus_scores.csv'), 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['cycle', 'RT', 'roi', 'score', 'shift_y_px', 'shift_x_px', 'passed'])
+                writer.writerows(scores)
+        return folder
+
+    def current_run_folder(name, probes, corr, threshold, rows, params_subfolder=True):
+        """<TMP>/<name>/metadata with experiment_parameters/HiM_parameters.yml (params_subfolder False: at the top,
+        as the qudi-core version that had only the autofocus/ subfolder), and metadata/autofocus/ with
+        correlation.npy and the score file of the current task (rows: experiment_folder, roi_name, probe_name,
+        correlation, cycle, shift_y_px, shift_x_px, passed)."""
+        folder = os.path.join(TMP, name, 'metadata')
+        af_folder = os.path.join(folder, 'autofocus')
+        os.makedirs(af_folder)
+        params_folder = os.path.join(folder, 'experiment_parameters') if params_subfolder else folder
+        os.makedirs(params_folder, exist_ok=True)
+        params = {'1- global parameters': {'sample_name': 'S', 'correlation_threshold': threshold},
+                  '2- fluidic parameters': {'probes': probes},
+                  '4- ROIs': {roi: f'X={k} - Y=0 - Z=None' for k, roi in enumerate(ROIS)}}
+        yaml.safe_dump(params, open(os.path.join(params_folder, 'HiM_parameters.yml'), 'w'), sort_keys=False)
+        np.save(os.path.join(af_folder, 'correlation.npy'), np.asarray(corr, dtype=float))
+        with open(os.path.join(af_folder, ar.SUMMARY_NAME), 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['experiment_folder', 'roi_name', 'probe_name', 'correlation', 'cycle', 'shift_y_px',
+                             'shift_x_px', 'passed'])
+            writer.writerows(rows)
+        return folder
+
+    def summary_rows(path):
+        return list(csv.DictReader(open(path, newline='')))
+
+    rng = np.random.default_rng(1)
+    corr_new = rng.uniform(0.6, 1.0, (3, 4))          # cycles x ROIs
+    cycle_rt = {1: 'RT3', 2: 'RT1', 3: 'RT2'}          # order of the run (RT column)
+    scores = [(c, cycle_rt[c], roi, f'{corr_new[c - 1, k]:.6f}', c * k, -c, True)
+              for c in (1, 2, 3) for k, roi in enumerate(ROIS)]
+    new = run_folder('new_run', {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_new, threshold=0.8, scores=scores)
+
+    seen = {}
+    original_heatmap = ar._heatmap
+
+    def spy_heatmap(corr, rois, labels, path, vmin, vmax, threshold, title):
+        seen.update(threshold=threshold, labels=list(labels), shape=corr.shape)
+        return original_heatmap(corr, rois, labels, path, vmin, vmax, threshold, title)
+
+    ar._heatmap = spy_heatmap
+    try:
+        written = ar.report_run(new, log=log)
+    finally:
+        ar._heatmap = original_heatmap
+    names = sorted(os.path.basename(p) for p in written)
+    rows = summary_rows(os.path.join(new, ar.SUMMARY_NAME))
+    check('(report_run, previous qudi-core layout: autofocus_scores.csv in metadata/) writes the heatmap, the CSV and '
+          'the drift figure in the metadata folder (as before)',
+          names == sorted([ar.HEATMAP_NAME, ar.SUMMARY_NAME, ar.DRIFT_NAME])
+          and all(os.path.getsize(p) > 0 for p in written), names)
+    check('(report_run) probe labels from the RT column of autofocus_scores.csv (RT3, RT1, RT2), not the probes dict '
+          'order; the threshold is read from the parameters (0.8); heatmap ROIs x probes',
+          seen.get('labels') == ['RT3', 'RT1', 'RT2'] and seen.get('threshold') == 0.8 and seen.get('shape') == (4, 3),
+          seen)
+    check('(report_run) CSV: one row per ROI / probe (experiment_folder, roi_name, probe_name, correlation), the '
+          'scores of correlation.npy',
+          len(rows) == 12 and list(rows[0]) == ['experiment_folder', 'roi_name', 'probe_name', 'correlation']
+          and rows[0]['roi_name'] == 'ROI_000' and rows[0]['probe_name'] == 'RT3'
+          and abs(float(rows[0]['correlation']) - corr_new[0, 0]) < 1e-12
+          and rows[0]['experiment_folder'] == os.path.join(TMP, 'new_run'), rows[:2])
+
+    # current qudi-core layout: metadata/autofocus/ with the score file written by the task (one check not read)
+    corr_cur = corr_new.copy()
+    corr_cur[1, 3] = np.nan
+    live_rows = [('2026-11-05_HiM_x', roi, cycle_rt[c], '' if (c, k) == (2, 3) else f'{corr_cur[c - 1, k]:.6f}', c,
+                  '' if (c, k) == (2, 3) else 2 * k, '' if (c, k) == (2, 3) else c, (c, k) != (2, 3))
+                 for c in (1, 2, 3) for k, roi in enumerate(ROIS)]
+    current = current_run_folder('current_run', {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8, live_rows)
+    live_csv = os.path.join(current, 'autofocus', ar.SUMMARY_NAME)
+    live_before = open(live_csv, 'rb').read()
+    seen.clear()
+    ar._heatmap = spy_heatmap
+    try:
+        written = ar.report_run(current, log=log)
+        cur_err = None
+    except Exception as err:
+        written, cur_err = [], err
+    finally:
+        ar._heatmap = original_heatmap
+    check('(report_run, current layout: metadata/experiment_parameters/HiM_parameters.yml, metadata/autofocus/ + '
+          'ROI_probe_autofocus_summary.csv with a cycle column) '
+          'heatmap and drift figure written in metadata/autofocus/, no second CSV (the score file of the task is '
+          'unchanged), nothing written in metadata/; probe labels from probe_name per cycle (RT3, RT1, RT2); a check '
+          'without score / shift does not break the drift figure',
+          cur_err is None
+          and sorted(written) == sorted([os.path.join(current, 'autofocus', ar.HEATMAP_NAME),
+                                         os.path.join(current, 'autofocus', ar.DRIFT_NAME)])
+          and all(os.path.getsize(p) > 0 for p in written) and open(live_csv, 'rb').read() == live_before
+          and sorted(os.listdir(current)) == ['autofocus', 'experiment_parameters']
+          and seen.get('labels') == ['RT3', 'RT1', 'RT2'] and seen.get('threshold') == 0.8,
+          (cur_err, written, seen))
+
+    # layout with autofocus/ but HiM_parameters.yml at the top of the metadata folder
+    between = current_run_folder('between_run', {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8, live_rows,
+                                 params_subfolder=False)
+    try:
+        written = ar.report_run(between, log=log)
+        between_err = None
+    except Exception as err:
+        written, between_err = [], err
+    check('(report_run, HiM_parameters.yml in metadata/ with autofocus/) parameters read from the metadata folder; '
+          'heatmap and drift written in autofocus/',
+          between_err is None and ar.parameters_file(between) == ar.Path(between) / 'HiM_parameters.yml'
+          and sorted(os.path.basename(p) for p in written) == sorted([ar.HEATMAP_NAME, ar.DRIFT_NAME]), between_err)
+
+    # legacy run: probes x ROIs, no autofocus_scores.csv
+    LOGS.clear()
+    legacy = run_folder('legacy_run', {'2': 'RT2', '1': 'RT1', '3': 'RT3'}, rng.uniform(0.6, 1.0, (3, 4)))
+    written = ar.report_run(legacy, log=log)
+    rows = summary_rows(os.path.join(legacy, ar.SUMMARY_NAME))
+    check('(report_run, legacy run) heatmap and CSV, no drift figure; probes in key order (RT1, RT2, RT3) with a note '
+          'that the order is assumed; threshold 0.7 by default',
+          sorted(os.path.basename(p) for p in written) == sorted([ar.HEATMAP_NAME, ar.SUMMARY_NAME])
+          and not os.path.exists(os.path.join(legacy, ar.DRIFT_NAME))
+          and [r['probe_name'] for r in rows[:3]] == ['RT1', 'RT2', 'RT3']
+          and any('order assumed' in m for _, m in LOGS) and ar.load_run(legacy, log)['threshold'] is None,
+          (written, LOGS))
+
+    # aborted run: NaN for the checks not done
+    corr_abort = corr_new.copy()
+    corr_abort[1, 2:] = np.nan
+    corr_abort[2, :] = np.nan
+    aborted = run_folder('aborted_run', {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_abort, threshold=0.6,
+                         scores=[row for row in scores if row[0] == 1 or (row[0] == 2 and row[2] in ROIS[:2])])
+    try:
+        written = ar.report_run(aborted, log=log)
+        abort_err = None
+    except Exception as err:
+        written, abort_err = [], err
+    check('(report_run, aborted run with NaN) no error, heatmap / CSV / drift written (labels of the cycles without '
+          'any check from the probes)', abort_err is None and len(written) == 3
+          and all(os.path.isfile(p) for p in written), abort_err)
+
+    # label count mismatch
+    mismatch = run_folder('mismatch_run', {1: 'RT1', 2: 'RT2'}, rng.uniform(0.6, 1.0, (3, 4)))
+    try:
+        ar.report_run(mismatch, log=log)
+        mismatch_err = None
+    except ValueError as err:
+        mismatch_err = err
+    check('(report_run) 2 probe labels for 3 cycles -> clear ValueError', mismatch_err is not None
+          and '2 probe label(s) for the 3 cycle(s)' in str(mismatch_err), mismatch_err)
+
+    # several runs
+    root = os.path.join(TMP, 'experiment')
+    for k in (1, 2):
+        os.makedirs(os.path.join(root, f'run_{k}'))
+    run_a = run_folder(os.path.join('experiment', 'run_1'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_new, 0.8, scores)
+    run_b = run_folder(os.path.join('experiment', 'run_2'), {1: 'RT4', 2: 'RT5'}, rng.uniform(0.6, 1.0, (2, 4)), 0.8,
+                       [(c, f'RT{c + 3}', roi, '0.9', 0, 0, True) for c in (1, 2) for roi in ROIS])
+    LOGS.clear()
+    written = ar.summarize_folder(root, log=log)
+    rows = summary_rows(os.path.join(root, ar.SUMMARY_NAME))
+    check('(summarize_folder) two runs, same ROIs: one global heatmap and CSV in the root folder; 5 probes "<probe> | '
+          '<experiment folder>"; no warning',
+          sorted(written) == sorted([os.path.join(root, ar.HEATMAP_NAME), os.path.join(root, ar.SUMMARY_NAME)])
+          and all(os.path.isfile(p) for p in written) and len(rows) == 4 * 5
+          and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (written, len(rows), LOGS))
+    run_folder(os.path.join('experiment', 'run_3'), {1: 'RT6'}, rng.uniform(0.6, 1.0, (1, 4)))  # legacy score
+    LOGS.clear()
+    ar.summarize_folder(root, log=log)
+    check('(summarize_folder) runs with and without autofocus_scores.csv -> warning: the scores are not on the same scale',
+          any(lvl == logging.WARNING and 'not on the same scale' in m for lvl, m in LOGS), LOGS)
+    # both qudi-core layouts in one folder: correlation.npy in metadata/ (previous) and in metadata/autofocus/ (current)
+    mixed = os.path.join(TMP, 'mixed_experiment')
+    run_folder(os.path.join('mixed_experiment', 'previous'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_new, 0.8, scores)
+    current_run_folder(os.path.join('mixed_experiment', 'current'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8,
+                       live_rows)
+    current_run_folder(os.path.join('mixed_experiment', 'between'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8,
+                       live_rows, params_subfolder=False)
+    LOGS.clear()
+    written = ar.summarize_folder(mixed, log=log)
+    rows = summary_rows(os.path.join(mixed, ar.SUMMARY_NAME))
+    check('(summarize_folder) finds the runs of every layout (HiM_parameters.yml in metadata/ or in '
+          'metadata/experiment_parameters/; 3 runs x 3 probes x 4 ROIs in the global CSV, experiment folder = the run '
+          'folder, not metadata/); no warning',
+          len(rows) == 3 * 3 * 4
+          and {os.path.basename(r['experiment_folder']) for r in rows} == {'previous', 'current', 'between'}
+          and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (len(rows), LOGS))
+    other = os.path.join(TMP, 'other_experiment')
+    run_folder(os.path.join('other_experiment', 'a'), {1: 'RT1'}, rng.uniform(0.6, 1.0, (1, 4)))
+    run_folder(os.path.join('other_experiment', 'b'), {1: 'RT1'}, rng.uniform(0.6, 1.0, (1, 3)), rois=ROIS[:3])
+    try:
+        ar.summarize_folder(other, log=log)
+        roi_err = None
+    except ValueError as err:
+        roi_err = err
+    check('(summarize_folder) runs with different ROIs -> ValueError (ROI mismatch)',
+          roi_err is not None and 'ROI mismatch' in str(roi_err), roi_err)
+    KEEP_ALIVE.append(locals())
+    return results
+
+
 SECTIONS = [
     ('data folders in the logic', _section_data_folders),
     ('random ROI list helper', _section_random_roi_list),
     ('configurator: local / server folder buttons', _section_folder_buttons),
+    ('configurator: sample tag and ZEN folder dialogs', _section_sample_tag),
+    ('sample file: helper, configurator, sample dialog', _section_sample_file),
+    ('autofocus report', _section_autofocus_report),
 ]
 
 if __name__ == '__main__':

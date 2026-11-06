@@ -8,6 +8,11 @@ qudi-core-HiM: data folder of a task run (ROI scan, Hi-M), created by qudi.
     Error if the folder finally chosen cannot be written. Called before any hardware call.
   - create_run_folder(root, kind, sample_name, suffix=''): root/YYYY_MM_DD/NNN_<kind>_<sample><suffix>,
     NNN = number of folders already in root/YYYY_MM_DD + 1, on 3 digits.
+  - create_mirror_folder(root, zen_folder): root/<name of the folder created by ZEN>/metadata (spinning
+    disk: qudi's files next to the name of the ZEN data folder, which qudi only reads).
+  - local_dated_root(local_path, day): local_path/<YYYY-MM-DD> (created, write-tested; error if it cannot be
+    written) - root of the spinning-disk run folders, always local (the server only gets copies, through
+    data_transfer.DataTransfer).
 
 Modified with Claude code (Anthropic)
 
@@ -22,7 +27,7 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-__all__ = ['choose_data_root', 'create_run_folder']
+__all__ = ['choose_data_root', 'create_run_folder', 'create_mirror_folder', 'local_dated_root']
 
 import os
 import uuid
@@ -82,3 +87,36 @@ def create_run_folder(root, kind, sample_name, suffix=''):
     path = os.path.join(day_folder, f'{prefix}_{kind}_{sample_name}{suffix}')
     os.makedirs(path)
     return path, prefix
+
+
+def create_mirror_folder(root, zen_folder, log=None) -> str:
+    """Create root/<basename of zen_folder>/metadata and return it. If that metadata folder already exists and
+    is not empty, root/<basename>/metadata_<HHMMSS> is used instead (logged at info level with log, a logger).
+    Nothing is created or modified in zen_folder."""
+    name = os.path.basename(os.path.normpath(zen_folder))
+    path = os.path.join(root, name, 'metadata')
+    if os.path.isdir(path) and os.listdir(path):
+        alternative = os.path.join(root, name, f'metadata_{datetime.now().strftime("%H%M%S")}')
+        if log is not None:
+            log.info(f'{path} already holds files - the files of this run go to {alternative}')
+        path = alternative
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def local_dated_root(local_path, day=None) -> str:
+    """local_path/<YYYY-MM-DD> (day: a datetime, default now), created if missing; a small file is written and
+    removed there. RuntimeError if local_path is not set or the folder cannot be written."""
+    if not local_path:
+        raise RuntimeError("No local data folder (experiment file key 'save_path').")
+    root = os.path.join(local_path, (day or datetime.now()).strftime('%Y-%m-%d'))
+    try:
+        os.makedirs(root, exist_ok=True)
+        test_file = os.path.join(root, f'.qudi_write_test_{uuid.uuid4().hex}')
+        with open(test_file, 'w') as stream:
+            stream.write('qudi write test\n')
+        os.remove(test_file)
+    except OSError as err:
+        raise RuntimeError(f'The local data folder {local_path} cannot be written ({err}).') from err
+    return root
+

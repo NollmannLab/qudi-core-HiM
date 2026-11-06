@@ -4,7 +4,421 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-11-04
+Last updated: 2026-11-05
+
+### Hi-M SD: fluidics record and live copy of the metadata
+
+#### Added
+
+- Fluidics record (2026-11-06): `<metadata folder>/fluidics/fluidics_log.csv` (`HiMSDTask.FLUIDICS_SUBFOLDER` /
+  `FLUIDICS_LOG_NAME`), header at creation, one row appended per sampling interval of the flow logic during
+  every injection and needle rinse: time (ISO, local, s), elapsed_s, RT, step ('hybridization 2/4',
+  'photobleaching 1/2', 'rinse'), buffer (the probe of the cycle for a probe injection),
+  flowrate_setpoint_ul_min, pressure_setpoint, flowrate_ul_min, pressure (pressure columns with the unit of the
+  flow logic), volume_ul. Values read in the task thread from what the flow logic keeps (total_volume,
+  latest_flowrate, latest_pressure, pressure_setpoint; setpoint of the step), no Qt signal. A write error: one
+  warning, no more record for the run.
+  - `FluidicsStepsMixin`: optional hooks `_on_fluidics_sample(step_info, values)` (each poll of the injection wait)
+    and `_on_fluidics_step_done(step_info)` (end of each injection), no-op by default; `_fluidics_values()`.
+    `HiMTaskBase._rinse_needle` calls the same hooks (its poll is unchanged). The injection wait polls every
+    `volume_poll_interval_s` (1 s), not at the flow logic's `sampling_interval`: `HiMSDTask` uses
+    `min(volume_poll_interval_s, sampling_interval)` (1 s on the SD, unchanged); the rinse wait polls every 0.1 s
+    and rows are written once per sampling interval. Other setups unchanged.
+- Live copy of the metadata to the server with transfer_data on (2026-11-06): a second DataTransfer
+  (`_metadata_transfer`, same server folder, always allowed) copies the metadata files to
+  `<save_network_path>/<ZEN folder name>/metadata/` right after qudi updates them (`_sync_metadata`): run files
+  (metadata.yml, experiment_parameters/, initial autofocus_reference.npy, empty score and fluidics files), after
+  each ROI (score file, movie_name.txt, log), at the end of each injection / rinse (fluidics record, log), at the
+  end of each cycle (reference_images_<RT>.npy once, log). autofocus_reference.npy is copied at the start and in
+  the cleanup only. Cleanup: pending live copies sent and that thread stopped (the two threads never write the
+  same server file), then the full copy with update=True, log last. transfer_data off: unchanged.
+  - `DataTransfer.add(src, relative_dest, update=False)`: with update=True a file already sent is queued again
+    when its size or modification time changed since its copy started (no duplicate in the queue), and copied
+    even when the server file has the same size.
+- Tests (tests/test_him.py): fluidics record (columns, rows per step, buffer, write error, nothing for the dummy
+  setup), add(update=True), live copy during the run (after the first ROI, while the image copies are paused;
+  autofocus_reference.npy at the start and the end only; reference_images_<RT>.npy once per cycle; final
+  versions on the server), nothing on the server before the cleanup with transfer_data off.
+
+### Run files: experiment_parameters/ subfolder
+
+#### Changed
+
+- Parameter files of a run grouped in `<metadata folder>/experiment_parameters/`
+  (`run_metadata.EXPERIMENT_PARAMETERS_SUBFOLDER`, `experiment_parameters_folder()`), created right after the
+  metadata / run folder (2026-11-05):
+  - Hi-M (all setups): HiM_parameters.yml, injections.yml, sample.yml. injections.yml is now copied by
+    `HiMTaskBase` (all setups; the spinning-disk task did it before).
+  - ROI multicolour scan (all setups): parameters.yml, sample.yml.
+  - Unchanged at the top of the metadata folder: metadata.yml, movie_name.txt, HiM_task.log; autofocus/ unchanged.
+  - `sample_info.add_sample_to_run(folder, ...)`: the tasks pass the subfolder (sample.yml there, metadata.yml
+    at the top); log message with the path of the injections copy.
+  - `autofocus_report`: HiM_parameters.yml read from `<metadata>/experiment_parameters/` when it exists, otherwise
+    from the metadata folder (older runs, legacy qudi-HiM); `summarize_folder` finds the runs of every layout (new
+    `parameters_file()`).
+  - Server copy of the metadata (Hi-M cleanup transfer, ROI scan `copy_metadata_to_server`): recursive, the
+    subfolder is copied (tested).
+  - Comments updated: SD experiment definitions (sample_file), sample_template.yml.
+  - Tests: tests/test_him.py, tests/test_roi_scan.py, tests/test_logic_helpers.py (paths, folder tree, report
+    layouts, server copy).
+
+### Hi-M SD online transfer: acquisitions never sent
+
+#### Fixed
+
+- No ZEN acquisition copied to the server during a Hi-M SD run with transfer_data on; the server folder
+  `<save_network_path>/<ZEN folder name>/` only appeared at the end, with the metadata (2026-11-05).
+  - Cause: `HiMSDTask._TRANSFER_PATTERN` was `*_AcquisitionBlock3_pt*.czi`, but the ZEN acquisitions are
+    `*_AcquisitionBlock2_pt*.czi` (autofocus images: `*_AcquisitionBlock1_pt*.czi`); nothing matched, nothing was
+    queued and nothing was logged. The tests' fake ZEN wrote Block3 files too, so they did not see it.
+  - Pattern `*_AcquisitionBlock2_pt*.czi` (docstrings, tests and the two transfer lines of this devlog corrected).
+  - Only the acquisitions of the ROIs already imaged are queued: `HiMSDTask._acquisitions_done` is incremented
+    when `_image_roi` returns; `_queue_acquisitions` sorts the matching files by pt number
+    (`autofocus_check.sort_czi_paths`) and queues the first N (start of each fluidics step and cleanup).
+  - Each listing logged: "Data transfer: <found> acquisition file(s) (<pattern>) in <ZEN folder>, <new> newly
+    queued, <pending> waiting, <sent> sent"; a warning when acquisitions were done but no file matches the
+    pattern ("... check the ZEN block numbers").
+  - The server folder is created as soon as the ZEN folder is known (`_create_data_folder`), by the transfer
+    thread (new `DataTransfer.make_dir(relative_dir)`: no wait, no exception; a failure marks the server as
+    down). `DataTransfer`: new read-only `pending_count` / `sent_count`; `add` returns True when the file was
+    queued.
+  - Tests (tests/test_him.py): queueing (Block2 only, first N in pt order, warning), make_dir, and a 2-cycle SD run
+    (server folder before the first fluidics step, cycle 1 files on the server at the start of the imaging of
+    cycle 2).
+
+### Run files: autofocus subfolder, one score CSV, no experiment copy
+
+#### Changed
+
+- Autofocus files of the Hi-M SD task in `<metadata folder>/autofocus/` (2026-11-05):
+  `autofocus_check.AUTOFOCUS_SUBFOLDER = 'autofocus'`, created with the metadata folder; autofocus_reference.npy,
+  reference_images_<RT>.npy, correlation.npy, the score CSV, autofocus_correlation_heatmap.png and
+  autofocus_drift.png go there. The server copy (cleanup transfer and copy_metadata_to_server) is recursive and
+  includes the subfolder.
+- One score CSV written as the run goes (Hi-M SD): `ROI_probe_autofocus_summary.csv` replaces
+  autofocus_scores.csv (header at creation, one row per check, also after an abort), columns
+  `experiment_folder, roi_name, probe_name, correlation, cycle, shift_y_px, shift_x_px, passed`
+  (`autofocus_check.SCORES_COLUMNS`; experiment_folder = ZEN folder name, probe_name = RT, correlation empty when
+  the image could not be read).
+- `qudi.util.autofocus_report`: autofocus files read from / report written to `<metadata>/autofocus/` when it
+  exists, otherwise the metadata folder (previous qudi-core and legacy runs); HiM_parameters.yml still read from
+  the metadata folder. Current runs: probe labels and drift from the task's CSV, no second CSV written; previous
+  runs (autofocus_scores.csv) and legacy runs: as before (ROI_probe_autofocus_summary.csv written).
+  `summarize_folder` finds both layouts. New `autofocus_folder(metadata_folder)`.
+- `qudi.util.autofocus_calibration`: output CSV with the same columns (experiment_folder = name of the --images
+  folder, probe_name empty); default output name autofocus_calibration_scores.csv.
+- experiment_config.yaml no longer written (Hi-M and ROI scan, all setups): HiM_parameters.yml
+  '1- global parameters' holds every key of the experiment file (it already did: the whole file content was
+  written; the order is now explicit: _EXPERIMENT_KEYS first, then the other keys in file order); the ROI scan
+  parameters.yml gets every key under 'experiment parameters' (written without key sorting). `copy_experiment_file`
+  is kept in run_metadata.py but no task calls it any more (the OPM PSF stack task writes its own
+  experiment_config.yaml, unchanged).
+- Tests updated / added in tests/test_him.py, tests/test_roi_scan.py and tests/test_logic_helpers.py.
+- tests/test_roi_path.py, ROI GUI close test: `RoiGUI.on_deactivate()` is called directly instead of deactivating
+  the ROI logic / GUI modules, which saved their status variables (the test ROI list) in qudi's appdata folder
+  (status-RoiLogic_logic_roi_logic.cfg), restored by the next activation of a module named roi_logic (other test
+  suites, and qudi itself on the same computer).
+
+### ROI GUI: error when closing qudi
+
+#### Fixed
+
+- Closing qudi raised `AttributeError: 'NoneType' object has no attribute 'tracking'` in
+  `RoiGUI.close_function` (called by the closeEvent of RoiMainWindowCE) (2026-11-05). On quit qudi deactivates
+  the modules, then closes the remaining windows (QApplication.closeAllWindows); `RoiGUI.on_deactivate` did not
+  close its window, so it was closed after the ROI logic was gone. `on_deactivate` now closes the window (as the
+  other GUI modules), and `close_function` returns without doing anything when the ROI logic is None or cannot
+  be read (AttributeError / ReferenceError). Tests: tests/test_roi_path.py (optimize path section).
+
+### Hi-M SD autofocus check: crash of the .czi reader
+
+#### Fixed
+
+- Native crash of the .czi reader no longer kills qudi (2026-11-05).
+  - Problem: during a Hi-M SD run, qudi died with "double free or corruption (out) / Fatal Python error:
+    Aborted" on the second ROI, in HiMSDTask._check_autofocus -> autofocus_score -> preprocess, right after the
+    new autofocus .czi was read; no Python exception, no cleanup. Intermittent: the same files replay fine
+    outside qudi.
+  - Cause (most likely, not reproduced): native memory corruption in the old compiled .czi decoding stack
+    (czifile 2019.7.2.2 + imagecodecs-lite 2019.12.3, built for numpy 1.x, running with numpy 2.2.5), which
+    decodes the sub-blocks in several threads by default; the file was read about 10 ms after ZEN's "done"
+    signal, through a network mount, possibly before ZEN finished writing it. The corruption shows up later
+    (in preprocess), where the freed memory is used.
+  - `autofocus_check.read_autofocus_image`: one decoding thread - `CziFile(path).asarray(max_workers=1)`
+    (czifile 2019; `maxworkers=1` for recent versions), `imread(path, max_workers=1)` without the class; copy of
+    the first plane. New `single_thread_read_form()`, `reader_versions()` (czifile, imagecodecs or
+    imagecodecs-lite, numpy) and `read_and_score(path, ref)` (read + score; numpy / scipy / czifile only).
+  - `HiMSDTask`: after the new image is found, wait until its size is non-zero and stable on two checks
+    `FILE_STABLE_PERIOD_S` (0.5 s) apart (no timeout, interruptible, warning every 60 s). The image is read and
+    scored in a helper process (ProcessPoolExecutor, one 'spawn' process, created in `_setup`, shut down in
+    `_cleanup`; the main script of the parent is not re-imported in the child), waited for at most
+    `AUTOFOCUS_JOB_TIMEOUT_S` (120 s) with interrupt checks. Exception inside the job: same retry rule as before
+    (5 attempts, 1 s apart). Helper process died or timed out: error, new process, one more try; a second
+    failure counts the ROI as a failed check (reference kept, empty score / passed False in
+    autofocus_scores.csv, NaN in correlation.npy) and the minimum-fraction rule decides. Reader versions and
+    read form logged at the start. Worker function chosen through `HiMSDTask._af_worker` (tests).
+  - `qudi.util.autofocus_calibration`: same single-thread read (in its own process), reader versions printed
+    at the start.
+  - The reference .czi images (when there is no autofocus_reference.npy) are still read in the task process,
+    once, before any hardware call (single-thread read).
+  - Tests (tests/test_him.py, autofocus block, about 17 s; each crash / timeout case starts new helper
+    processes): both czifile API forms with max_workers=1, stable size, helper score = in-process score, crash
+    once / twice, timeout, interrupt; helper-process stand-ins in tests/_short.py; one pool shared by the suite.
+
+### Sample template
+
+#### Changed
+
+- sample_template.yml (2026-11-05): organism choices B.subtilis, E.coli, M.xanthus added; fixation choice
+  Live added; nuclear_stain moved right before the dyes (after library_labelling).
+
+### Sample tag, photobleaching imaging flag, metadata copy to the server
+
+#### Changed
+
+- Sample tag: letters and digits only (2026-11-05). `SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9]+$'` in the
+  configurator logic and in `roi_multicolour_scan.py` ('-' no longer accepted, e.g. "IF-2" is rejected);
+  messages, comments and the comments of the roi_multicolour_scan definitions updated; a test checks that the
+  two patterns are equal.
+- Metadata copied to the server when save_network_path is set (2026-11-05). The metadata are still written
+  locally first.
+  - `common/data_transfer.py`: `copy_metadata_to_server(log, local_metadata_dir, server_root, relative_dir,
+    timeout_s, exclude=())` - every file of the folder (recursive, except the names in exclude) to
+    `<server_root>/<relative_dir>/...` with a DataTransfer of its own, flush (at most timeout_s), thread stopped;
+    info with the number of files sent or a warning with the number not sent and the local folder; returns the
+    files not sent, never raises.
+  - `RoiScanSDTask`: with save_network_path, the destination `<save_network_path>/<ZEN folder name>/metadata`
+    is logged once the ZEN folder is known (no write test, no pop-up); `_cleanup` runs the cleanup of all setups
+    (hardware restore) and then, in all cases (normal end, interrupt, error) and only if the local metadata
+    folder exists, `copy_metadata_to_server` (`METADATA_COPY_TIMEOUT_S = 60`), in try/except.
+  - `HiMSDTask`: the metadata folder (then HiM_task.log, sent after its handler is closed) is copied whenever
+    save_network_path is set, with or without transfer_data; transfer_data now only controls the transfer of
+    the ZEN acquisition images during the fluidics steps. Same cleanup order (autofocus report first); without
+    transfer_data the DataTransfer is created only in the cleanup, for the metadata. Destination logged once
+    the ZEN folder is known.
+
+#### Added
+
+- Configurator field `photobleaching_imaging` (bool, check box `photobleaching_imaging_checkBox`, section
+  "documents" next to the injections file, hidden unless the definition declares it), logic
+  `update_photobleaching_imaging(state)`; declared (optional, default false) in spinning_disk/him_epi.yaml and
+  him_confocal.yaml. `HiMTaskBase` reads it (default False); True only gives the warning
+  "photobleaching_imaging is not implemented yet - ignored" at the start of the run (2026-11-05).
+- Tests: tag pattern cases and pattern equality, photobleaching_imaging in the configurator section of
+  tests/test_logic_helpers.py; copy_metadata_to_server (transfer block), photobleaching_imaging warning and the
+  metadata / log on the server without transfer_data (sd_zen_folder block) in tests/test_him.py; metadata on the
+  server after a normal end and an interrupt, server down, no copy without save_network_path in the run-folder
+  section of tests/test_roi_scan.py.
+
+### Sample file
+
+#### Added
+
+- Sample file: one small YAML file per biological sample, attached to every Hi-M and ROI multicolour scan
+  run (2026-11-05).
+  - `custom_config/custom_metadata_templates/sample_template.yml`: the fields of the sample file (type
+    text | choice | number, choices, min / max, required), in dialog order; fields can be added, removed or
+    reordered without code change.
+  - `src/qudi/tasks/common/sample_info.py` (no Qt): `load_sample_template` (ValueError for an unknown type,
+    choices that are not a list, min > max, an unknown key), `load_sample_file` (RuntimeError if missing or not
+    a mapping), `save_sample_file` (order kept, UTF-8, unicode), `missing_required`, `read_sample` /
+    `optional_sample` (read once before the run, bytes kept) and `add_sample_to_run(folder, sample, metadata)`
+    (`sample.yml` + 'Sample' section). Values of fields not in the template are kept.
+  - Configurator logic: options `default sample path` (`default_sample_path`) and `sample template`
+    (`sample_template_path`), both default ''; field `sample_file` with `update_sample_file(path)`.
+  - Configurator GUI: `sample_prep_label` / `sample_prep_lineEdit` / `sample_prep_load_pushButton` /
+    `sample_prep_edit_pushButton` (Qt Designer) mapped to `sample_file`, shown only when the definition declares
+    it; Load: file dialog (*.yml) starting in the folder of the field, else `default sample path`, else home;
+    Edit: `src/qudi/gui/experiments_setup/sample_dialog.py` (`SampleDialog`, QFormLayout generated from the
+    template: QLineEdit / editable QComboBox with an empty first entry / QDoubleSpinBox whose empty state is
+    one step below the minimum, shown as '-'; '*' on required fields; Save (disabled for a new sample),
+    Save as... ('.yml' added), Cancel; saving refused while a required field is empty). Without a valid
+    template, Edit shows a warning and the dialog does not open.
+  - Experiment definitions (SD only): `sample_file` (required, default "") in spinning_disk/him_epi.yaml,
+    him_confocal.yaml and roi_multicolour_scan.yaml.
+  - Tasks (`HiMTaskBase`, `RoiScanTaskBase`; key optional, so RAMM / dummy / OPM runs are unchanged): a
+    non-empty `sample_file` is read before any hardware call (missing / unreadable file: error, with the other
+    problems for Hi-M); `sample.yml` (exact copy) written with the run files in the metadata folder, and its
+    content added to metadata.yml as a top-level 'Sample' section after the template sections (the metadata
+    templates have no such section; one in a template would be filled in place).
+  - custom_config/Spinning_disk_config.cfg: `default sample path` and `sample template`.
+  - Tests: section "sample file" in tests/test_logic_helpers.py (helper, configurator, dialog); (5b) in the
+    run-folder section of tests/test_roi_scan.py; "(sample file)" cases in the sd_zen_folder block of
+    tests/test_him.py.
+
+### Experiment configurator and ROI scan
+
+#### Changed
+
+- Sample tag instead of the DAPI / RNA checkboxes (2026-11-05).
+  - Experiment key `sample_tag` (string: DAPI, RNA, IF or a free tag of letters, digits and '-') replaces the
+    booleans `dapi` / `rna` in the ROI multicolour scan definitions (spinning_disk, ramm, dummy and the two
+    copies in yet_to_be_used/): `required: true`, `default: "DAPI"`.
+  - Configurator: `sample_tag_label` / `sample_tag_comboBox` / `sample_tag_lineEdit` (Qt Designer) replace
+    `dapi_CheckBox` / `rna_CheckBox` in FIELD_SECTIONS / FIELD_WIDGETS, the visibility function, the connections
+    and the input widget list; combo items DAPI, RNA, IF, Free added in the code (the .ui has none); line edit
+    enabled and visible only with Free, QRegularExpressionValidator `^[A-Za-z0-9-]+$`. Logic
+    `update_sample_tag(tag)` replaces `update_is_dapi` / `update_is_rna`; saving is refused (log error
+    "Experiment configuration not saved. ...", no file) when the tag is empty (missing required field) or invalid.
+    Loading: DAPI / RNA / IF select their item, any other value selects Free and fills the line edit; former
+    files with dapi / rna and no sample_tag: dapi -> DAPI, rna -> RNA, otherwise DAPI, with a warning.
+  - `RoiScanTaskBase`: `sample_tag` read and checked before any hardware call (ValueError for an invalid tag;
+    former files: dapi -> DAPI, rna -> RNA, otherwise no tag, with a warning); run folder
+    `<root>/YYYY_MM_DD/NNN_Scan_<sample>_<tag>` and file names `scan_<prefix>_<tag>_<roi number>_ROI` (no tag
+    part when the tag is empty); `is_dapi` / `is_rna` removed.
+  - Tests: configurator section "sample tag and ZEN folder dialogs" in tests/test_logic_helpers.py; sample tag
+    cases (5) in the run-folder section of tests/test_roi_scan.py; the test experiment files of test_roi_scan
+    (and tests/data/roi_scan_experiment.yaml) use `sample_tag: DAPI`.
+- Start folder of the two ZEN folder dialogs (2026-11-05): `load_ref_images_path_clicked` /
+  `load_zen_saving_path_clicked` start in the folder of their field when it exists, otherwise in the new
+  configurator logic option `default zen path` (ConfigOption `default_zen_path`, default ''), otherwise in the
+  home folder (`_dialog_start_folder`), instead of the hardcoded "W:". custom_config/Spinning_disk_config.cfg:
+  `default zen path: '/mnt/Experiments'`.
+
+### Tasks
+
+#### Added
+
+- Autofocus report of Hi-M runs on the spinning disk (2026-11-05).
+  - New `src/qudi/util/autofocus_report.py` (port of the standalone autofocus analysis script; matplotlib
+    `Figure` only, no pyplot / GUI backend, numpy + csv instead of pandas): `report_run(metadata_folder,
+    threshold=None, vmin=0.5, vmax=1.0)` writes `autofocus_correlation_heatmap.png` (ROIs x probes, ROIs whose
+    mean score is below the threshold between red lines, colour bar "Autofocus score"),
+    `ROI_probe_autofocus_summary.csv` (experiment_folder, roi_name, probe_name, correlation) and, with
+    `autofocus_scores.csv`, `autofocus_drift.png` (drift sqrt(dy^2 + dx^2) per ROI and cycle: heatmap, and drift
+    vs cycle with the median in bold); `summarize_folder(root_folder, ...)`: every run under a folder (same ROIs
+    required), probes labelled "<probe> | <experiment folder>", global heatmap and CSV, warning when runs with
+    and without `autofocus_scores.csv` (two different scores) are mixed. Command line:
+    `python -m qudi.util.autofocus_report <folder> [--all] [--threshold T] [--vmin V] [--vmax V]`.
+  - Inputs: `HiM_parameters.yml` (ROIs, probes, correlation_threshold - default 0.7), `correlation.npy`
+    (cycles / probes x ROIs, transposed when needed; NaN = check not done), `autofocus_scores.csv` (probe label of
+    each cycle from its RT column; legacy runs: probes in key order, with a note); a label count different from
+    the cycle count is an error. Rows of correlation.npy are taken as cycles first when the matrix is square (the
+    script assumed ROIs x probes in that case; both the task and the legacy software write cycles / probes x
+    ROIs).
+  - `HiMSDTask._cleanup`: report made after a normal end or an autofocus abort (flag set just before the
+    abort), not after an interrupt or another error; after correlation.npy and before the metadata are queued
+    for the server (figures copied too); an error is logged as a warning, the cleanup goes on.
+  - Tests: `tests/test_logic_helpers.py` section "autofocus report" (qudi-core / legacy / aborted runs, label
+    mismatch, several runs, ROI mismatch); `tests/test_him.py` (report after a normal end and an autofocus
+    abort, not after an interrupt, report error logged as a warning).
+
+### Tasks
+
+#### Fixed
+
+- Hi-M on the spinning disk: the autofocus check waited for ever on the first ROI (2026-11-05).
+  - Cause: ZEN creates the image file of a block (still empty) as soon as it reaches the block, before the
+    trigger. At the start of the experiment it creates `..._AcquisitionBlock1_pt1.czi`, then reports "ready";
+    `HiMSDTask._create_data_folder` (after "ready") filled the list of seen autofocus images with the folder
+    content, so pt1 was already "seen" and no new image ever appeared for the first ROI.
+  - Fix (legacy rule, `check_for_new_autofocus_images`): the list starts empty; after ZEN's "done" trigger, the
+    single image not in the list is the image of the ROI, and the listing becomes the snapshot for the next
+    check.
+  - Logs: references loaded (number, size, folder), start of each wait, a warning every
+    `_AF_WAIT_WARNING_S` (60 s) while waiting with the number and the names (up to 5) of the new matching
+    files, the file found.
+  - Reading the new image: up to `_AF_READ_ATTEMPTS` (5) attempts, `_AF_READ_RETRY_S` (1 s) apart through
+    `_zen_wait` (interruptible), a warning at each failure, the last error raised.
+  - Tests (`tests/test_him.py`): image file of the first ROI present before "ready" (unit case and a full SD
+    run), two ROIs in a row, "still waiting" warning and interrupt, read retries.
+
+### Tasks
+
+#### Added
+
+- Hi-M on the spinning disk: online data transfer to the server; SD run folders always local (2026-11-05).
+  - New `src/qudi/tasks/common/data_transfer.py`, `DataTransfer(log, destination_root, timeout_s)`: one daemon
+    thread does every network operation (folders, write test, copies) inside try/except; `add`, `allow` /
+    `pause` (paused at creation), `wait_idle(timeout)`, `flush(timeout)`, `test(timeout)`, `stop`; copy to
+    `<dest>.part`, size check, `os.replace` (marked sent only then; a destination with the same size counts as
+    sent); on error: warning, `.part` removed, file queued again, server marked down (one warning when lost,
+    one info when back), write test every `RETRY_PERIOD_S` (60 s) until it passes; never disabled for the run.
+  - `data_folders.local_dated_root`: `<save_path>/<YYYY-MM-DD>` (created, write-tested). `RoiScanSDTask` and
+    `HiMSDTask` override a new hook `_choose_data_root` with it: their run folder is always
+    `<save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata` (no server fallback, no pop-up). The other callers of
+    `choose_data_root` (ROI scan / Hi-M base classes: dummy, RAMM) are unchanged.
+  - `HiMSDTask`: experiment key `transfer_data` (configurator TransferData_checkBox; error before any hardware
+    call when `save_network_path` is empty), new task option `transfer_timeout` (s, default 300). Before any
+    hardware call: `DataTransfer` on `save_network_path` and a write test (10 s); if it fails, warning pop-up,
+    the experiment continues. Files go to `<save_network_path>/<ZEN folder name>/`: the ZEN acquisitions
+    `*_AcquisitionBlock2_pt*.czi` (recursive, relative path kept; Block3 at first, corrected 2026-11-05), listed at the start of the hybridization and
+    of the photobleaching of each cycle, copied only during these fluidics steps (and the needle rinse);
+    before the imaging: pause and wait for the copy in progress (at most `transfer_timeout`, not while the
+    server is down). Cleanup, after the hardware reset: normal end -> last acquisitions; interrupt / error ->
+    acquisitions left for a manual copy; in all cases the metadata folder (except the log), then
+    `HiM_task.log` once closed; files not sent listed in one warning.
+  - `HiMTaskBase._cleanup`: two empty hooks, `_end_of_run_files` (after the hardware reset, before the last
+    log line) and `_after_run_log_closed` (after the log file is closed); dummy and RAMM unchanged.
+  - `spinning_disk/him_epi.yaml`: `transfer_data` shown (was hidden, so always false).
+  - Changes from the legacy (UploadDataWorker, launch_data_uploading, ...): files copied as they are (no
+    czi -> tif conversion, no renaming), acquisitions `*_AcquisitionBlock2_pt*.czi` (as the legacy),
+    write test of the destination instead of a ping to a fixed IP, failed files retried (the legacy disabled
+    the transfer for the rest of the run after a 5 min timeout), metadata saved locally and copied only at the
+    end, destination without a date folder.
+  - Tests (`tests/test_him.py`): block `transfer` (DataTransfer) and Hi-M SD transfer cases in `sd_zen_folder`;
+    the fake ZEN of the tests saves an acquisition per ROI and restarts its block count at each run;
+    `tests/test_roi_scan.py` run folder section adapted to the local dated folder.
+
+### Tasks
+
+#### Added
+
+- Hi-M on the spinning disk: autofocus quality check (2026-11-04).
+  - New `src/qudi/tasks/common/autofocus_check.py` (numpy / scipy only): `load_reference_images`
+    (autofocus_reference.npy, otherwise the *.czi in acquisition order - legacy rule),
+    `read_autofocus_image` (first plane of a .czi, czifile imported when needed), `sort_czi_paths`,
+    `preprocess` (binning by `BIN_FACTOR` = 2, minus gaussian blur `BACKGROUND_SIGMA` = 10) and
+    `autofocus_score(ref, new) -> (score, shift_y, shift_x)`: zero-normalised cross-correlation (ZNCC,
+    Pearson at every XY shift, FFT + integral images, same definition as skimage `match_template`) of the
+    central `TEMPLATE_FRACTION` (500/1024: legacy crop [262:762] of a 1024 px binned image) of the
+    reference over the new image; shift in original pixels; shapes from the images.
+  - `HiMSDTask`: references read and checked before any hardware call (one per ROI, same shape),
+    `correlation_threshold` in [-1, 1], new experiment key `autofocus_min_fraction` in [0, 1] (checked with the
+    other problems); copy `autofocus_reference.npy` in the metadata folder; `_check_autofocus`: wait for the
+    single new `*_AcquisitionBlock1_pt*.czi` (0.5 s polling, no timeout, interruptible), score / shift logged
+    per ROI, pass -> new reference, fail -> warning (+ one if the ROI failed in the previous cycle), abort as
+    soon as the minimum fraction of passed ROIs of the cycle can no longer be reached (error, cleanup; email
+    alert left as TODO); `reference_images_<RT>.npy` and the fraction per cycle; `autofocus_scores.csv`
+    (one row per check) and `correlation.npy` (cycles x ROIs, NaN for the checks not done, in the cleanup).
+  - Experiment configurator: `autofocus_min_fraction` (Min_fraction_label / Zen_min_fraction_DSpinBox) wired
+    as `correlation_threshold` (FIELD_SECTIONS, FIELD_WIDGETS, ZEN section, form refresh, logic
+    `update_autofocus_min_fraction`); tooltips of both settings; `spinning_disk/him_epi.yaml`:
+    `autofocus_min_fraction` (required, default 0.9).
+  - New `src/qudi/util/autofocus_calibration.py`: replay of the check on a past ZEN experiment (CSV with the
+    columns of autofocus_scores.csv, summary, optional PNG) to choose `correlation_threshold`.
+  - Tests (`tests/test_him.py`, block `autofocus`; SD runs of `sd_zen_folder` and of the existing SD cases
+    with references and fake autofocus images, `tests/_short.py` helpers).
+
+### Tasks
+
+#### Changed
+
+- Spinning disk (ROI scan, Hi-M): qudi's files go to a folder named after the data folder ZEN creates
+  (2026-11-04).
+  - `common/imaging_steps.py`, `SDImagingMixin`: ZEN folder detection on again, read only
+    (`_zen_folders`, `_find_new_zen_folder`: 10 attempts 1 s apart, errors for no / several new folders,
+    `_zen_wait`), new `_zen_saving_path_problems` (missing, not a folder, cannot be listed). The former
+    `_create_zen_metadata_folder` (wrote in the ZEN folder) is not restored. The "not used" comments are
+    removed.
+  - `common/data_folders.py`: `create_mirror_folder(root, zen_folder)` -> `<root>/<ZEN folder name>/metadata`
+    (`metadata_<HHMMSS>` when that folder already holds files).
+  - `RoiScanSDTask`, `HiMSDTask`: `zen_saving_path` required again (checked before any hardware call),
+    `save_path` required, `save_network_path` optional; root from `choose_data_root` as before; folders of
+    `zen_saving_path` listed before the ZEN ready wait, new folder found after it; files in the mirror
+    folder; prefix = folders in `zen_saving_path` before ZEN started + 1. Nothing is written in the ZEN
+    folder. Hi-M SD also copies the injections file as `injections.yml`. Dummy and RAMM unchanged.
+  - Hi-M log file (`HiMTaskBase`, all setups): records of the run (`qudi` logger: task and modules) kept in
+    memory from the start of `_run` (first line 'Hi-M task started - experiment file ...'), written to
+    `<run folder>/HiM_task.log` once the folder exists ('time - level - logger - message', INFO), closed
+    by `_cleanup` after its last line 'Hi-M task ended ...' (also after an error or an interrupt; dropped
+    without a run folder).
+  - Experiment definitions `spinning_disk/roi_multicolour_scan.yaml`, `spinning_disk/him_epi.yaml`:
+    `zen_saving_path` shown and required again.
+  - Tests: `test_roi_scan.py` run folder section (fake ZEN folder; mirror folder, server unreachable,
+    `zen_saving_path` missing / not a folder, no / two new ZEN folders, `create_mirror_folder` with an
+    existing metadata folder); `test_him.py` block `sd_zen_folder` (mirror folder, `HiM_task.log`,
+    errors, interrupt, dummy log file), `sd_z_planes` and SD checks adapted.
 
 ### Tasks
 

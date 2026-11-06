@@ -1,0 +1,34 @@
+# Sample template: fields of the sample file (one file per biological sample), edited from the experiment
+# configurator ("Edit" next to the sample file) and copied into the metadata folder of every run
+# (experiment_parameters/sample.yml, 'Sample' section of metadata.yml).
+#
+# Format - one entry per field, in the order of the dialog:
+#   <field name>: {type: <text | choice | number>, choices: [...], min: <number>, max: <number>, required: <true | false>}
+#     type      text: free text; choice: list of shortcuts in a drop-down list (any other value can be typed);
+#               number: a number, or empty
+#     choices   choice only: the values proposed in the list
+#     min, max  number only: allowed range (optional)
+#     required  optional, default false: the sample file cannot be saved while this field is empty
+# Fields can be added, removed or reordered without changing the code. Values of removed fields are kept in
+# the existing sample files.
+
+experiment_type:   {type: choice, choices: [DNA-FISH, RNA-FISH, IF, DNA-FISH + IF, RNA-FISH + IF], required: true}
+organism:          {type: choice, choices: [Drosophila melanogaster, Mus musculus, Homo sapiens, B.subtilis, E.coli, M.xanthus], required: true}
+sample_type:       {type: choice, choices: [embryo, larva, adult, tissue, cells], required: true}
+preparation:       {type: choice, choices: [whole-mount, cryosection, cells on coverslip]}
+genotype:          {type: text}
+sex:               {type: choice, choices: [female, male, mixed, unknown]}
+stage_or_tissue:   {type: text}
+fixation:          {type: choice, choices: [4% PFA, Live]}
+formamide_percent: {type: number, min: 0, max: 100}
+mounting_medium:   {type: text}
+probe_library:     {type: text}
+library_labelling: {type: choice, choices: [direct, indirect]}
+nuclear_stain:     {type: choice, choices: [DAPI]}
+dye_mask:          {type: choice, choices: [Alexa 488, Cy3, Atto 550, Rhodamine Red, Alexa 647, Alexa 750]}
+dye_fiducial:      {type: choice, choices: [Alexa 488, Cy3, Atto 550, Rhodamine Red, Alexa 647, Alexa 750]}
+dye_barcode:       {type: choice, choices: [Alexa 488, Cy3, Atto 550, Rhodamine Red, Alexa 647, Alexa 750]}
+antibodies:        {type: text}
+preparation_date:  {type: text}
+experimenter:      {type: text, required: true}
+project:           {type: text}

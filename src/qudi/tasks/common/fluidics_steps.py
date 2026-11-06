@@ -98,14 +98,17 @@ class FluidicsStepsMixin:
         self._flow.start_pressure_regulation_loop(flowrate)
         self._flow.start_volume_measurement(volume)
 
-        # d. wait for the volume (volume / flowrate is in minutes)
+        # d. wait for the volume (volume / flowrate is in minutes); one sample hook per poll
         timeout_s = self.injection_timeout_factor * volume / flowrate * 60.0 + self.injection_timeout_margin_s
+        step_info = {'kind': 'injection', 'number': number, 'product': step['product'], 'probe': step['probe'],
+                     'flowrate': flowrate, 'volume': volume, 'label': label}
         start = monotonic()
         while not self._flow.target_volume_reached:
             if monotonic() - start > timeout_s:
                 raise RuntimeError(f'Step {number}: volume not reached - check the line '
                                    f'({self._flow.total_volume:g} of {volume:g} µl after {timeout_s:.0f} s).')
             self._report_live(label, f'Injecting {step["product"]} - {self._flow.total_volume:.0f}/{volume:g} µl')
+            self._on_fluidics_sample(step_info, self._fluidics_values())
             self._interruptible_sleep(self.volume_poll_interval_s)
 
         # e. stop the regulation, pressure to 0
@@ -114,6 +117,28 @@ class FluidicsStepsMixin:
         self._flow.set_pressure(0.0)
         self.log.info(f'Step {number}: {self._flow.total_volume:g} µl injected '
                       f'in {monotonic() - start:.0f} s.')
+        self._on_fluidics_step_done(step_info)
+
+    # ----------------------------------------------------------------------------------------------
+    # Optional hooks (no-op here; a task overrides them, e.g. to record the fluidics)
+    # ----------------------------------------------------------------------------------------------
+
+    def _fluidics_values(self) -> dict:
+        """Values of the flow logic read in the task thread (no hardware call): total_volume (µl), flowrate and
+        pressure (last values measured by the logic, None when there are none), pressure_setpoint."""
+        flowrate = getattr(self._flow, 'latest_flowrate', None)
+        pressure = getattr(self._flow, 'latest_pressure', None)
+        return {'total_volume': getattr(self._flow, 'total_volume', None),
+                'flowrate': float(flowrate[0]) if flowrate else None,
+                'pressure': float(pressure[0]) if pressure else None,
+                'pressure_setpoint': getattr(self._flow, 'pressure_setpoint', None)}
+
+    def _on_fluidics_sample(self, step_info, values) -> None:
+        """Called at each poll of the wait for an injection (every volume_poll_interval_s) with the step
+        (kind, number, product, probe, flowrate setpoint, volume, label) and _fluidics_values(). No-op."""
+
+    def _on_fluidics_step_done(self, step_info) -> None:
+        """Called at the end of each injection (after the pressure is set back to 0). No-op."""
 
     def _incubate(self, step, label='') -> None:
         """Wait the incubation time (interruptible), with the incubation valve positions.

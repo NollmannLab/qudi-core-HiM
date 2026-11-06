@@ -33,9 +33,8 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-# ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-# import os
-# from glob import glob
+import os
+from glob import glob
 from time import monotonic, sleep
 
 from qudi.tasks.common.popups import ask_confirmation
@@ -65,13 +64,16 @@ class SDImagingMixin:
         tasks/common/popups.py) to check them in block 7. True: 'Done - continue', False: Cancel.
     _end_imaging: lasers disabled, external trigger off, intensities reset to 0.
 
-    Data folder: created by the task (tasks/common/data_folders.py), not by ZEN. The detection of the
-    folder created by ZEN (_zen_folders, _find_new_zen_folder, _create_zen_metadata_folder) is kept
-    below, commented out.
+    Folder created by ZEN (read only): when the experiment starts, ZEN creates a new folder in
+    self.zen_saving_path (set by the task from its experiment file). _zen_folders() lists the folders
+    there before ZEN starts; _find_new_zen_folder(folders_before) then returns the single new one
+    (checked _ZEN_FOLDER_ATTEMPTS times, 1 s apart; error if there is none or several). Nothing is
+    created or modified in zen_saving_path: qudi writes its files in a folder of the same name under its
+    own data root (tasks/common/data_folders.py create_mirror_folder). _zen_saving_path_problems()
+    checks zen_saving_path before any hardware call.
     """
 
-    # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-    # _ZEN_FOLDER_ATTEMPTS = 10  # attempts to find the new ZEN folder, 1 s apart
+    _ZEN_FOLDER_ATTEMPTS = 10  # attempts to find the new ZEN folder, 1 s apart
 
     acquisition_timeout_s = 120.0  # max time to wait for ZEN's "done" trigger on one block
     poll_interval_s = 0.1
@@ -130,46 +132,52 @@ class SDImagingMixin:
                 f'2- the number of loops for blocks 4>9 should be {loops}')
         return ask_confirmation(self, 'ZEN settings', text)
 
-    # ZEN data folder detection - not used: the shared ZEN folder cannot be written from this computer; run folder created by qudi instead (common/data_folders.py)
-    # # ----------------------------------------------------------------------------------------------
-    # # Data folder created by ZEN
-    # # ----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
+    # Folder created by ZEN (read only)
+    # ----------------------------------------------------------------------------------------------
 
-    # def _zen_folders(self) -> set:
-    #     """Folders of zen_saving_path (full paths)."""
-    #     return {path for path in glob(os.path.join(self.zen_saving_path, '*')) if os.path.isdir(path)}
+    def _zen_saving_path_problems(self) -> list:
+        """Problems with self.zen_saving_path (missing, not an existing folder, cannot be listed); checked
+        before any hardware call."""
+        path = getattr(self, 'zen_saving_path', None)
+        if not path:
+            return ["experiment file: 'zen_saving_path' missing"]
+        if not os.path.isdir(path):
+            return [f'zen_saving_path {path} is not an existing folder']
+        try:
+            os.listdir(path)
+        except OSError as err:
+            return [f'zen_saving_path {path} cannot be listed ({err})']
+        return []
 
-    # def _find_new_zen_folder(self, folders_before) -> str:
-    #     """The single folder of zen_saving_path that was not there before ZEN started; checked up to
-    #     _ZEN_FOLDER_ATTEMPTS times, 1 s apart."""
-    #     for attempt in range(self._ZEN_FOLDER_ATTEMPTS):
-    #         new = sorted(self._zen_folders() - folders_before)
-    #         if len(new) == 1:
-    #             self.log.info(f'ZEN will save the data in the following folder : {new[0]}')
-    #             return new[0]
-    #         if len(new) > 1:
-    #             raise RuntimeError(f'More than one folder were found ({", ".join(new)}). The acquisition is aborted.')
-    #         if attempt < self._ZEN_FOLDER_ATTEMPTS - 1:
-    #             self._zen_wait(1.0)
-    #     raise RuntimeError(f'No new file was created by ZEN in {self.zen_saving_path} - check if the reference '
-    #                        f'folder indicated in the parameters is correct. The acquisition is aborted.')
+    def _zen_folders(self) -> set:
+        """Folders of zen_saving_path (full paths)."""
+        return {path for path in glob(os.path.join(self.zen_saving_path, '*')) if os.path.isdir(path)}
 
-    # @staticmethod
-    # def _create_zen_metadata_folder(zen_directory) -> str:
-    #     """<ZEN folder>/metadata (created)."""
-    #     path = os.path.join(zen_directory, 'metadata')
-    #     os.makedirs(path, exist_ok=True)
-    #     return path
+    def _find_new_zen_folder(self, folders_before) -> str:
+        """The single folder of zen_saving_path that was not there before ZEN started; checked up to
+        _ZEN_FOLDER_ATTEMPTS times, 1 s apart."""
+        for attempt in range(self._ZEN_FOLDER_ATTEMPTS):
+            new = sorted(self._zen_folders() - folders_before)
+            if len(new) == 1:
+                self.log.info(f'ZEN will save the data in the following folder : {new[0]}')
+                return new[0]
+            if len(new) > 1:
+                raise RuntimeError(f'More than one folder were found ({", ".join(new)}). The acquisition is aborted.')
+            if attempt < self._ZEN_FOLDER_ATTEMPTS - 1:
+                self._zen_wait(1.0)
+        raise RuntimeError(f'No new file was created by ZEN in {self.zen_saving_path} - check if the reference '
+                           f'folder indicated in the parameters is correct. The acquisition is aborted.')
 
-    # def _zen_wait(self, duration_s) -> None:
-    #     """Wait duration_s seconds, checking for an interrupt at least every 0.1 s."""
-    #     deadline = monotonic() + float(duration_s)
-    #     while True:
-    #         self._check_interrupt()
-    #         remaining = deadline - monotonic()
-    #         if remaining <= 0:
-    #             return
-    #         sleep(min(0.1, remaining))
+    def _zen_wait(self, duration_s) -> None:
+        """Wait duration_s seconds, checking for an interrupt at least every 0.1 s."""
+        deadline = monotonic() + float(duration_s)
+        while True:
+            self._check_interrupt()
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return
+            sleep(min(0.1, remaining))
 
     def _end_imaging(self) -> None:
         if self.imaging_sequence:

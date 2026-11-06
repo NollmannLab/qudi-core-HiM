@@ -11,13 +11,10 @@ fields:
     required: true
     default: ""
 
-  dapi:
-    required: false
-    default: false
-
-  rna:
-    required: false
-    default: false
+  # tag of the run folder and file names: DAPI, RNA, IF or a free tag (letters and digits only)
+  sample_tag:
+    required: true
+    default: "DAPI"
 
   imaging_sequence:
     required: true
