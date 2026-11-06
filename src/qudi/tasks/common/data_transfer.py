@@ -7,8 +7,10 @@ network operation (creating folders, the write test, copying, renaming) runs in 
 (threading.Thread + queue.Queue, daemon), inside try/except: the calling task thread never touches the
 server, so a server or network problem can never crash or block the task. Errors go to the task log.
 
-  - add(src_path, relative_dest) -> bool: queue a file for <destination_root>/<relative_dest> (a file already
-    queued, being copied or sent is ignored: False); discard(src_paths): take files out of the queue.
+  - add(src_path, relative_dest, update=False) -> bool: queue a file for <destination_root>/<relative_dest> (a
+    file already queued or being copied is ignored: False; a file already sent too, unless update=True and its
+    size or modification time changed since it was sent - it is then queued again and copied even when the
+    destination has the same size); discard(src_paths): take files out of the queue.
   - pending_count / sent_count: number of files waiting (queued or being copied) / sent.
   - make_dir(relative_dir): ask the thread to create <destination_root>/<relative_dir> (no wait, no exception
     in the calling thread; a failure marks the server as down, as a failed copy).
@@ -75,6 +77,8 @@ class DataTransfer:
         self._queue = queue.Queue()    # (src, relative_dest)
         self._queued = set()           # src queued or being copied
         self._sent = set()             # src sent
+        self._sent_stat = {}           # src -> (size, mtime_ns) of the source when its copy started
+        self._force = set()            # src queued with update=True: copied even if the destination has its size
         self._lock = threading.Lock()
         self._allowed = threading.Event()   # copies only while set (paused at creation)
         self._hold = threading.Event()      # set by wait_idle: no new copy
@@ -90,12 +94,25 @@ class DataTransfer:
         self._thread.start()
 
     # ------------------------------------------------------------------ calling thread
-    def add(self, src_path, relative_dest) -> bool:
-        """Queue src_path for <destination_root>/<relative_dest>; ignored (False) when already queued or sent."""
+    def add(self, src_path, relative_dest, update=False) -> bool:
+        """Queue src_path for <destination_root>/<relative_dest>; ignored (False) when already queued, or sent (with
+        update=True: only when unchanged since it was sent). Returns True when the file was queued."""
         with self._lock:
-            if src_path in self._queued or src_path in self._sent:
+            if src_path in self._queued:
                 return False
+            if src_path in self._sent:
+                if not update:
+                    return False
+                try:
+                    stat = os.stat(src_path)
+                except OSError:
+                    return False
+                if self._sent_stat.get(src_path) == (stat.st_size, stat.st_mtime_ns):
+                    return False  # unchanged since it was sent
+                self._sent.discard(src_path)
             self._queued.add(src_path)
+            if update:
+                self._force.add(src_path)
         self._queue.put((src_path, relative_dest))
         self._wake.set()
         return True
@@ -241,8 +258,11 @@ class DataTransfer:
         dest = os.path.join(self.destination_root, relative_dest)
         part = dest + PART_SUFFIX
         try:
-            size = os.path.getsize(src)
-            if os.path.isfile(dest) and os.path.getsize(dest) == size:
+            stat = os.stat(src)
+            size = stat.st_size
+            with self._lock:
+                force = src in self._force
+            if not force and os.path.isfile(dest) and os.path.getsize(dest) == size:
                 sent = True  # already on the server
             else:
                 os.makedirs(os.path.dirname(dest) or self.destination_root, exist_ok=True)
@@ -264,7 +284,9 @@ class DataTransfer:
         if sent:
             with self._lock:
                 self._queued.discard(src)
+                self._force.discard(src)
                 self._sent.add(src)
+                self._sent_stat[src] = (stat.st_size, stat.st_mtime_ns)
             self._set_server(True)  # e.g. a copy that was stuck on the network finally went through
             self._report_back()
 

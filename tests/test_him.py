@@ -366,10 +366,12 @@ if selected('metadata'):
           and acq['roi_list_(xyz)'] == [{n: [float(v) for v in roi.get_roi_position(n)]} for n in NAMES]
           and list(meta) == list(template) + ['Sample'] and meta['Camera'] == template['Camera'], acq)
     check('(run files, dummy) HiM_parameters.yml, injections.yml and sample.yml in <run folder>/experiment_parameters/ '
-          'and not at the top; metadata.yml, movie_name.txt and HiM_task.log at the top',
+          'and not at the top; metadata.yml, movie_name.txt and HiM_task.log at the top; no fluidics/ (other setups '
+          'record nothing)',
           run_folder and sorted(os.listdir(os.path.join(run_folder, 'experiment_parameters')))
           == ['HiM_parameters.yml', 'injections.yml', 'sample.yml']
           and not {'HiM_parameters.yml', 'injections.yml', 'sample.yml'} & set(os.listdir(run_folder))
+          and 'fluidics' not in os.listdir(run_folder)  # fluidics record: spinning disk only
           and {'metadata.yml', 'movie_name.txt', 'HiM_task.log'} <= set(os.listdir(run_folder)),
           sorted(os.listdir(run_folder)) if run_folder else None)
     him_params = yaml.safe_load(open(os.path.join(run_folder, 'experiment_parameters', 'HiM_parameters.yml'))) if run_folder else {}
@@ -528,8 +530,24 @@ if selected('sd_zen_folder'):
         path = os.path.join(folder, 'HiM_task.log')
         return open(path, encoding='utf-8').read().splitlines() if os.path.exists(path) else []
 
+    def fluidics_rows(folder):
+        path = os.path.join(folder, 'fluidics', 'fluidics_log.csv')
+        return list(csv.reader(open(path, newline=''))) if os.path.exists(path) else []
+
     # (2) Hi-M SD, 1 probe, 2 ROIs, server reachable
-    task, result, err, t0, _, server, local, before, tree_before, exp = zen_case('zen_ok')
+    server_at_cleanup = []
+    original_end_files = him.HiMSDTask._end_of_run_files
+
+    def spy_end_files(self):  # what the server holds when the cleanup starts its copies
+        server_at_cleanup.append(sorted(f for d, _, fs in os.walk(self.save_network_path) for f in fs))
+        return original_end_files(self)
+    him.HiMSDTask._end_of_run_files = spy_end_files
+    try:
+        task, result, err, t0, _, server, local, before, tree_before, exp = zen_case('zen_ok')
+    finally:
+        him.HiMSDTask._end_of_run_files = original_end_files
+    check('(live copy) transfer_data off: nothing on the server before the cleanup (no live copy of the metadata)',
+          server_at_cleanup == [[]], server_at_cleanup)
     zen_folder = zen.created[-1] if zen.created else ''
     folder = sd_folder(local, zen_folder)
     prefix = str(before + 1).zfill(3)
@@ -540,7 +558,7 @@ if selected('sd_zen_folder'):
           f'injections file), autofocus/ with every autofocus file (no autofocus_scores.csv); prefix '
           f'{prefix} (folders before + 1), names scan_{prefix}_RT1_<roi>_ROI',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == folder
-          and sorted(os.listdir(folder)) == sorted(['HiM_task.log', 'autofocus', 'experiment_parameters',
+          and sorted(os.listdir(folder)) == sorted(['HiM_task.log', 'autofocus', 'experiment_parameters', 'fluidics',
                                                     'metadata.yml', 'movie_name.txt'])
           and sorted(os.listdir(os.path.join(folder, 'experiment_parameters'))) == ['HiM_parameters.yml',
                                                                                     'injections.yml']
@@ -583,6 +601,51 @@ if selected('sd_zen_folder'):
           and lines[-1].endswith(' - qudi.tasks.him.HiMSDTask - Hi-M task ended after 1/1 cycle(s).')
           and not run_log_handlers(), (lines[:2], lines[-1:], run_log_handlers()))
     end_state_ok('ZEN folder', t0)
+
+    # fluidics record of the zen_ok run (dummy flow chain, sampling interval 0.1 s)
+    rows = fluidics_rows(folder)
+    unit = MODS['flow_logic'].get_pressure_unit()
+    unit = str((list(unit.values()) if isinstance(unit, dict) else list(unit))[0])
+    suffix = f'_{unit}' if unit.replace('_', '').isalnum() else ''
+    columns = ['time', 'elapsed_s', 'RT', 'step', 'buffer', 'flowrate_setpoint_ul_min', f'pressure_setpoint{suffix}',
+               'flowrate_ul_min', f'pressure{suffix}', 'volume_ul']
+    steps = {}
+    for row in rows[1:]:
+        steps.setdefault(row[3], []).append(row)
+    elapsed = [float(r[1]) for r in rows[1:] if r[3] == 'hybridization 1/4']
+    check('(fluidics record) fluidics/fluidics_log.csv: header in order (pressure unit of the flow logic); rows for '
+          'every injection (hybridization 1/4, 2/4, 4/4, photobleaching 1/2, 2/2) and the needle rinse, none for the '
+          'incubation; RT1 in every row; buffer SSC / RT1 (probe of the cycle) / Wash buffer ...; setpoint 1000 for the '
+          'injections; one row per sampling interval (>= 0.09 s apart); ISO time',
+          rows and rows[0] == columns
+          and set(steps) == {'hybridization 1/4', 'hybridization 2/4', 'hybridization 4/4', 'photobleaching 1/2',
+                             'photobleaching 2/2', 'rinse'}
+          and all(r[2] == 'RT1' for r in rows[1:])
+          and steps['hybridization 1/4'][0][4] == 'SSC' and steps['hybridization 2/4'][0][4] == 'RT1'
+          and steps['hybridization 4/4'][0][4] == 'Wash buffer' and steps['photobleaching 2/2'][0][4] == 'Imaging buffer'
+          and steps['rinse'][0][4] == 'rinse' and steps['rinse'][0][5] == ''
+          and all(float(r[5]) == 1000 for k, rs in steps.items() if k != 'rinse' for r in rs)
+          and all(b - a >= 0.09 for a, b in zip(elapsed, elapsed[1:]))
+          and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d', rows[1][0]),
+          (rows[:1], {k: len(v) for k, v in steps.items()}, rows[1:3]))
+
+    # fluidics record: write error -> one warning, the run goes on
+    original_create = him.HiMSDTask._create_fluidics_log
+
+    def unwritable_record(self, directory):
+        original_create(self, directory)
+        if self._fluidics_path:  # the file becomes a folder: every append fails
+            os.remove(self._fluidics_path)
+            os.makedirs(self._fluidics_path)
+    him.HiMSDTask._create_fluidics_log = unwritable_record
+    try:
+        task, result, err, t0, *_ = zen_case('zen_fluidics_error')
+    finally:
+        him.HiMSDTask._create_fluidics_log = original_create
+    record_warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING and m.startswith('Fluidics record')]
+    check('(fluidics record) write error: one warning "recording stopped for this run", the run completes',
+          err is None and result and result['cycles_done'] == 1 and len(record_warnings) == 1
+          and 'recording stopped' in record_warnings[0], (err, record_warnings))
 
     # (3) sample file (sample_file): sample.yml and the Sample section of metadata.yml; missing file -> error
     from qudi.tasks.common import sample_info
@@ -796,12 +859,73 @@ if selected('sd_zen_folder'):
         seen_at[rt]['acquired'] = [os.path.basename(p) for p in zen_trigger.acquired]
         return original_start(self, rt)
 
+    from qudi.tasks.common import data_transfer as dt
+
+    def wait_until(cond, timeout=5.0):
+        end = monotonic() + timeout
+        while monotonic() < end:
+            if cond():
+                return True
+            sleep(0.02)
+        return bool(cond())
+
+    live = {}
+    original_image_roi = him.HiMSDTask._image_roi
+
+    def spy_image_roi(self, roi_name, file_name):  # live copy after the first ROI, while the image copies are paused
+        original_image_roi(self, roi_name, file_name)
+        if 'first_roi' in live:
+            return
+        base = os.path.join(self.save_network_path, self._server_path('metadata'))
+        wanted = [os.path.join('autofocus', 'ROI_probe_autofocus_summary.csv'), 'movie_name.txt', 'HiM_task.log']
+        arrived = wait_until(lambda: all(os.path.isfile(os.path.join(base, w)) for w in wanted), 5.0)
+        live['first_roi'] = {'arrived': arrived, 'image_copies_paused': not self._transfer._allowed.is_set(),
+                             'movie_lines': open(os.path.join(base, 'movie_name.txt')).read().split()
+                             if arrived else None}
+    copy_log = []
+    real_copy = dt.DataTransfer._copy
+
+    def logged_copy(transfer, src, relative_dest):
+        role = 'live' if transfer is getattr(live.get('task'), '_metadata_transfer', None) else 'other'
+        copy_log.append((role, os.path.basename(src)))
+        return real_copy(transfer, src, relative_dest)
+    original_setup_transfer = him.HiMSDTask._start_transfer
+
+    def spy_start_transfer(self):
+        original_setup_transfer(self)
+        live['task'] = self
     him.HiMSDTask._hybridization, him.HiMSDTask._start_autofocus_cycle = spy_hyb, spy_start
+    him.HiMSDTask._image_roi, him.HiMSDTask._start_transfer = spy_image_roi, spy_start_transfer
+    dt.DataTransfer._copy = logged_copy
     acquired_before = len(zen_trigger.acquired)
     try:
         task, result, err, t0, _, server, local, *_ = zen_case('tr_two', transfer_data=True, injections=two_probes)
     finally:
         him.HiMSDTask._hybridization, him.HiMSDTask._start_autofocus_cycle = original_hyb, original_start
+        him.HiMSDTask._image_roi, him.HiMSDTask._start_transfer = original_image_roi, original_setup_transfer
+        dt.DataTransfer._copy = real_copy
+    first = live.get('first_roi', {})
+    check('(live copy, transfer_data on) after the first ROI: the score file, movie_name.txt (1 line) and the log are on '
+          'the server before the end of the run, while the image copies are paused (imaging)',
+          first.get('arrived') and first.get('image_copies_paused') and first.get('movie_lines')
+          and len(first['movie_lines']) == 1, first)
+    live_refs = [n for role, n in copy_log if role == 'live' and n == 'autofocus_reference.npy']
+    end_refs = [n for role, n in copy_log if role == 'other' and n == 'autofocus_reference.npy']
+    cycle_refs = sorted(n for role, n in copy_log if role == 'live' and n.startswith('reference_images_'))
+    check('(live copy) autofocus_reference.npy copied at the start (live, once) and in the cleanup (once) only; '
+          'reference_images_<RT>.npy copied live once per cycle (RT1, RT2); the fluidics record copied live',
+          live_refs == ['autofocus_reference.npy'] and end_refs == ['autofocus_reference.npy']
+          and cycle_refs == ['reference_images_RT1.npy', 'reference_images_RT2.npy']
+          and ('live', 'fluidics_log.csv') in copy_log and task._metadata_transfer is None,
+          (live_refs, end_refs, cycle_refs, sorted(set(copy_log))[:12]))
+    zen_name_two = os.path.basename(os.path.dirname(os.path.dirname(zen_trigger.acquired[-1])))
+    local_meta = sd_folder(local, os.path.join(zen.root, zen_name_two))
+    server_meta = os.path.join(server, zen_name_two, 'metadata')
+    same_files = all(open(os.path.join(server_meta, rel), 'rb').read() == open(os.path.join(local_meta, rel), 'rb').read()
+                     for rel in server_files(local_meta) if rel != 'HiM_task.log')
+    check('(live copy) at the end the server holds the final version of every metadata file (cleanup with update=True)',
+          os.path.isdir(server_meta) and server_files(server_meta) == server_files(local_meta) and same_files,
+          (server_files(server_meta)[:6], server_files(local_meta)[:6]))
     msgs = [m for t, lvl, m in LOGS if t >= t0]
     cycle1_files = [os.path.basename(p) for p in zen_trigger.acquired[acquired_before:acquired_before + N]]
     check('(transfer, 2 cycles) the server folder <server>/<ZEN folder name>/ exists before the first fluidics step '
@@ -1466,6 +1590,50 @@ if selected('transfer'):
           warnings == [f'Data transfer: no ZEN acquisition file matches *_AcquisitionBlock2_pt*.czi in {empty_zen} '
                        f'although 2 acquisition(s) were done - check the ZEN block numbers'], warnings)
     q_task._transfer.stop()
+
+    # DataTransfer.add(update=True): modified file sent again, unchanged one not, no duplicate in the queue
+    up_src = os.path.join(TMP, 'up_src')
+    os.makedirs(up_src)
+    up_file = os.path.join(up_src, 'scores.csv')
+    open(up_file, 'w').write('a,b\n')
+    up_server = os.path.join(TMP, 'up_server')
+    tr = dt.DataTransfer(tr_log, up_server)
+    tr.allow()
+    copies = []
+    real_copyfile = dt.shutil.copyfile
+
+    def counting_copy(src, dst, *a, **k):
+        copies.append(os.path.basename(src))
+        return real_copyfile(src, dst, *a, **k)
+    dt.shutil.copyfile = counting_copy
+    try:
+        tr.add(up_file, 'x/scores.csv')
+        sent1 = wait_until(lambda: tr.is_sent(up_file), 3.0)
+        unchanged = tr.add(up_file, 'x/scores.csv', update=True)
+        open(up_file, 'a').write('1,2\n')
+        tr.pause()  # keep the new version queued to look at the queue
+        queued_first = tr.add(up_file, 'x/scores.csv', update=True)
+        queued_again = tr.add(up_file, 'x/scores.csv', update=True)
+        in_queue = tr.pending().count(up_file)
+        tr.allow()
+        sent2 = wait_until(lambda: tr.is_sent(up_file), 3.0)
+        content2 = open(os.path.join(up_server, 'x', 'scores.csv')).read()
+        # same size, new content (e.g. an .npy of the same shape): sent again despite the same size on the server
+        sleep(0.01)
+        open(up_file, 'w').write('A,B\n1,2\n')
+        same_size = tr.add(up_file, 'x/scores.csv', update=True)
+        sent3 = wait_until(lambda: tr.is_sent(up_file) and open(os.path.join(up_server, 'x', 'scores.csv')).read()
+                           == 'A,B\n1,2\n', 3.0)
+        not_update = tr.add(up_file, 'x/scores.csv')  # without update: a sent file is never sent again
+    finally:
+        dt.shutil.copyfile = real_copyfile
+        tr.stop()
+    check('(DataTransfer.add update=True) unchanged file not sent again; modified file queued once (no duplicate) and '
+          'sent again; same-size modification sent again; without update=True a sent file is ignored',
+          sent1 and unchanged is False and queued_first is True and queued_again is False and in_queue == 1
+          and sent2 and content2 == 'a,b\n1,2\n' and same_size is True and sent3 and not_update is False
+          and copies == ['scores.csv'] * 3,
+          (sent1, unchanged, queued_first, queued_again, in_queue, sent2, same_size, sent3, not_update, copies))
 
     # DataTransfer.make_dir: created by the thread; a failure only marks the server as down
     md_root = os.path.join(TMP, 'md_server')

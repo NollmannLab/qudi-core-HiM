@@ -6,6 +6,40 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Hi-M SD: fluidics record and live copy of the metadata
+
+#### Added
+
+- Fluidics record (2026-11-06): `<metadata folder>/fluidics/fluidics_log.csv` (`HiMSDTask.FLUIDICS_SUBFOLDER` /
+  `FLUIDICS_LOG_NAME`), header at creation, one row appended per sampling interval of the flow logic during
+  every injection and needle rinse: time (ISO, local, s), elapsed_s, RT, step ('hybridization 2/4',
+  'photobleaching 1/2', 'rinse'), buffer (the probe of the cycle for a probe injection),
+  flowrate_setpoint_ul_min, pressure_setpoint, flowrate_ul_min, pressure (pressure columns with the unit of the
+  flow logic), volume_ul. Values read in the task thread from what the flow logic keeps (total_volume,
+  latest_flowrate, latest_pressure, pressure_setpoint; setpoint of the step), no Qt signal. A write error: one
+  warning, no more record for the run.
+  - `FluidicsStepsMixin`: optional hooks `_on_fluidics_sample(step_info, values)` (each poll of the injection wait)
+    and `_on_fluidics_step_done(step_info)` (end of each injection), no-op by default; `_fluidics_values()`.
+    `HiMTaskBase._rinse_needle` calls the same hooks (its poll is unchanged). The injection wait polls every
+    `volume_poll_interval_s` (1 s), not at the flow logic's `sampling_interval`: `HiMSDTask` uses
+    `min(volume_poll_interval_s, sampling_interval)` (1 s on the SD, unchanged); the rinse wait polls every 0.1 s
+    and rows are written once per sampling interval. Other setups unchanged.
+- Live copy of the metadata to the server with transfer_data on (2026-11-06): a second DataTransfer
+  (`_metadata_transfer`, same server folder, always allowed) copies the metadata files to
+  `<save_network_path>/<ZEN folder name>/metadata/` right after qudi updates them (`_sync_metadata`): run files
+  (metadata.yml, experiment_parameters/, initial autofocus_reference.npy, empty score and fluidics files), after
+  each ROI (score file, movie_name.txt, log), at the end of each injection / rinse (fluidics record, log), at the
+  end of each cycle (reference_images_<RT>.npy once, log). autofocus_reference.npy is copied at the start and in
+  the cleanup only. Cleanup: pending live copies sent and that thread stopped (the two threads never write the
+  same server file), then the full copy with update=True, log last. transfer_data off: unchanged.
+  - `DataTransfer.add(src, relative_dest, update=False)`: with update=True a file already sent is queued again
+    when its size or modification time changed since its copy started (no duplicate in the queue), and copied
+    even when the server file has the same size.
+- Tests (tests/test_him.py): fluidics record (columns, rows per step, buffer, write error, nothing for the dummy
+  setup), add(update=True), live copy during the run (after the first ROI, while the image copies are paused;
+  autofocus_reference.npy at the start and the end only; reference_images_<RT>.npy once per cycle; final
+  versions on the server), nothing on the server before the cleanup with transfer_data off.
+
 ### Run files: experiment_parameters/ subfolder
 
 #### Changed
