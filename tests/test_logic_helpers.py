@@ -914,17 +914,20 @@ def _section_autofocus_report():
                 writer.writerows(scores)
         return folder
 
-    def current_run_folder(name, probes, corr, threshold, rows):
-        """<TMP>/<name>/metadata with HiM_parameters.yml, and metadata/autofocus/ with correlation.npy and the score
-        file of the current task (rows: experiment_folder, roi_name, probe_name, correlation, cycle, shift_y_px,
-        shift_x_px, passed)."""
+    def current_run_folder(name, probes, corr, threshold, rows, params_subfolder=True):
+        """<TMP>/<name>/metadata with experiment_parameters/HiM_parameters.yml (params_subfolder False: at the top,
+        as the qudi-core version that had only the autofocus/ subfolder), and metadata/autofocus/ with
+        correlation.npy and the score file of the current task (rows: experiment_folder, roi_name, probe_name,
+        correlation, cycle, shift_y_px, shift_x_px, passed)."""
         folder = os.path.join(TMP, name, 'metadata')
         af_folder = os.path.join(folder, 'autofocus')
         os.makedirs(af_folder)
+        params_folder = os.path.join(folder, 'experiment_parameters') if params_subfolder else folder
+        os.makedirs(params_folder, exist_ok=True)
         params = {'1- global parameters': {'sample_name': 'S', 'correlation_threshold': threshold},
                   '2- fluidic parameters': {'probes': probes},
                   '4- ROIs': {roi: f'X={k} - Y=0 - Z=None' for k, roi in enumerate(ROIS)}}
-        yaml.safe_dump(params, open(os.path.join(folder, 'HiM_parameters.yml'), 'w'), sort_keys=False)
+        yaml.safe_dump(params, open(os.path.join(params_folder, 'HiM_parameters.yml'), 'w'), sort_keys=False)
         np.save(os.path.join(af_folder, 'correlation.npy'), np.asarray(corr, dtype=float))
         with open(os.path.join(af_folder, ar.SUMMARY_NAME), 'w', newline='') as f:
             writer = csv.writer(f)
@@ -990,7 +993,8 @@ def _section_autofocus_report():
         written, cur_err = [], err
     finally:
         ar._heatmap = original_heatmap
-    check('(report_run, current layout: metadata/autofocus/ + ROI_probe_autofocus_summary.csv with a cycle column) '
+    check('(report_run, current layout: metadata/experiment_parameters/HiM_parameters.yml, metadata/autofocus/ + '
+          'ROI_probe_autofocus_summary.csv with a cycle column) '
           'heatmap and drift figure written in metadata/autofocus/, no second CSV (the score file of the task is '
           'unchanged), nothing written in metadata/; probe labels from probe_name per cycle (RT3, RT1, RT2); a check '
           'without score / shift does not break the drift figure',
@@ -998,9 +1002,22 @@ def _section_autofocus_report():
           and sorted(written) == sorted([os.path.join(current, 'autofocus', ar.HEATMAP_NAME),
                                          os.path.join(current, 'autofocus', ar.DRIFT_NAME)])
           and all(os.path.getsize(p) > 0 for p in written) and open(live_csv, 'rb').read() == live_before
-          and sorted(os.listdir(current)) == ['HiM_parameters.yml', 'autofocus']
+          and sorted(os.listdir(current)) == ['autofocus', 'experiment_parameters']
           and seen.get('labels') == ['RT3', 'RT1', 'RT2'] and seen.get('threshold') == 0.8,
           (cur_err, written, seen))
+
+    # layout with autofocus/ but HiM_parameters.yml at the top of the metadata folder
+    between = current_run_folder('between_run', {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8, live_rows,
+                                 params_subfolder=False)
+    try:
+        written = ar.report_run(between, log=log)
+        between_err = None
+    except Exception as err:
+        written, between_err = [], err
+    check('(report_run, HiM_parameters.yml in metadata/ with autofocus/) parameters read from the metadata folder; '
+          'heatmap and drift written in autofocus/',
+          between_err is None and ar.parameters_file(between) == ar.Path(between) / 'HiM_parameters.yml'
+          and sorted(os.path.basename(p) for p in written) == sorted([ar.HEATMAP_NAME, ar.DRIFT_NAME]), between_err)
 
     # legacy run: probes x ROIs, no autofocus_scores.csv
     LOGS.clear()
@@ -1065,12 +1082,16 @@ def _section_autofocus_report():
     run_folder(os.path.join('mixed_experiment', 'previous'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_new, 0.8, scores)
     current_run_folder(os.path.join('mixed_experiment', 'current'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8,
                        live_rows)
+    current_run_folder(os.path.join('mixed_experiment', 'between'), {1: 'RT1', 2: 'RT2', 3: 'RT3'}, corr_cur, 0.8,
+                       live_rows, params_subfolder=False)
     LOGS.clear()
     written = ar.summarize_folder(mixed, log=log)
     rows = summary_rows(os.path.join(mixed, ar.SUMMARY_NAME))
-    check('(summarize_folder) finds the runs of both layouts (2 runs x 3 probes x 4 ROIs in the global CSV); no warning '
-          '(both have a per-check file)',
-          len(rows) == 2 * 3 * 4 and {os.path.basename(r['experiment_folder']) for r in rows} == {'previous', 'current'}
+    check('(summarize_folder) finds the runs of every layout (HiM_parameters.yml in metadata/ or in '
+          'metadata/experiment_parameters/; 3 runs x 3 probes x 4 ROIs in the global CSV, experiment folder = the run '
+          'folder, not metadata/); no warning',
+          len(rows) == 3 * 3 * 4
+          and {os.path.basename(r['experiment_folder']) for r in rows} == {'previous', 'current', 'between'}
           and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (len(rows), LOGS))
     other = os.path.join(TMP, 'other_experiment')
     run_folder(os.path.join('other_experiment', 'a'), {1: 'RT1'}, rng.uniform(0.6, 1.0, (1, 4)))

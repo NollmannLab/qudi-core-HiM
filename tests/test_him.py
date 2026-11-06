@@ -331,7 +331,11 @@ if selected('metadata'):
     # Hi-M dummy, 1 probe, 2 ROIs, metadata_template of dummy_config.cfg (template of the repository)
     meta_inj = copy.deepcopy(EXAMPLE)
     meta_inj['probes'] = {1: 'RT1'}
-    meta_exp = files(meta_inj, 'metadata', extra={'operator_note': 'kept in HiM_parameters.yml'})
+    from qudi.tasks.common import sample_info as _si
+    meta_sample = os.path.join(TMP, 'sample_dummy_run.yml')
+    _si.save_sample_file(meta_sample, {'experiment_type': 'DNA-FISH', 'experimenter': 'X'})
+    meta_exp = files(meta_inj, 'metadata', extra={'operator_note': 'kept in HiM_parameters.yml',
+                                                  'sample_file': meta_sample})
     task = make_task(user_config_path=meta_exp)
     t0 = monotonic()
     result, err, _, _ = run(task)
@@ -343,7 +347,7 @@ if selected('metadata'):
     acq = section(meta, 'Acquisition') if meta else {}
     fluidics_meta = section(meta, 'Fluidics') if meta else {}
     exp_content = yaml.safe_load(open(meta_exp))
-    him_global = (yaml.safe_load(open(os.path.join(run_folder, 'HiM_parameters.yml'))) or {}).get(
+    him_global = (yaml.safe_load(open(os.path.join(run_folder, 'experiment_parameters', 'HiM_parameters.yml'))) or {}).get(
         '1- global parameters', {}) if run_folder else {}
     check('(run files) 1 cycle done; no experiment_config.yaml; HiM_parameters.yml "1- global parameters" = every key '
           'of the experiment file with its value (incl. operator_note, not in _EXPERIMENT_KEYS), known keys first',
@@ -351,17 +355,24 @@ if selected('metadata'):
           and not os.path.exists(os.path.join(run_folder, 'experiment_config.yaml'))
           and him_global == exp_content and him_global.get('operator_note') == 'kept in HiM_parameters.yml'
           and list(him_global)[:len(task._EXPERIMENT_KEYS)] == list(task._EXPERIMENT_KEYS)
-          and list(him_global)[-1] == 'operator_note', (err, result, list(him_global)))
+          and list(him_global)[-2:] == ['operator_note', 'sample_file'], (err, result, list(him_global)))
     check('(run files) metadata.yml: Fluidics hybridization / photobleaching = the lists of the injections file',
           fluidics_meta.get('hybridization') == meta_inj['hybridization list']
           and fluidics_meta.get('photobleaching') == meta_inj['photobleaching list'], fluidics_meta)
     check(f'(run files) metadata.yml: Time, sample name, laser lines / powers, 5 z planes, the {N} ROIs with their '
-          f'positions; other sections as in the template',
+          f'positions; other sections as in the template, then the Sample section (sample file of the run)',
           meta is not None and meta['Time'] and acq['sample_name'] == 'Mysample' and acq['laser_lines'] == [488, 561]
           and acq['laser_power_(%)'] == [50.0, 80.0] and acq['number_z_planes'] == 5
           and acq['roi_list_(xyz)'] == [{n: [float(v) for v in roi.get_roi_position(n)]} for n in NAMES]
-          and list(meta) == list(template) and meta['Camera'] == template['Camera'], acq)
-    him_params = yaml.safe_load(open(os.path.join(run_folder, 'HiM_parameters.yml'))) if run_folder else {}
+          and list(meta) == list(template) + ['Sample'] and meta['Camera'] == template['Camera'], acq)
+    check('(run files, dummy) HiM_parameters.yml, injections.yml and sample.yml in <run folder>/experiment_parameters/ '
+          'and not at the top; metadata.yml, movie_name.txt and HiM_task.log at the top',
+          run_folder and sorted(os.listdir(os.path.join(run_folder, 'experiment_parameters')))
+          == ['HiM_parameters.yml', 'injections.yml', 'sample.yml']
+          and not {'HiM_parameters.yml', 'injections.yml', 'sample.yml'} & set(os.listdir(run_folder))
+          and {'metadata.yml', 'movie_name.txt', 'HiM_task.log'} <= set(os.listdir(run_folder)),
+          sorted(os.listdir(run_folder)) if run_folder else None)
+    him_params = yaml.safe_load(open(os.path.join(run_folder, 'experiment_parameters', 'HiM_parameters.yml'))) if run_folder else {}
     check('(run files) HiM_parameters.yml as before (global, fluidic, imaging parameters, ROIs) and movie_name.txt',
           list(him_params) == ['1- global parameters', '2- fluidic parameters', '3- imaging parameters', '4- ROIs']
           and him_params['2- fluidic parameters']['probes'] == {1: 'RT1'} and list(him_params['4- ROIs']) == NAMES
@@ -399,7 +410,7 @@ if selected('sd_z_planes'):
         t0 = monotonic()
         result, err, _, _ = run(task)
         folder = result.get('directory') if result else None
-        params = yaml.safe_load(open(os.path.join(folder, 'HiM_parameters.yml'))) if folder else {}
+        params = yaml.safe_load(open(os.path.join(folder, 'experiment_parameters', 'HiM_parameters.yml'))) if folder else {}
         meta = yaml.safe_load(open(os.path.join(folder, 'metadata.yml'), encoding='utf-8')) if folder else {}
         acq = {k: v for item in meta['Acquisition'] for k, v in item.items()} if meta else {}
         logs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
@@ -524,17 +535,19 @@ if selected('sd_zen_folder'):
     prefix = str(before + 1).zfill(3)
     names = open(os.path.join(folder, 'movie_name.txt')).read().split() if os.path.isdir(folder) else []
     check(f'(ZEN folder) Hi-M SD, 1 probe, {N} ROIs: files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata '
-          f'(local, save_network_path set, no transfer): HiM_parameters.yml, '
-          f'movie_name.txt, injections.yml (copy of the injections file), metadata.yml, HiM_task.log (no '
-          f'experiment_config.yaml) and autofocus/ with every autofocus file (no autofocus_scores.csv); prefix '
+          f'(local, save_network_path set, no transfer): movie_name.txt, metadata.yml, HiM_task.log at the top (no '
+          f'experiment_config.yaml), experiment_parameters/ with HiM_parameters.yml and injections.yml (copy of the '
+          f'injections file), autofocus/ with every autofocus file (no autofocus_scores.csv); prefix '
           f'{prefix} (folders before + 1), names scan_{prefix}_RT1_<roi>_ROI',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == folder
-          and sorted(os.listdir(folder)) == sorted(['HiM_parameters.yml', 'HiM_task.log', 'autofocus',
-                                                    'injections.yml', 'metadata.yml', 'movie_name.txt'])
+          and sorted(os.listdir(folder)) == sorted(['HiM_task.log', 'autofocus', 'experiment_parameters',
+                                                    'metadata.yml', 'movie_name.txt'])
+          and sorted(os.listdir(os.path.join(folder, 'experiment_parameters'))) == ['HiM_parameters.yml',
+                                                                                    'injections.yml']
           and sorted(os.listdir(os.path.join(folder, 'autofocus'))) == sorted(
               ['autofocus_reference.npy', 'correlation.npy', 'reference_images_RT1.npy',
                'ROI_probe_autofocus_summary.csv', 'autofocus_correlation_heatmap.png', 'autofocus_drift.png'])
-          and open(os.path.join(folder, 'injections.yml'), 'rb').read() == open(task.injections_path, 'rb').read()
+          and open(os.path.join(folder, 'experiment_parameters', 'injections.yml'), 'rb').read() == open(task.injections_path, 'rb').read()
           and task.prefix == prefix and names == [f'scan_{prefix}_RT1_{n[4:]}_ROI' for n in NAMES],
           (err, result, os.listdir(folder) if os.path.isdir(folder) else None, names))
     zen_files = [os.path.relpath(p, zen.root) for p in zen_trigger.written + zen_trigger.acquired
@@ -548,6 +561,8 @@ if selected('sd_zen_folder'):
           and len(zen_files) == 2 * N and os.listdir(server) == [zen_name]
           and os.listdir(os.path.join(server, zen_name)) == ['metadata']
           and sorted(os.listdir(os.path.join(server, zen_name, 'metadata'))) == sorted(os.listdir(folder))
+          and sorted(os.listdir(os.path.join(server, zen_name, 'metadata', 'experiment_parameters')))
+          == sorted(os.listdir(os.path.join(folder, 'experiment_parameters')))  # experiment_parameters/ copied
           and sorted(os.listdir(os.path.join(server, zen_name, 'metadata', 'autofocus')))
           == sorted(os.listdir(os.path.join(folder, 'autofocus')))  # the autofocus/ subfolder is copied too
           and open(os.path.join(server, zen_name, 'metadata', 'HiM_task.log'), 'rb').read()
@@ -578,10 +593,12 @@ if selected('sd_zen_folder'):
     folder = sd_folder(local, zen.created[-1]) if zen.created else ''
     meta_path = os.path.join(folder, 'metadata.yml')
     meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else {}
-    check('(sample file) Hi-M SD: sample.yml (exact copy) in the metadata folder; metadata.yml ends with a Sample '
+    check('(sample file) Hi-M SD: sample.yml (exact copy) in metadata/experiment_parameters/ (not at the top); '
+          'metadata.yml (top) ends with a Sample '
           'section holding the values of the file (field not in the template included)',
           err is None and result and result['cycles_done'] == 1
-          and open(os.path.join(folder, 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
+          and open(os.path.join(folder, 'experiment_parameters', 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
+          and not os.path.exists(os.path.join(folder, 'sample.yml'))
           and list(meta)[-1] == 'Sample'
           and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Mus musculus'}, {'experimenter': 'X'},
                                  {'old_field': 'kept'}],
@@ -758,8 +775,8 @@ if selected('sd_zen_folder'):
           (err, on_server, acquired, metadata))
     check('(transfer, server reachable) the copies are identical to the local files',
           all(open(os.path.join(server, f), 'rb').read() == open(os.path.join(zen.root, f), 'rb').read() for f in acquired)
-          and open(os.path.join(server, zen_name, 'metadata', 'HiM_parameters.yml'), 'rb').read()
-          == open(os.path.join(folder, 'HiM_parameters.yml'), 'rb').read())
+          and open(os.path.join(server, zen_name, 'metadata', 'experiment_parameters', 'HiM_parameters.yml'), 'rb').read()
+          == open(os.path.join(folder, 'experiment_parameters', 'HiM_parameters.yml'), 'rb').read())
     end_state_ok('transfer, server reachable', t0)
 
     # 2 cycles: server folder created early; the Block2 files of cycle 1 sent during the fluidics of cycle 2
@@ -831,7 +848,7 @@ if selected('sd_zen_folder'):
           'files (left in the ZEN folder)',
           t_int is not None and result is None and len(zen_trigger.acquired) > acquired_before
           and os.path.join(zen_name, 'metadata', 'HiM_task.log') in on_server
-          and os.path.join(zen_name, 'metadata', 'HiM_parameters.yml') in on_server
+          and os.path.join(zen_name, 'metadata', 'experiment_parameters', 'HiM_parameters.yml') in on_server
           and not any(f.endswith('.czi') for f in on_server), on_server)
     end_state_ok('transfer, interrupt', t0)
     zen_box.stop()
@@ -1519,7 +1536,7 @@ movies = open(os.path.join(folder, 'movie_name.txt')).read().split() if folder e
 exp_movies = [f'scan_001_{rt}_{n[4:]}_ROI' for rt in ('RT1', 'RT2') for n in NAMES]
 check(f'(full run) data folder {os.path.relpath(folder, TMP) if folder else None} = data/<day>/001_HiM_Mysample; '
       f'movie_name.txt = {movies[:2]}...', folder.endswith('001_HiM_Mysample') and movies == exp_movies, movies)
-params = yaml.safe_load(open(os.path.join(folder, 'HiM_parameters.yml'))) if folder else {}
+params = yaml.safe_load(open(os.path.join(folder, 'experiment_parameters', 'HiM_parameters.yml'))) if folder else {}
 check('(full run) HiM_parameters.yml: global parameters, probes, both lists, imaging parameters, ROI positions',
       list(params) == ['1- global parameters', '2- fluidic parameters', '3- imaging parameters', '4- ROIs']
       and params['2- fluidic parameters']['probes'] == {1: 'RT1', 2: 'RT2'}
@@ -1712,7 +1729,7 @@ if not QUICK:
     movies = open(os.path.join(run_folder, 'movie_name.txt')).read().split() if run_folder else []
     check(f'(SD) HiM_parameters.yml and movie_name.txt in that folder; prefix 002 (1 folder in zen_saving_path before '
           f'ZEN started + 1), names scan_002_RT1_<roi>_ROI ({movies[:1]})',
-          os.path.exists(os.path.join(run_folder, 'HiM_parameters.yml'))
+          os.path.exists(os.path.join(run_folder, 'experiment_parameters', 'HiM_parameters.yml'))
           and movies == [f'scan_002_RT1_{n[4:]}_ROI' for n in NAMES], movies)
     ph = [m for lvl, m in logs if m.startswith('Autofocus check cycle')]
     check(f'(SD) autofocus check logged once per ROI ({N} ROIs), all passed (same image as the reference)',

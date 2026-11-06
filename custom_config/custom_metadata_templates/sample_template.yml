@@ -1,6 +1,6 @@
 # Sample template: fields of the sample file (one file per biological sample), edited from the experiment
-# configurator ("Edit" next to the sample file) and copied into the metadata folder of every run (sample.yml,
-# 'Sample' section of metadata.yml).
+# configurator ("Edit" next to the sample file) and copied into the metadata folder of every run
+# (experiment_parameters/sample.yml, 'Sample' section of metadata.yml).
 #
 # Format - one entry per field, in the order of the dialog:
 #   <field name>: {type: <text | choice | number>, choices: [...], min: <number>, max: <number>, required: <true | false>}

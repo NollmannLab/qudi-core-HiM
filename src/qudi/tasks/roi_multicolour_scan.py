@@ -47,7 +47,7 @@ import yaml
 from qudi.core.connector import Connector
 from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder, local_dated_root
 from qudi.tasks.common.data_transfer import copy_metadata_to_server
-from qudi.tasks.common.run_metadata import (fill_run_metadata, optional_metadata_template,
+from qudi.tasks.common.run_metadata import (experiment_parameters_folder, fill_run_metadata, optional_metadata_template,
                                             write_metadata)
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
@@ -89,14 +89,17 @@ class RoiScanTaskBase(ProgressModuleTask):
                     of the list, in list order.
 
     Data (all setups): qudi creates the run folder <root>/YYYY_MM_DD/NNN_Scan_<sample>[_<sample_tag>]/
-    (NNN: self.prefix, tasks/common/data_folders.py create_run_folder) and writes there parameters.yml
-    (sample name, start_roi, the positions of the ROIs scanned in this run and, under 'experiment parameters',
-    every key of the experiment file - the file itself is not copied) and movie_name.txt (one
-    file name per imaged ROI) and, with a
+    (NNN: self.prefix, tasks/common/data_folders.py create_run_folder) and writes there:
+        <run folder>/
+            movie_name.txt, metadata.yml
+            experiment_parameters/   parameters.yml, sample.yml
+    parameters.yml: sample name, start_roi, the positions of the ROIs scanned in this run and, under
+    'experiment parameters', every key of the experiment file - the file itself is not copied; movie_name.txt:
+    one file name per imaged ROI; with a
     metadata template, metadata.yml (the template with Time and the Acquisition fields sample_name,
     laser_lines, laser_power_(%), number_z_planes when the experiment file has it, roi_list_(xyz): the ROIs
     of this run with their positions; other fields as in the template). With a sample file (key sample_file):
-    sample.yml (exact copy of the sample file, read before the run) and its content as the 'Sample' section of
+    experiment_parameters/sample.yml (exact copy of the sample file, read before the run) and its content as the 'Sample' section of
     metadata.yml (appended after the template sections, or filled in the template's 'Sample' section). <root> is chosen before any hardware call, after the confirmation hook
     (hook _choose_data_root; default choose_data_root): save_network_path (server) when it is set and
     writable, otherwise save_path (local; a server folder that is not reachable gives a warning in the log
@@ -143,6 +146,7 @@ class RoiScanTaskBase(ProgressModuleTask):
         self.roi_names = []
         self.prefix = None
         self.directory = None
+        self._parameters_dir = None     # <run folder>/experiment_parameters
         self.start_roi = ''
         self._scan_rois = []      # ROIs to scan in this run, in list order
         self._scanned_rois = []   # ROIs whose imaging has finished, for the summary
@@ -249,6 +253,7 @@ class RoiScanTaskBase(ProgressModuleTask):
 
         # 6. new data folder (hook), parameters.yml (with the experiment keys) and metadata.yml
         self.directory = self._create_data_folder()
+        self._parameters_dir = experiment_parameters_folder(self.directory)  # parameter files of the run
         self._save_metadata_file()
         self._save_run_files()
 
@@ -397,7 +402,7 @@ class RoiScanTaskBase(ProgressModuleTask):
     # ======================================================================================
 
     def _save_metadata_file(self) -> None:
-        """Write parameters.yml: the sample name, start_roi, the stage position of each ROI scanned in this run and,
+        """Write experiment_parameters/parameters.yml: the sample name, start_roi, the stage position of each ROI scanned in this run and,
         under 'experiment parameters', every key of the experiment file with its value as read (the experiment
         file itself is not copied into the run folder). Purely descriptive, not used by the task.
         """
@@ -408,7 +413,7 @@ class RoiScanTaskBase(ProgressModuleTask):
         # every key of the experiment file, in file order
         metadata['experiment parameters'] = dict(self._user_params)
 
-        path = os.path.join(self.directory, 'parameters.yml')
+        path = os.path.join(self._parameters_dir, 'parameters.yml')
         with open(path, 'w') as outfile:
             yaml.safe_dump(metadata, outfile, default_flow_style=False, sort_keys=False)
         self.log.info(f'Saved metadata to {path}')
@@ -422,8 +427,9 @@ class RoiScanTaskBase(ProgressModuleTask):
             positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self._scan_rois}
             metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
                                          self._user_params.get('num_z_planes'))
-        # sample file: copied as sample.yml, its content added as the 'Sample' section of metadata.yml
-        add_sample_to_run(self.directory, self._sample, metadata)
+        # sample file: copied as experiment_parameters/sample.yml, its content added as the 'Sample' section of
+        # metadata.yml (top of the run folder)
+        add_sample_to_run(self._parameters_dir, self._sample, metadata)
         if metadata is not None:
             path = write_metadata(self.directory, metadata)
             self.log.info(f'Saved the microscope metadata to {path}')
@@ -451,8 +457,8 @@ class RoiScanSDTask(SDImagingMixin, RoiScanTaskBase):
     runs as usual). qudi creates <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata (local_dated_root,
     created and write-tested before any hardware call, YYYY-MM-DD = start of the task; create_mirror_folder,
     metadata_<HHMMSS> if that folder already holds files) - always local - and writes there
-    parameters.yml, movie_name.txt, metadata.yml and, with a sample file, sample.yml
-    (metadata.yml then has the 'Sample' section). Nothing is written in the ZEN folder. self.prefix is the number of folders that were in zen_saving_path before ZEN started + 1, on 3
+    movie_name.txt, metadata.yml and experiment_parameters/ (parameters.yml and, with a sample file, sample.yml;
+    metadata.yml then has the 'Sample' section). Nothing is written in the ZEN folder. self.prefix is the number of folders that were in zen_saving_path before ZEN started + 1, on 3
     digits; movie names scan_<prefix>_<sample_tag>_<roi number>_ROI (scan_<prefix>_<roi number>_ROI without tag).
 
     Copy of the metadata to the server: with save_network_path set, once the ZEN folder is known an info

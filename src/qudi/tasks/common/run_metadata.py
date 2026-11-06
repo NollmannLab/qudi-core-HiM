@@ -13,6 +13,9 @@ qudi-core-HiM: files describing a task run, written in its run folder (ROI scan,
     the template with Time and the Acquisition fields known to the ROI scan and Hi-M tasks.
   - optional_metadata_template(task): template of the task option metadata_template - None (one
     warning) when the option is not set, RuntimeError when the file is missing or unreadable.
+  - experiment_parameters_folder(metadata_folder) -> <metadata_folder>/experiment_parameters (created): the
+    parameter files of a run (HiM_parameters.yml, injections.yml, parameters.yml, sample.yml); metadata.yml,
+    movie_name.txt and the task log stay at the top of the metadata folder.
 
 Modified with Claude code (Anthropic)
 
@@ -27,7 +30,8 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-__all__ = ['copy_experiment_file', 'load_metadata_template', 'set_metadata_field', 'write_metadata',
+__all__ = ['EXPERIMENT_PARAMETERS_SUBFOLDER', 'experiment_parameters_folder', 'copy_experiment_file',
+           'load_metadata_template', 'set_metadata_field', 'write_metadata',
            'fill_run_metadata', 'optional_metadata_template']
 
 import copy
@@ -38,7 +42,15 @@ from datetime import datetime
 from ruamel.yaml import YAML
 
 EXPERIMENT_COPY_NAME = 'experiment_config.yaml'
+EXPERIMENT_PARAMETERS_SUBFOLDER = 'experiment_parameters'  # parameter files of a run, in its metadata folder
 NO_TEMPLATE_WARNING = 'no metadata template set - metadata.yml not written'
+
+
+def experiment_parameters_folder(metadata_folder) -> str:
+    """<metadata_folder>/experiment_parameters, created when missing; returns its path."""
+    path = os.path.join(metadata_folder, EXPERIMENT_PARAMETERS_SUBFOLDER)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def copy_experiment_file(user_config_path, folder) -> str:

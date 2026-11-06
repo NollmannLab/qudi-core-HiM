@@ -6,6 +6,28 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Run files: experiment_parameters/ subfolder
+
+#### Changed
+
+- Parameter files of a run grouped in `<metadata folder>/experiment_parameters/`
+  (`run_metadata.EXPERIMENT_PARAMETERS_SUBFOLDER`, `experiment_parameters_folder()`), created right after the
+  metadata / run folder (2026-11-05):
+  - Hi-M (all setups): HiM_parameters.yml, injections.yml, sample.yml. injections.yml is now copied by
+    `HiMTaskBase` (all setups; the spinning-disk task did it before).
+  - ROI multicolour scan (all setups): parameters.yml, sample.yml.
+  - Unchanged at the top of the metadata folder: metadata.yml, movie_name.txt, HiM_task.log; autofocus/ unchanged.
+  - `sample_info.add_sample_to_run(folder, ...)`: the tasks pass the subfolder (sample.yml there, metadata.yml
+    at the top); log message with the path of the injections copy.
+  - `autofocus_report`: HiM_parameters.yml read from `<metadata>/experiment_parameters/` when it exists, otherwise
+    from the metadata folder (older runs, legacy qudi-HiM); `summarize_folder` finds the runs of every layout (new
+    `parameters_file()`).
+  - Server copy of the metadata (Hi-M cleanup transfer, ROI scan `copy_metadata_to_server`): recursive, the
+    subfolder is copied (tested).
+  - Comments updated: SD experiment definitions (sample_file), sample_template.yml.
+  - Tests: tests/test_him.py, tests/test_roi_scan.py, tests/test_logic_helpers.py (paths, folder tree, report
+    layouts, server copy).
+
 ### Hi-M SD online transfer: acquisitions never sent
 
 #### Fixed

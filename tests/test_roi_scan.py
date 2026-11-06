@@ -442,7 +442,7 @@ def _section_start_roi():
     res = out.get('result') or {}
     folder = last_folder()
     movies = open(os.path.join(folder, 'movie_name.txt')).read().split() if folder else []
-    meta = yaml.safe_load(open(os.path.join(folder, 'parameters.yml'))) if folder else {}
+    meta = yaml.safe_load(open(os.path.join(folder, 'experiment_parameters', 'parameters.yml'))) if folder else {}
     msgs = [m for _, m in LOGS]
     check("(dummy '') all 6 ROIs in list order, new data folder, summary",
           res.get('imaged_rois') == NAMES and new_folder and res.get('directory') == folder
@@ -459,7 +459,7 @@ def _section_start_roi():
     for start, first in (('ROI_005', 5), (' ROI_002 ', 2)):
         task, out, new_folder = run_dummy(start)
         res = out.get('result') or {}
-        meta = yaml.safe_load(open(os.path.join(last_folder(), 'parameters.yml')))
+        meta = yaml.safe_load(open(os.path.join(last_folder(), 'experiment_parameters', 'parameters.yml')))
         msgs = [m for _, m in LOGS]
         moved = [m for m in msgs if m.startswith('Moving to ')]
         n = 6 - first
@@ -1042,6 +1042,10 @@ def _section_data_folder():
             box.close()
         app.processEvents()
 
+    def tree(folder):
+        """Files under folder (recursive), relative paths."""
+        return sorted(os.path.relpath(os.path.join(d, n), folder) for d, _, fs in os.walk(folder) for n in fs)
+
     def run_folders(root):
         return sorted(glob.glob(os.path.join(root, DAY, '*')))
 
@@ -1067,11 +1071,12 @@ def _section_data_folder():
         expected = [f'scan_{prefix}_{TAG}_{r[4:]}_ROI' for r in ROIS]
         check(f'(1 ROI scan SD, run {run_number}) files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata (local '
               f'even with save_network_path set): '
-              f'parameters.yml, movie_name.txt, metadata.yml (no experiment_config.yaml); prefix {prefix} (folders before '
-              f'+ 1); names {expected}; no HiM_task.log',
+              f'movie_name.txt, metadata.yml and experiment_parameters/parameters.yml (no experiment_config.yaml); '
+              f'prefix {prefix} (folders before + 1); names {expected}; no HiM_task.log',
               err is None and result.get('directory') == run_folder and result.get('imaged_rois') == ROIS
               and task.prefix == prefix and movies(run_folder) == expected
-              and sorted(os.listdir(run_folder)) == ['metadata.yml', 'movie_name.txt', 'parameters.yml'],
+              and sorted(os.listdir(run_folder)) == ['experiment_parameters', 'metadata.yml', 'movie_name.txt']
+              and os.listdir(os.path.join(run_folder, 'experiment_parameters')) == ['parameters.yml'],
               (err, result, task.prefix, os.listdir(run_folder) if os.path.isdir(run_folder) else None))
         check(f'(1 ROI scan SD, run {run_number}) nothing created or modified in the ZEN saving folder (only the folder '
               f'ZEN created, still empty); no pop-up, no warning',
@@ -1084,11 +1089,12 @@ def _section_data_folder():
         check(f'(1 ROI scan SD, run {run_number}) save_network_path set: metadata folder copied at the end to '
               f'<save_network_path>/<ZEN folder name>/metadata (same files, same content); destination announced, '
               f'number of files sent logged',
-              os.path.isdir(server_copy) and sorted(os.listdir(server_copy)) == sorted(os.listdir(run_folder))
+              os.path.isdir(server_copy) and tree(server_copy) == tree(run_folder)  # recursive: experiment_parameters/
+              and os.path.join('experiment_parameters', 'parameters.yml') in tree(server_copy)
               and all(open(os.path.join(server_copy, n), 'rb').read() == open(os.path.join(run_folder, n), 'rb').read()
-                      for n in os.listdir(run_folder))
+                      for n in tree(run_folder))
               and f'Metadata will also be copied to {server_copy} at the end of the run' in msgs
-              and any(m.startswith(f'Metadata copy: {len(os.listdir(run_folder))} file(s) sent') for m in msgs),
+              and any(m.startswith(f'Metadata copy: {len(tree(run_folder))} file(s) sent') for m in msgs),
               (os.listdir(server_copy) if os.path.isdir(server_copy) else None, msgs[-3:]))
     # metadata folder already holding files -> metadata_<HHMMSS>
     other = data_folders.create_mirror_folder(local_sd(local), zen_folder, task.log)
@@ -1125,7 +1131,7 @@ def _section_data_folder():
         result, err = run(task, {'start_roi': ''})
         run_folder = mirror(local_sd(local), ZEN.created[-1])
         warnings = [m for lvl, m in LOGS if lvl >= logging.WARNING]
-        n_files = len(os.listdir(run_folder)) if os.path.isdir(run_folder) else -1
+        n_files = len(tree(run_folder)) if os.path.isdir(run_folder) else -1
         expected_warning = (f'Metadata copy: {n_files} of {n_files} file(s) not sent to '
                             f'{os.path.join(server, os.path.basename(ZEN.created[-1]), "metadata")} - they are in {run_folder}')
         check(f'(2 save_network_path {label}) files under <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata, scan '
@@ -1217,8 +1223,8 @@ def _section_data_folder():
     template_sections = list(yaml.safe_load(open(TEMPLATE, encoding='utf-8')))
     check('(5b SD, sample_file set) sample.yml (exact copy) in the metadata folder; metadata.yml: template sections '
           'then a Sample section with the values of the file, in order',
-          err is None and os.path.exists(os.path.join(run_folder, 'sample.yml'))
-          and open(os.path.join(run_folder, 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
+          err is None and os.path.exists(os.path.join(run_folder, 'experiment_parameters', 'sample.yml'))
+          and open(os.path.join(run_folder, 'experiment_parameters', 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
           and list(meta) == template_sections + ['Sample']
           and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Drosophila melanogaster'},
                                  {'formamide_percent': 50}, {'experimenter': 'X'}],
@@ -1238,7 +1244,8 @@ def _section_data_folder():
         folder_run = result.get('directory') if result else ''
         meta = yaml.safe_load(open(os.path.join(folder_run, 'metadata.yml'), encoding='utf-8')) if folder_run else {}
         check(f'(5b dummy, sample_file {label}) no change: no sample.yml, no Sample section, no warning',
-              err is None and 'sample.yml' not in os.listdir(folder_run) and 'Sample' not in meta
+              err is None and 'sample.yml' not in os.listdir(folder_run)
+              and 'sample.yml' not in os.listdir(os.path.join(folder_run, 'experiment_parameters')) and 'Sample' not in meta
               and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (err, os.listdir(folder_run) if folder_run else None))
 
     # ------------------------------------------------------------------ Hi-M (real dummy modules)
@@ -1301,12 +1308,14 @@ def _section_data_folder():
     names = movies(run_folder)
     prefix = str(len([n for n in os.listdir(ZEN.root) if os.path.isdir(os.path.join(ZEN.root, n))])).zfill(3)
     check(f'(5 Hi-M SD, 1 probe, 2 ROIs) files in <save_path>/<YYYY-MM-DD>/<ZEN folder name>/metadata '
-          f'(HiM_parameters.yml, movie_name.txt, injections.yml, HiM_task.log); names scan_{prefix}_RT1_<roi>_ROI; '
+          f'(experiment_parameters/HiM_parameters.yml and injections.yml, movie_name.txt, HiM_task.log); names '
+          f'scan_{prefix}_RT1_<roi>_ROI; '
           f'save_network_path set, no transfer_data: only the metadata folder (with HiM_task.log) copied to '
           f'<server>/<ZEN folder name>/metadata, no image; nothing written by qudi in the ZEN folder',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == run_folder
-          and {'HiM_parameters.yml', 'injections.yml', 'HiM_task.log', 'metadata.yml', 'autofocus'}
-          <= set(os.listdir(run_folder)) and 'experiment_config.yaml' not in os.listdir(run_folder)
+          and {'experiment_parameters', 'HiM_task.log', 'metadata.yml', 'autofocus'} <= set(os.listdir(run_folder))
+          and {'HiM_parameters.yml', 'injections.yml'} <= set(os.listdir(os.path.join(run_folder, 'experiment_parameters')))
+          and 'experiment_config.yaml' not in os.listdir(run_folder)
           and names == [f'scan_{prefix}_RT1_{r[4:]}_ROI' for r in ROIS]
           and os.listdir(server) == [os.path.basename(ZEN.created[-1])]
           and sorted(os.listdir(mirror(server, ZEN.created[-1]))) == sorted(os.listdir(run_folder))
@@ -1320,7 +1329,7 @@ def _section_data_folder():
     check('(6 ROI scan dummy, save_path only) save_path/YYYY_MM_DD/001_Scan_<sample>_<tag> with parameters.yml and '
           'movie_name.txt; names scan_001_<tag>_<roi number>_ROI; no pop-up, no warning',
           err is None and result.get('directory') == run_folder
-          and os.path.exists(os.path.join(run_folder, 'parameters.yml'))
+          and os.path.exists(os.path.join(run_folder, 'experiment_parameters', 'parameters.yml'))
           and movies(run_folder) == [f'scan_001_{TAG}_{r[4:]}_ROI' for r in ROIS]
           and not server_boxes() and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (err, result))
     exp = _short.experiment(TMP, 'him_experiment.yaml', 'him_dummy', injections_path=inj_path)
@@ -1329,7 +1338,7 @@ def _section_data_folder():
     check(f'(6 Hi-M dummy, save_path only) save_path/YYYY_MM_DD/001_HiM_{sample} with HiM_parameters.yml and '
           f'movie_name.txt; names scan_001_RT1_<roi>_ROI; no pop-up',
           err is None and result and result['cycles_done'] == 1 and result['directory'] == run_folder
-          and os.path.exists(os.path.join(run_folder, 'HiM_parameters.yml'))
+          and os.path.exists(os.path.join(run_folder, 'experiment_parameters', 'HiM_parameters.yml'))
           and movies(run_folder) == [f'scan_001_RT1_{r[4:]}_ROI' for r in ROIS] and not server_boxes(),
           (err, result))
 
@@ -1362,7 +1371,7 @@ def _section_data_folder():
           and meta['Fluidics'] == template['Fluidics']
           and acq['number_z_planes'] == acquisition(template)['number_z_planes']
           and acq['exposure_time_(s)'] == acquisition(template)['exposure_time_(s)'], meta)
-    params = yaml.safe_load(open(os.path.join(run_folder, 'parameters.yml'))) if os.path.isdir(run_folder) else {}
+    params = yaml.safe_load(open(os.path.join(run_folder, 'experiment_parameters', 'parameters.yml'))) if os.path.isdir(run_folder) else {}
     exp_content = yaml.safe_load(open(exp))
     check('(7 run files, template set) parameters.yml: sample name, start_roi and ROI positions as before, plus '
           '"experiment parameters" = every key of the experiment file in file order (e.g. imaging_sequence); '
@@ -1383,7 +1392,7 @@ def _section_data_folder():
           'completes, no metadata.yml (parameters.yml still written, no experiment_config.yaml)',
           err is None and result.get('imaged_rois') == ROIS and warnings == [run_metadata.NO_TEMPLATE_WARNING]
           and not os.path.exists(os.path.join(run_folder, 'metadata.yml'))
-          and os.path.exists(os.path.join(run_folder, 'parameters.yml'))
+          and os.path.exists(os.path.join(run_folder, 'experiment_parameters', 'parameters.yml'))
           and not os.path.exists(os.path.join(run_folder, 'experiment_config.yaml')), (err, warnings))
 
     # (9) template path wrong / file unreadable

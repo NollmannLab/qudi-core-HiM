@@ -16,8 +16,8 @@ fields:
     required: true
     default: "DAPI"
 
-  # sample file (YAML describing the biological sample, edited from the configurator): copied as sample.yml
-  # into the metadata folder of the run and added as the 'Sample' section of metadata.yml
+  # sample file (YAML describing the biological sample, edited from the configurator): copied as
+  # experiment_parameters/sample.yml in the metadata folder of the run and added as the 'Sample' section of metadata.yml
   sample_file:
     required: true
     default: ""

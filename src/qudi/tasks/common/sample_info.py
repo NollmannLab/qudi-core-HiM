@@ -16,7 +16,8 @@ multicolour scan). Pure functions, no Qt.
     run does not depend on the file afterwards.
   - optional_sample(path) -> SampleFile, or None when path is empty (experiment key sample_file is optional in
     the task code: absent or empty -> no sample file, nothing changes).
-  - add_sample_to_run(folder, sample, metadata=None): <folder>/sample.yml (byte copy) and a 'Sample' section in
+  - add_sample_to_run(folder, sample, metadata=None): <folder>/sample.yml (byte copy; the tasks pass the
+    experiment_parameters/ subfolder of the metadata folder) and a 'Sample' section in
     metadata (template layout: list of one-key mappings; fields of an existing 'Sample' section of the
     metadata template keep their place).
 
@@ -47,7 +48,7 @@ import yaml
 
 FIELD_TYPES = ('text', 'choice', 'number')
 FIELD_KEYS = ('type', 'choices', 'min', 'max', 'required')
-SAMPLE_COPY_NAME = 'sample.yml'   # copy of the sample file in the metadata folder of a run
+SAMPLE_COPY_NAME = 'sample.yml'   # copy of the sample file in <metadata folder>/experiment_parameters/ of a run
 SAMPLE_SECTION = 'Sample'         # section of metadata.yml holding the sample file content
 
 
@@ -155,9 +156,10 @@ def optional_sample(path):
 
 
 def add_sample_to_run(folder, sample, metadata=None) -> None:
-    """Attach the sample file to a run: <folder>/sample.yml (exact copy of the file read before the run) and,
-    with metadata (dict of metadata.yml), its values in the 'Sample' section. Nothing is done without a
-    sample (sample None)."""
+    """Attach the sample file to a run: <folder>/sample.yml (exact copy of the file read before the run; folder:
+    the experiment_parameters/ subfolder of the metadata folder for the tasks) and, with metadata (dict of
+    metadata.yml, written at the top of the metadata folder), its values in the 'Sample' section. Nothing is done
+    without a sample (sample None)."""
     if sample is None:
         return
     # exact copy of the sample file, as read before the run

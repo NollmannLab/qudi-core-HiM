@@ -8,7 +8,7 @@ legacy qudi-HiM software. No GUI backend: the figures are built with matplotlib.
 window), so the module runs in a qudi task thread and on a computer without a display.
 
 Layouts of one run:
-  - current qudi-core task: HiM_parameters.yml in the metadata folder, the autofocus files in
+  - current qudi-core task: HiM_parameters.yml in <metadata folder>/experiment_parameters/, the autofocus files in
     <metadata folder>/autofocus/: correlation.npy and ROI_probe_autofocus_summary.csv written by the task as the
     run goes (columns experiment_folder, roi_name, probe_name, correlation, cycle, shift_y_px, shift_x_px,
     passed - qudi.tasks.common.autofocus_check.SCORES_COLUMNS);
@@ -16,7 +16,9 @@ Layouts of one run:
     score, shift_y_px, shift_x_px, passed);
   - legacy qudi-HiM: HiM_parameters.yml and correlation.npy in the metadata folder, no per-check file.
 The autofocus files are read from (and the report written to) <metadata folder>/autofocus/ when that subfolder
-exists, otherwise the metadata folder itself.
+exists, otherwise the metadata folder itself; HiM_parameters.yml from <metadata folder>/experiment_parameters/ when
+it is there, otherwise the metadata folder (runs of the previous qudi-core version that already had autofocus/
+keep it in the metadata folder).
 Inputs:
   - HiM_parameters.yml: ROI names ('4- ROIs'), probes ('2- fluidic parameters' -> 'probes') and
     correlation_threshold ('1- global parameters'), when present;
@@ -33,8 +35,8 @@ otherwise (legacy) the probes sorted by their key (tube number), a note says tha
     qudi-core and the legacy layouts only, ROI_probe_autofocus_summary.csv (one row per ROI / probe) - a run of
     the current task already has that file.
   - summarize_folder(root_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) -> list of written paths: every
-    metadata folder under root_folder with HiM_parameters.yml and correlation.npy (in the folder or in its
-    autofocus/ subfolder; same ROIs required), probes concatenated as "<probe> | <experiment folder>", global
+    metadata folder under root_folder with HiM_parameters.yml (in the folder or in its experiment_parameters/
+    subfolder) and correlation.npy (in the folder or in its autofocus/ subfolder; same ROIs required), probes concatenated as "<probe> | <experiment folder>", global
     heatmap and CSV in root_folder.
 threshold: correlation_threshold of the run when present, otherwise DEFAULT_THRESHOLD; ROIs whose mean score is
 below it are highlighted in red. vmin / vmax: colour scale of the score.
@@ -60,8 +62,8 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-__all__ = ['DEFAULT_THRESHOLD', 'HEATMAP_NAME', 'SUMMARY_NAME', 'DRIFT_NAME', 'autofocus_folder', 'load_run',
-           'report_run', 'summarize_folder', 'main']
+__all__ = ['DEFAULT_THRESHOLD', 'HEATMAP_NAME', 'SUMMARY_NAME', 'DRIFT_NAME', 'parameters_file', 'autofocus_folder',
+           'load_run', 'report_run', 'summarize_folder', 'main']
 
 import argparse
 import csv
@@ -75,6 +77,7 @@ import yaml
 from matplotlib.figure import Figure
 
 from qudi.tasks.common.autofocus_check import AUTOFOCUS_SUBFOLDER, SCORES_FILE_NAME
+from qudi.tasks.common.run_metadata import EXPERIMENT_PARAMETERS_SUBFOLDER
 
 DEFAULT_THRESHOLD = 0.7   # threshold when the run has no correlation_threshold
 HEATMAP_NAME = 'autofocus_correlation_heatmap.png'
@@ -95,6 +98,20 @@ _log = logging.getLogger(__name__)
 def _read_scores_csv(path) -> list:
     with open(path, newline='', encoding='utf-8') as f:
         return list(csv.DictReader(f))
+
+
+def parameters_file(metadata_folder) -> Path:
+    """<metadata_folder>/experiment_parameters/HiM_parameters.yml when it exists (current task), else
+    <metadata_folder>/HiM_parameters.yml (older runs, legacy qudi-HiM)."""
+    folder = Path(metadata_folder)
+    new = folder / EXPERIMENT_PARAMETERS_SUBFOLDER / PARAMETERS_NAME
+    return new if new.is_file() else folder / PARAMETERS_NAME
+
+
+def _metadata_folder_of(parameters_path) -> Path:
+    """Metadata folder of a HiM_parameters.yml found on disk (its folder, or the parent of experiment_parameters/)."""
+    parent = Path(parameters_path).parent
+    return parent.parent if parent.name == EXPERIMENT_PARAMETERS_SUBFOLDER else parent
 
 
 def autofocus_folder(metadata_folder) -> Path:
@@ -127,7 +144,7 @@ def load_run(metadata_folder, log=None) -> dict:
     log = log or _log
     folder = Path(metadata_folder)
     data_folder = autofocus_folder(folder)
-    with open(folder / PARAMETERS_NAME, 'r', encoding='utf-8') as f:
+    with open(parameters_file(folder), 'r', encoding='utf-8') as f:
         params = yaml.safe_load(f) or {}
     roi_names = list((params.get('4- ROIs') or {}).keys())
     probes = (params.get('2- fluidic parameters') or {}).get('probes') or {}
@@ -280,13 +297,13 @@ def report_run(metadata_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) ->
 
 
 def summarize_folder(root_folder, threshold=None, vmin=0.5, vmax=1.0, log=None) -> list:
-    """Every metadata folder under root_folder with HiM_parameters.yml and correlation.npy (in the folder or in its
-    autofocus/ subfolder; same ROIs required): global heatmap and CSV in root_folder; returns the written paths."""
+    """Every metadata folder under root_folder with HiM_parameters.yml (in the folder or in experiment_parameters/)
+    and correlation.npy (in the folder or in autofocus/; same ROIs required): global heatmap and CSV in root_folder; returns the written paths."""
     log = log or _log
     root = Path(root_folder)
-    folders = sorted({p.parent for p in root.rglob(PARAMETERS_NAME)
-                      if (autofocus_folder(p.parent) / CORRELATION_NAME).is_file()})
-    for p in sorted({p.parent for p in root.rglob(PARAMETERS_NAME)} - set(folders)):
+    candidates = {_metadata_folder_of(p) for p in root.rglob(PARAMETERS_NAME)}
+    folders = sorted(f for f in candidates if (autofocus_folder(f) / CORRELATION_NAME).is_file())
+    for p in sorted(candidates - set(folders)):
         log.warning(f'Missing {CORRELATION_NAME} in {p}')
     if not folders:
         raise FileNotFoundError(f'No metadata folder with {PARAMETERS_NAME} and {CORRELATION_NAME} under {root}')
