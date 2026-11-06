@@ -62,7 +62,7 @@ from qudi.tasks.common import autofocus_check
 from qudi.tasks.common import run_metadata as run_metadata_module
 from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder, local_dated_root
 from qudi.tasks.common.data_transfer import DataTransfer
-from qudi.tasks.common.popups import show_warning_popup
+from qudi.tasks.common.popups import show_info_popup, show_warning_popup
 from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
 from qudi.util import autofocus_report
 from qudi.tasks.common.run_metadata import (experiment_parameters_folder, fill_run_metadata, optional_metadata_template,
@@ -71,6 +71,16 @@ from qudi.tasks.common.sample_info import add_sample_to_run, optional_sample
 from qudi.tasks.common.imaging_steps import SDImagingMixin, RAMMImagingMixin, DummyImagingMixin
 from qudi.tasks.common.progress import ProgressModuleTask
 from qudi.tasks.fluidics import FluidicsSDTask, FluidicsRAMMTask
+
+
+class HiMRunStopped(Exception):
+    """Expected stop of a Hi-M run decided by the task itself (e.g. the autofocus check): not a crash. source names
+    what stopped the run (log lines and pop-up)."""
+
+    def __init__(self, reason, source='autofocus check'):
+        super().__init__(reason)
+        self.reason = reason
+        self.source = source
 
 
 class _Invoker(QtCore.QObject):
@@ -230,6 +240,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self.roi_names = []
         self.directory = None
         self._parameters_dir = None  # <metadata folder>/experiment_parameters
+        self._stop_info = None       # HiMRunStopped of the run: {'source', 'reason', ...details for the pop-up}
         self.prefix = ''
         self.sample_name = None
         self.save_path = None
@@ -376,27 +387,38 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self._save_parameters(params, injections)
         self._save_run_files(injections)
 
-        # 6. cycles: hybridization -> imaging -> photobleaching -> needle rinse
+        # 6. cycles: hybridization -> imaging -> photobleaching -> needle rinse; a HiMRunStopped (e.g. the autofocus
+        #    check) ends the run normally, with the stop in the result (no traceback); any other exception goes up
         total = len(self._cycles)
-        for number, (tube, rt) in enumerate(self._cycles, 1):
-            self._check_interrupt()
-            self._report_progress(f'Cycle {number}/{total}', rt)
-            label = f'Cycle {number}/{total} - {rt}'
-            self._hybridization(label, rt, tube, hyb_steps)
-            self._imaging(label, rt)
-            self._photobleaching(label, rt, pb_steps)
-            self._rinse_needle(label)
-            self._cycles_done = number
+        stop = None
+        try:
+            for number, (tube, rt) in enumerate(self._cycles, 1):
+                self._check_interrupt()
+                self._report_progress(f'Cycle {number}/{total}', rt)
+                label = f'Cycle {number}/{total} - {rt}'
+                self._hybridization(label, rt, tube, hyb_steps)
+                self._imaging(label, rt)
+                self._photobleaching(label, rt, pb_steps)
+                self._rinse_needle(label)
+                self._cycles_done = number
+        except HiMRunStopped as stopped:
+            stop = stopped
+            self._stop_info = dict(self._stop_info or {}, source=stop.source, reason=stop.reason)
+            self.log.info(f'Hi-M experiment stopped by the {stop.source}: {stop.reason}')
 
         # 7. summary
-        self._report_progress(f'{total}/{total}', 'Done')
-        return {'cycles_done': self._cycles_done,
-                'cycles_total': total,
-                'probes': [rt for _, rt in self._cycles],
-                'rois': len(self.roi_names),
-                'directory': self.directory,
-                'probe_needle_mode': self._needle_mode,
-                'tubes_used': list(self._tubes_used)}
+        self._report_progress(f'{self._cycles_done}/{total}' if stop else f'{total}/{total}',
+                              f'Stopped by the {stop.source}' if stop else 'Done')
+        result = {'cycles_done': self._cycles_done,
+                  'cycles_total': total,
+                  'probes': [rt for _, rt in self._cycles],
+                  'rois': len(self.roi_names),
+                  'directory': self.directory,
+                  'probe_needle_mode': self._needle_mode,
+                  'tubes_used': list(self._tubes_used)}
+        if stop is not None:
+            result.update(completed=False, stopped=True, reason=stop.reason)
+        return result
 
     def _cleanup(self) -> None:
         """Stop the fluidics, valves to cleanup_valve_positions, end of the imaging, stage back to the
@@ -466,13 +488,21 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
             self._end_of_run_files()
         except Exception as err:
             self.log.error(f'Cleanup: end-of-run files: {err}')
+        stop_info = getattr(self, '_stop_info', None)
         self.log.info(f'Hi-M task ended after {getattr(self, "_cycles_done", 0)}/{len(getattr(self, "_cycles", []))} '
-                      f'cycle(s).')
+                      f'cycle(s)' + (f' - stopped by the {stop_info["source"]}' if stop_info else '.'))
         self._close_run_log()
         try:
             self._after_run_log_closed()
         except Exception as err:
             self.log.error(f'Cleanup: after the log of the run: {err}')
+        # last: the pop-up of a run stopped by the task (non-blocking; an error is only a warning)
+        if stop_info:
+            try:
+                title, text = self._stop_popup_content(stop_info)
+                show_info_popup(title, text)
+            except Exception as err:
+                self.log.warning(f'Cleanup: could not show the end-of-run pop-up: {err!r}')
 
     def _end_of_run_files(self) -> None:
         """Hook of _cleanup, after the hardware reset and before the last log line. Default: nothing."""
@@ -537,6 +567,13 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # ==============================================================================================
     # Cycle steps
     # ==============================================================================================
+
+    def _stop_popup_content(self, stop_info) -> tuple:
+        """(title, text) of the pop-up of a run stopped by the task (HiMRunStopped); a subclass gives the details."""
+        cycles = f'{getattr(self, "_cycles_done", 0)} of {len(getattr(self, "_cycles", []))}'
+        return (f'Hi-M experiment stopped by the {stop_info["source"]}',
+                f'{stop_info["reason"]}\n\nCompleted: {cycles} cycles. The fluidics and the hardware were returned to '
+                f'their safe state.\nMetadata: {self.directory}')
 
     def _cycle_hybridization_steps(self, hyb_steps, tube) -> list:
         """Hybridization steps of the cycle of the probe in tube: copies, with the tube of each probe
@@ -874,8 +911,14 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         imagecodecs, numpy) are logged at the start. Score and shift (px) logged. Pass (score >= correlation_threshold): the image becomes the
         reference of the ROI (autofocus_reference.npy saved again). Fail: the reference is kept, warning
         (and a second one if the ROI already failed in the previous cycle).
-      - Abort: as soon as (ROIs - failures of the cycle) / ROIs < autofocus_min_fraction, an error gives the
-        counts and the experiment stops (error, cleanup as usual). The counter restarts at each cycle.
+      - Controlled stop: as soon as (ROIs - failures of the cycle) / ROIs < autofocus_min_fraction, the check
+        raises HiMRunStopped (expected end of the run, not a crash): _run catches it, logs one info line
+        "Hi-M experiment stopped by the autofocus check: <reason>" (no error, no traceback) and returns a result
+        with completed False, stopped True and the reason; the cleanup runs as usual (hardware reset, autofocus
+        report, transfers, log), its last line ends with "- stopped by the autofocus check", and at its very end a
+        non-blocking information pop-up gives the failed ROI(s) with their score, the threshold, the reachable and
+        minimum fractions, the cycles completed and the local metadata folder. The counter restarts at each
+        cycle.
       - Files (<metadata folder>/autofocus/, created with the metadata folder; copied to the server with it):
         autofocus_reference.npy, ROI_probe_autofocus_summary.csv (header at creation, one row per check written as
         the run goes: experiment_folder (ZEN folder name), roi_name, probe_name (RT), correlation (score, empty
@@ -1100,8 +1143,33 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
 
     def _run(self) -> dict:
         result = super()._run()
-        self._run_completed = True  # normal end: the cleanup sends the last acquisitions
+        if not result.get('stopped'):
+            self._run_completed = True  # normal end: the cleanup sends the last acquisitions
         return result
+
+    def _stop_popup_content(self, stop_info) -> tuple:
+        """Title and text of the pop-up of a run stopped by the autofocus check (failed ROIs with their score,
+        threshold, reachable and minimum fractions, cycles completed, local metadata folder)."""
+        if 'failed' not in stop_info:
+            return super()._stop_popup_content(stop_info)
+
+        def score(value):
+            return 'image not read' if value != value else f'{value:.3f}'  # NaN: the image could not be read
+        failed = stop_info['failed']
+        if len(failed) == 1:
+            roi, value = failed[0]
+            what = f'{roi} failed the autofocus check (score {score(value)}, threshold {stop_info["threshold"]:g})'
+        else:
+            scores = ', '.join(f'{roi}: {score(value)}' for roi, value in failed)
+            what = (f'{len(failed)} ROIs failed the autofocus check (threshold {stop_info["threshold"]:g}) - '
+                    f'{scores}')
+        text = (f'In cycle {stop_info["cycle"]} ({stop_info["rt"]}), {what}.\n'
+                f'With {stop_info["n_rois"]} ROIs, at most {stop_info["reachable"]:.0%} could pass in this cycle, below '
+                f'the minimum of {stop_info["min_fraction"]:.0%}.\n\n'
+                f'Completed: {self._cycles_done} of {len(self._cycles)} cycles. The fluidics and the hardware were '
+                f'returned to their safe state.\n'
+                f'Metadata and autofocus report: {self.directory}')
+        return f'Hi-M experiment stopped by the {stop_info["source"]}', text
 
     # ----------------------------------------------------------------------------------------------
     # Online data transfer (common/data_transfer.py)
@@ -1628,22 +1696,27 @@ class HiMSDTask(SDImagingMixin, HiMTaskBase):
         self._autofocus_failed(roi_name, cycle, n, f'score {score:.3f} < threshold {self.correlation_threshold}')
 
     def _autofocus_failed(self, roi_name, cycle, n, reason) -> None:
-        """Failed check: reference kept, warnings, then the minimum-fraction rule (RuntimeError when the experiment
-        is aborted)."""
+        """Failed check: reference kept, warnings, then the minimum-fraction rule (HiMRunStopped when the experiment
+        is stopped)."""
         self._af_failures += 1
         self._af_failed_rois.add(roi_name)
         self.log.warning(f'Autofocus check failed for {roi_name} ({reason})')
         if roi_name in self._af_failed_before:
             self.log.warning(f'Autofocus check failed for {roi_name} in the previous cycle too')
-        # abort as soon as the minimum fraction of passed ROIs can no longer be reached in this cycle
+        # stop as soon as the minimum fraction of passed ROIs can no longer be reached in this cycle: expected end of
+        # the run (HiMRunStopped, caught by _run: one info line, pop-up at the end of the cleanup)
         if (n - self._af_failures) / n < self.autofocus_min_fraction:
-            message = (f'Autofocus check: {self._af_failures} of {n} ROI(s) failed in cycle {cycle + 1} '
-                       f'({self._af_rt}) - at most {(n - self._af_failures) / n:.0%} can pass, below the minimum '
-                       f'fraction {self.autofocus_min_fraction:.0%}. The Hi-M experiment is aborted.')
-            self.log.error(message)
+            reachable = (n - self._af_failures) / n
+            reason = (f'{self._af_failures} of {n} ROI(s) failed in cycle {cycle + 1} ({self._af_rt}) - at most '
+                      f'{reachable:.0%} can pass, below the minimum fraction {self.autofocus_min_fraction:.0%}')
+            failed = [(roi, float(self._af_scores[cycle, self.roi_names.index(roi)]))
+                      for roi in self.roi_names if roi in self._af_failed_rois]
+            self._stop_info = {'cycle': cycle + 1, 'rt': self._af_rt, 'failed': failed,
+                               'threshold': self.correlation_threshold, 'n_rois': n, 'reachable': reachable,
+                               'min_fraction': self.autofocus_min_fraction}
             # TODO: email alert to the user (legacy send_alert_email), not migrated yet
             self._af_aborted = True  # the cleanup still makes the autofocus report
-            raise RuntimeError(message)
+            raise HiMRunStopped(reason, source='autofocus check')
 
     def _cleanup(self) -> None:
         """Helper process of the autofocus check stopped, correlation.npy (cycles x ROIs, NaN for the checks not done)

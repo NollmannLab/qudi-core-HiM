@@ -526,6 +526,13 @@ if selected('sd_zen_folder'):
         result, err, t0, t_int = run(task, interrupt_when=interrupt_when)
         return task, result, err, t0, t_int, server, local, folders_before, tree_before, exp
 
+    POPUPS = []  # (monotonic time, title, text) of the pop-ups of a stopped run
+
+    def record_popup(title, text):
+        POPUPS.append((monotonic(), title, text))
+        return True
+    him.show_info_popup = record_popup  # no real box in the tests
+
     def log_lines(folder):
         path = os.path.join(folder, 'HiM_task.log')
         return open(path, encoding='utf-8').read().splitlines() if os.path.exists(path) else []
@@ -548,6 +555,8 @@ if selected('sd_zen_folder'):
         him.HiMSDTask._end_of_run_files = original_end_files
     check('(live copy) transfer_data off: nothing on the server before the cleanup (no live copy of the metadata)',
           server_at_cleanup == [[]], server_at_cleanup)
+    check('(controlled stop) normal end: no pop-up; the result has no "stopped" key',
+          not POPUPS and err is None and 'stopped' not in (result or {}), POPUPS)
     zen_folder = zen.created[-1] if zen.created else ''
     folder = sd_folder(local, zen_folder)
     prefix = str(before + 1).zfill(3)
@@ -712,7 +721,9 @@ if selected('sd_zen_folder'):
     # (5) interrupt during hybridization -> log file closed, last line present
     cond = (lambda: any(t.startswith('Hybridization 2/4') for _, s, t in PROGRESS)
             and any('Injecting Probe -' in t for _, s, t in PROGRESS))
+    POPUPS.clear()
     task, result, err, t0, t_int, server, local, *_ = zen_case('zen_int', interrupt_when=cond)
+    check('(controlled stop) interrupt: no pop-up', not POPUPS, POPUPS)
     folder = sd_folder(local, zen.created[-1])
     lines = log_lines(folder)
     check('(interrupt during hybridization) task stopped; HiM_task.log closed (handlers removed), last line "Hi-M task '
@@ -735,10 +746,26 @@ if selected('sd_zen_folder'):
           and not [n for n, _ in calls(t0) if n in HARDWARE], err)
     # autofocus: first check fails with autofocus_min_fraction 0.9 -> abort at once, the next ROI is not checked
     zen_trigger.images = lambda k: np.random.default_rng(100 + k).random(_short.AUTOFOCUS_SIZE)  # unrelated image
+    POPUPS.clear()
+    report_times, reset_times = [], []
+    original_report = him.autofocus_report.report_run
+
+    def timed_report(*args, **kwargs):
+        report_times.append(monotonic())
+        return original_report(*args, **kwargs)
+    original_unlock = MODS['laser_logic'].enable_laser_actions
+
+    def timed_unlock(*args, **kwargs):  # last GUI unlock of the hardware reset
+        reset_times.append(monotonic())
+        return original_unlock(*args, **kwargs)
+    him.autofocus_report.report_run = timed_report
+    MODS['laser_logic'].enable_laser_actions = timed_unlock
     try:
         task, result, err, t0, _, server, local, *_ = zen_case('zen_af_abort', autofocus_min_fraction=0.9)
     finally:
         zen_trigger.images = None
+        him.autofocus_report.report_run = original_report
+        MODS['laser_logic'].enable_laser_actions = original_unlock
     folder = sd_folder(local, zen.created[-1])
     msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
     af_folder = os.path.join(folder, 'autofocus')
@@ -746,14 +773,21 @@ if selected('sd_zen_folder'):
         if os.path.isdir(af_folder) else []
     scores = np.load(os.path.join(af_folder, 'correlation.npy')) if os.path.isdir(af_folder) else None
     lines = log_lines(folder)
-    check(f'(autofocus abort) {N} ROIs, min fraction 0.9, the first check fails -> warning "Autofocus check failed for '
-          f'{NAMES[0]}", error with the counts, experiment stopped before the next ROI; autofocus/'
-          f'ROI_probe_autofocus_summary.csv (new columns, 1 row, written by the task and not rewritten by the report) '
-          f'and correlation.npy (NaN for {NAMES[1]}) kept; no autofocus_scores.csv; log file closed',
-          err is not None and 'Autofocus check: 1 of 2 ROI(s) failed in cycle 1' in str(err)
+    stop_lines = [m for lvl, m in msgs if m.startswith('Hi-M experiment stopped by the autofocus check: ')]
+    check(f'(autofocus stop) {N} ROIs, min fraction 0.9, the first check fails -> warning "Autofocus check failed for '
+          f'{NAMES[0]}"; no exception leaves _run, no error line; ONE info line "Hi-M experiment stopped by the '
+          f'autofocus check: <reason>"; result completed False, stopped True, reason, cycles_done 0 (and the keys '
+          f'of the normal result); experiment stopped before the next ROI; autofocus/'
+          f'ROI_probe_autofocus_summary.csv (1 row) and correlation.npy (NaN for {NAMES[1]}) kept; log file closed '
+          f'with "... - stopped by the autofocus check"',
+          err is None and result and result.get('completed') is False and result.get('stopped') is True
+          and '1 of 2 ROI(s) failed in cycle 1 (RT1)' in result.get('reason', '') and result['cycles_done'] == 0
+          and {'cycles_total', 'probes', 'rois', 'directory', 'probe_needle_mode', 'tubes_used'} <= set(result)
+          and len(stop_lines) == 1 and result['reason'] in stop_lines[0]
+          and any(lvl == logging.INFO and m in stop_lines for lvl, m in msgs)
+          and not any(lvl >= logging.ERROR for lvl, m in msgs)
           and any(lvl == logging.WARNING and m.startswith(f'Autofocus check failed for {NAMES[0]} (score ')
                   for lvl, m in msgs)
-          and any(lvl == logging.ERROR and 'below the minimum fraction 90%' in m for lvl, m in msgs)
           and sum(m.startswith('Autofocus check cycle') for _, m in msgs) == 1
           and not any('Triggering ZEN acquisition' in m for _, m in msgs)
           and rows[0] == ['experiment_folder', 'roi_name', 'probe_name', 'correlation', 'cycle', 'shift_y_px',
@@ -762,15 +796,44 @@ if selected('sd_zen_folder'):
           and float(rows[1][3]) < 0.9 and rows[1][-1] == 'False'
           and not glob.glob(os.path.join(folder, '**', 'autofocus_scores.csv'), recursive=True)
           and scores is not None and scores.shape == (1, N) and not np.isnan(scores[0, 0]) and np.isnan(scores[0, 1])
-          and lines and lines[-1].endswith('Hi-M task ended after 0/1 cycle(s).') and not run_log_handlers(),
-          (err, rows, scores, lines[-1:]))
-    check('(autofocus report) made after an autofocus abort: heatmap and drift figure in metadata/autofocus/, no second '
+          and lines and lines[-1].endswith('Hi-M task ended after 0/1 cycle(s) - stopped by the autofocus check')
+          and not run_log_handlers(), (err, result, stop_lines, rows, scores, lines[-1:]))
+    popup_text = POPUPS[0][2] if POPUPS else ''
+    af_score = float(rows[1][3]) if len(rows) > 1 else float('nan')
+    check('(autofocus stop) pop-up shown once, after the cleanup steps (hardware reset, autofocus report, log closed): '
+          'title "Hi-M experiment stopped by the autofocus check"; text with the cycle and RT, the failed ROI and its '
+          'score, the threshold, the fractions (50% / 90%), the cycles completed and the local metadata folder',
+          len(POPUPS) == 1 and POPUPS[0][1] == 'Hi-M experiment stopped by the autofocus check'
+          and reset_times and report_times and POPUPS[0][0] > max(reset_times + report_times)
+          and f'In cycle 1 (RT1), {NAMES[0]} failed the autofocus check (score {af_score:.3f}, threshold 0.6).'
+          in popup_text
+          and f'With {N} ROIs, at most 50% could pass in this cycle, below the minimum of 90%.' in popup_text
+          and 'Completed: 0 of 1 cycles. The fluidics and the hardware were returned to their safe state.' in popup_text
+          and f'Metadata and autofocus report: {folder}' in popup_text, (POPUPS, reset_times, report_times))
+    check('(autofocus report) made after an autofocus stop: heatmap and drift figure in metadata/autofocus/, no second '
           'CSV; listed in the log',
           all(os.path.isfile(os.path.join(af_folder, n)) for n in ('autofocus_correlation_heatmap.png',
                                                                   'autofocus_drift.png'))
           and any(m == 'Autofocus report: autofocus_correlation_heatmap.png, autofocus_drift.png' for _, m in msgs),
           (os.listdir(af_folder) if os.path.isdir(af_folder) else None, [m for _, m in msgs if 'report' in m]))
-    end_state_ok('autofocus abort', t0)
+    end_state_ok('autofocus stop', t0)
+
+    # another exception in _run (hardware error) is still raised: error, no pop-up, no stop line
+    POPUPS.clear()
+    original_prepare = him.HiMSDTask._prepare_imaging
+
+    def failing_prepare(self):
+        raise RuntimeError('camera not responding (test)')
+    him.HiMSDTask._prepare_imaging = failing_prepare
+    try:
+        task, result, err, t0, *_ = zen_case('zen_hw_error')
+    finally:
+        him.HiMSDTask._prepare_imaging = original_prepare
+    msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
+    check('(controlled stop) another exception in _run (hardware error) is still raised; no pop-up, no stop line',
+          isinstance(err, RuntimeError) and 'camera not responding' in str(err) and not POPUPS
+          and not any(m.startswith('Hi-M experiment stopped') for _, m in msgs), (err, POPUPS))
+    end_state_ok('hardware error', t0)
 
     # autofocus report failing: warning only, the cleanup goes on
     original_report = him.autofocus_report.report_run
@@ -1048,7 +1111,7 @@ if selected('autofocus'):
             _short.write_autofocus_image(task._zen_directory, len(task._af_seen) + 1, image)
             try:
                 task._check_autofocus(roi_name)
-            except RuntimeError as err:
+            except him.HiMRunStopped as err:
                 checked.append(roi_name)
                 return checked, err
             checked.append(roi_name)
@@ -1071,12 +1134,19 @@ if selected('autofocus'):
     t0 = monotonic()
     checked, err = check_rois(task, [bad, base, bad, bad, bad, base, base, base, base, base])
     msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
-    check('(abort rule) next cycle: the 4th failure (ROI_004) aborts at once - no further ROI checked; error with '
-          'the counts and the fraction; warnings for the ROIs that also failed in the previous cycle',
-          err is not None and checked == ['ROI_000', 'ROI_001', 'ROI_002', 'ROI_003', 'ROI_004']
+    check('(abort rule) next cycle: the 4th failure (ROI_004) stops at once - no further ROI checked; HiMRunStopped '
+          '(not a RuntimeError) with the counts and the fraction, no error line; details kept for the pop-up (cycle, '
+          'RT, failed ROIs with their score, threshold, fractions); warnings for the ROIs that also failed in the '
+          'previous cycle',
+          isinstance(err, him.HiMRunStopped) and not isinstance(err, RuntimeError)
+          and checked == ['ROI_000', 'ROI_001', 'ROI_002', 'ROI_003', 'ROI_004']
           and '4 of 10 ROI(s) failed in cycle 2 (RT2)' in str(err) and 'at most 60% can pass' in str(err)
           and 'minimum fraction 70%' in str(err)
-          and any(lvl == logging.ERROR and '4 of 10 ROI(s) failed' in m for lvl, m in msgs)
+          and not any(lvl >= logging.ERROR for lvl, m in msgs)
+          and task._stop_info['cycle'] == 2 and task._stop_info['rt'] == 'RT2'
+          and [r for r, _ in task._stop_info['failed']] == ['ROI_000', 'ROI_002', 'ROI_003', 'ROI_004']
+          and all(sc == task._af_scores[1, int(r[4:])] for r, sc in task._stop_info['failed'])
+          and task._stop_info['reachable'] == 0.6 and task._stop_info['min_fraction'] == 0.7
           and sum(lvl == logging.WARNING and 'in the previous cycle too' in m for lvl, m in msgs) == 3
           and np.isnan(task._af_scores[1, 5:]).all(), (err, checked))
     refs_file = np.load(os.path.join(task.directory, 'autofocus', af.REFERENCE_FILE_NAME))
@@ -1360,10 +1430,12 @@ if selected('autofocus'):
     try:
         task._check_autofocus('ROI_000')
         rule_err = None
-    except RuntimeError as exc:
+    except him.HiMRunStopped as exc:
         rule_err = exc
-    check('(helper process) crash twice with min fraction 0.9: the failed check triggers the abort rule (RuntimeError)',
-          rule_err is not None and 'below the minimum fraction' in str(rule_err), rule_err)
+    check('(helper process) crash twice with min fraction 0.9: the failed check triggers the stop rule (HiMRunStopped); '
+          'its score in the pop-up details is NaN (image not read)',
+          rule_err is not None and 'below the minimum fraction' in str(rule_err)
+          and np.isnan(task._stop_info['failed'][0][1]), rule_err)
 
     # timeout: same handling
     task = with_worker(af_task(4, 0.5), _short.helper_sleep)

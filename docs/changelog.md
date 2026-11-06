@@ -6,6 +6,31 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-05
 
+### Hi-M SD: autofocus stop reported as a controlled stop
+
+#### Fixed
+
+- When the autofocus check stopped a Hi-M SD run (minimum fraction of passed ROIs no longer reachable),
+  `HiMSDTask._autofocus_failed` raised RuntimeError: the cleanup ran, but qudi-core logged "Exception during
+  main run method" with a traceback at error level, as for a crash (2026-11-06).
+  - New `HiMRunStopped(reason, source)` (module level in him.py): expected stop decided by the task.
+    `_autofocus_failed` raises it (abort flag kept for the cleanup; the error line before the raise removed, the
+    warning of the failed ROI kept) and stores the details for the pop-up (cycle, RT, failed ROIs with their
+    score, threshold, reachable / minimum fractions).
+  - `HiMTaskBase._run` catches it around the cycle loop: one info line "Hi-M experiment stopped by the autofocus
+    check: <reason>" (no traceback) and a normal return with the keys of the normal result plus
+    `completed: False, stopped: True, reason`. `_run_completed` stays False. Any other exception unchanged.
+  - Last log line: "Hi-M task ended after <n>/<total> cycle(s) - stopped by the autofocus check".
+  - At the very end of the cleanup (after the hardware reset, autofocus report, transfers and log): information
+    pop-up "Hi-M experiment stopped by the autofocus check" with the failed ROI(s) and score(s), the threshold, the
+    fractions, the cycles completed and the local metadata folder; an error while showing it is a warning.
+  - `popups.show_info_popup(title, text)`: non-modal information box created in the GUI thread (same mechanism
+    as `show_warning_popup`, which already does not block the task thread: queued signal, box kept referenced
+    until it is closed).
+  - Tests (tests/test_him.py, pop-up mocked): stop without exception / error line, single info line, result,
+    cleanup and report done, pop-up once after the cleanup with its text; no pop-up for a normal end or an
+    interrupt; another exception (hardware error) still raised.
+
 ### Hi-M SD: fluidics record and live copy of the metadata
 
 #### Added

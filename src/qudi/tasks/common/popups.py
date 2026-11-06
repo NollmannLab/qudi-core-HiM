@@ -6,6 +6,8 @@ thread through a queued signal, so they can be called from the task thread.
 
   - show_warning_popup(title, text): non-modal warning box, the task does not wait (used by the
     fluidics steps, e.g. needle position not defined).
+  - show_info_popup(title, text): the same with an information icon (e.g. the Hi-M experiment stopped by the
+    autofocus check); the task does not wait, the box stays open until it is closed.
   - ask_confirmation(task, title, text, ok_text): modal box with ok_text and Cancel, built by
     build_confirmation_box of the Task Runner (gui/task_runner/dialogs.py, same dialog as the
     start_warning of a task); the task thread waits for the answer and stays interruptible (used by the
@@ -26,7 +28,7 @@ You should have received a copy of the GNU General Public License along with Qud
 -----------------------------------------------------------------------------------
 """
 
-__all__ = ['show_warning_popup', 'ask_confirmation']
+__all__ = ['show_warning_popup', 'show_info_popup', 'ask_confirmation']
 
 import itertools
 import threading
@@ -55,20 +57,22 @@ def _in_gui_thread(obj, app):
 # ======================================================================================================================
 
 class _WarningPopup(QtCore.QObject):
-    """Shows non-modal warning message boxes in the GUI thread; show() may be called from a task thread."""
-    _sigShow = QtCore.Signal(str, str)
+    """Shows non-modal message boxes (warning icon, or information icon with info=True) in the GUI thread; show()
+    may be called from a task thread. The boxes are kept referenced until they are closed."""
+    _sigShow = QtCore.Signal(str, str, bool)
 
     def __init__(self):
         super().__init__()
         self._boxes = []
         self._sigShow.connect(self._show_box)
 
-    def show(self, title, text):
-        self._sigShow.emit(title, text)
+    def show(self, title, text, info=False):
+        self._sigShow.emit(title, text, bool(info))
 
-    @QtCore.Slot(str, str)
-    def _show_box(self, title, text):
-        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, title, text, QtWidgets.QMessageBox.Ok)
+    @QtCore.Slot(str, str, bool)
+    def _show_box(self, title, text, info=False):
+        icon = QtWidgets.QMessageBox.Information if info else QtWidgets.QMessageBox.Warning
+        box = QtWidgets.QMessageBox(icon, title, text, QtWidgets.QMessageBox.Ok)
         box.setModal(False)
         box.finished.connect(lambda _result, b=box: self._boxes.remove(b) if b in self._boxes else None)
         self._boxes.append(box)
@@ -87,6 +91,19 @@ def show_warning_popup(title, text):
     if _warning_popup is None:
         _warning_popup = _in_gui_thread(_WarningPopup(), app)
     _warning_popup.show(title, text)
+    return True
+
+
+def show_info_popup(title, text):
+    """Show a non-modal information message box in the GUI thread (the calling thread does not wait). Returns
+    False (nothing shown) without a GUI."""
+    global _warning_popup
+    app = _gui_app()
+    if app is None:
+        return False
+    if _warning_popup is None:
+        _warning_popup = _in_gui_thread(_WarningPopup(), app)
+    _warning_popup.show(title, text, info=True)
     return True
 
 
