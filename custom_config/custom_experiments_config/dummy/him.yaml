@@ -12,6 +12,11 @@ fields:
     required: true
     default: ""
 
+  # sample file (YAML describing the biological sample, edited from the configurator)
+  sample_file:
+    required: false
+    default: ""
+
   imaging_sequence:
     required: true
     default: []

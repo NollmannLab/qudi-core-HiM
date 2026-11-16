@@ -360,11 +360,13 @@ if selected('metadata'):
           fluidics_meta.get('hybridization') == meta_inj['hybridization list']
           and fluidics_meta.get('photobleaching') == meta_inj['photobleaching list'], fluidics_meta)
     check(f'(run files) metadata.yml: Time, sample name, laser lines / powers, 5 z planes, the {N} ROIs with their '
-          f'positions; other sections as in the template, then the Sample section (sample file of the run)',
+          f'positions; other sections as in the template, Sample section (sample file of the run) in the place of the '
+          f'template (appended when the template has none)',
           meta is not None and meta['Time'] and acq['sample_name'] == 'Mysample' and acq['laser_lines'] == [488, 561]
           and acq['laser_power_(%)'] == [50.0, 80.0] and acq['number_z_planes'] == 5
           and acq['roi_list_(xyz)'] == [{n: [float(v) for v in roi.get_roi_position(n)]} for n in NAMES]
-          and list(meta) == list(template) + ['Sample'] and meta['Camera'] == template['Camera'], acq)
+          and list(meta) == list(template) + ([] if 'Sample' in template else ['Sample'])
+          and meta['Camera'] == template['Camera'], acq)
     check('(run files, dummy) HiM_parameters.yml, injections.yml and sample.yml in <run folder>/experiment_parameters/ '
           'and not at the top; metadata.yml, movie_name.txt and HiM_task.log at the top; no fluidics/ (other setups '
           'record nothing)',
@@ -381,6 +383,42 @@ if selected('metadata'):
           and open(os.path.join(run_folder, 'movie_name.txt')).read().split()
           == [f'scan_001_RT1_{n[4:]}_ROI' for n in NAMES], him_params)
     end_state_ok('run files', t0)
+    sample_copy = os.path.join(run_folder, 'experiment_parameters', 'sample.yml') if run_folder else ''
+    check('(run files, dummy, sample_file set) sample.yml is an exact copy of the sample file; metadata.yml Sample '
+          'section = the values of the file, in order',
+          sample_copy and os.path.exists(sample_copy) and open(sample_copy, 'rb').read() == open(meta_sample, 'rb').read()
+          and meta is not None and meta.get('Sample') == [{'experiment_type': 'DNA-FISH'}, {'experimenter': 'X'}],
+          meta.get('Sample') if meta else None)
+
+    # Hi-M dummy without sample_file: no sample.yml, Sample section of the template (if any) left empty
+    nos_exp = files(meta_inj, 'metadata_no_sample')
+    task = make_task(user_config_path=nos_exp)
+    t0 = monotonic()
+    result, err, _, _ = run(task)
+    nos_folder = result['directory'] if result else ''
+    nos_meta_path = os.path.join(nos_folder, 'metadata.yml') if nos_folder else ''
+    nos_meta = yaml.safe_load(open(nos_meta_path, encoding='utf-8')) if nos_meta_path and os.path.exists(nos_meta_path) else None
+    check('(run files, dummy, no sample_file) unchanged: no sample.yml, metadata.yml = the template sections (Sample '
+          'section of the template left empty)',
+          err is None and result and result['cycles_done'] == 1
+          and sorted(os.listdir(os.path.join(nos_folder, 'experiment_parameters'))) == ['HiM_parameters.yml', 'injections.yml']
+          and 'sample.yml' not in os.listdir(nos_folder)
+          and nos_meta is not None and list(nos_meta) == list(template)
+          and not nos_meta.get('Sample'),
+          (err, sorted(os.listdir(nos_folder)) if nos_folder else None, list(nos_meta or {})))
+
+    # dummy configuration: field sample_file of him.yaml, sample options of the configurator
+    dummy_def = yaml.safe_load(open(os.path.join(repo, 'custom_config', 'custom_experiments_config', 'dummy', 'him.yaml'),
+                                    encoding='utf-8'))['fields']
+    conf_opts = CFG['logic']['experiments_configurator_logic']['options']
+    check("(dummy configuration) him.yaml: sample_file optional with an empty default; experiments_configurator_logic: "
+          "'default sample path' and 'sample template' (the sample template of the repository)",
+          dummy_def.get('sample_file') == {'required': False, 'default': ''}
+          and conf_opts.get('default sample path') == '/home/jb/qudi/qudi_sample_preparation/'
+          and conf_opts.get('sample template', '').endswith(
+              'qudi-core-HiM/custom_config/custom_metadata_templates/sample_template.yml')
+          and os.path.isfile(os.path.join(repo, 'custom_config', 'custom_metadata_templates', 'sample_template.yml')),
+          (dummy_def.get('sample_file'), conf_opts))
 
 # --- number of z planes: not used by the SD task, still required by the dummy ---
 if selected('sd_z_planes'):
@@ -666,12 +704,13 @@ if selected('sd_zen_folder'):
     meta_path = os.path.join(folder, 'metadata.yml')
     meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else {}
     check('(sample file) Hi-M SD: sample.yml (exact copy) in metadata/experiment_parameters/ (not at the top); '
-          'metadata.yml (top) ends with a Sample '
-          'section holding the values of the file (field not in the template included)',
+          'metadata.yml (top): Sample section in the place of the template (at the end when the template has none) '
+          'holding the values of the file (field not in the template included)',
           err is None and result and result['cycles_done'] == 1
           and open(os.path.join(folder, 'experiment_parameters', 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
           and not os.path.exists(os.path.join(folder, 'sample.yml'))
-          and list(meta)[-1] == 'Sample'
+          and list(meta) == (lambda t: list(t) + ([] if 'Sample' in t else ['Sample']))(
+              yaml.safe_load(open(task.metadata_template, encoding='utf-8')))
           and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Mus musculus'}, {'experimenter': 'X'},
                                  {'old_field': 'kept'}],
           (err, result, os.listdir(folder) if os.path.isdir(folder) else None, meta.get('Sample')))

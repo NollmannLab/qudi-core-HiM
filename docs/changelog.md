@@ -4,7 +4,52 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-11-05
+Last updated: 2026-11-16
+
+### Dummy setup: field of cells for the dummy camera, sample file on the dummy experiments
+
+#### Changed
+
+- Dummy camera (`hardware/camera/dummy_camera.py`, 2026-11-16): `CameraDummy._create_scene(height, width)` now
+  builds a field of fixed cells instead of the gradient, the three blobs and the bright top-left marker. Each
+  cell: an ellipse with a faint cytoplasm (soft edge), an off-centre nucleus with a chromatin-like texture
+  (smoothed noise, `scipy.ndimage.gaussian_filter`) and, in ~70 % of the cells, one to three bright foci.
+  - The cells are placed at a fixed density (dart throwing with a grid lookup, new `_cell_centres`), so their
+    number grows with the sensor size: 14 at 512 x 512, 28 at 1024 x 1024, 88 at 3200 x 3200.
+  - Module constants: `REFERENCE_SIZE = 512`, `CELL_RADIUS_PX = 44` (mean semi-axis on a 512 px sensor),
+    `CELL_SIZE_EXPONENT = 0.5` (cell size ~ (sensor size / 512) ** exponent; 0: fixed size in px),
+    `CELL_SPACING = 2.0` (minimum distance between centres, in mean radii).
+  - Background 100, float32 output; fixed seed (`SCENE_SEED = 7`, optional `seed` argument), so the image is
+    the same at every start for a given sensor size. Built once at activation (~0.1 s at 1024 x 1024,
+    ~0.7 s at 3200 x 3200).
+  - `_create_frame` unchanged (ROI crop, exposure / gain scaling, gaussian noise, clip to uint16). Module and
+    method docstrings updated.
+
+#### Added
+
+- Dummy experiment definitions `dummy/him.yaml` and `dummy/roi_multicolour_scan.yaml`: field `sample_file`
+  (optional, empty by default, so a quick test runs without a sample file; required on the SD). sample_tag of
+  the ROI scan kept.
+- `dummy_config.cfg`, options of experiments_configurator_logic: `default sample path`
+  (/home/jb/qudi/qudi_sample_preparation/) and `sample template` (sample_template.yml of the repository).
+- `HiMDummyTask` and `RoiScanDummyTask` needed no change: the sample file is read and written by the shared base
+  classes (`HiMTaskBase` / `RoiScanTaskBase`): experiment_parameters/sample.yml (exact copy) and the Sample
+  section of metadata.yml when sample_file is set, nothing without it.
+- Tests:
+  - tests/test_roi_scan.py, new section "dummy camera": scene size, float32, background, no saturated top-left
+    block, same image for two cameras of the same size, at least twice as many cells at 1024 x 1024 as at
+    512 x 512, frames within 0..65535 (also clipped at high exposure / gain), camera ROI crop, scene
+    creation at 3200 x 3200 under 3 s.
+  - tests/test_roi_scan.py, section "run folder and run files" (5b): ROI scan dummy with a sample file
+    (sample.yml and Sample section); dummy definition field sample_file.
+  - tests/test_him.py, block `metadata`: Hi-M dummy sample.yml is an exact copy and the Sample section holds
+    the file values; a run without sample_file is unchanged (no sample.yml, no Sample section); dummy
+    him.yaml field and configurator sample options of dummy_config.cfg.
+  - No existing test relied on the former gradient, blobs or marker.
+  - Checks of the Sample section adapted to the metadata template, which now has its own (empty) Sample
+    section after Time: with a sample file the values fill that section in its place, without one it stays
+    empty (appended / absent as before for a template without it). Affected: Hi-M run files and Hi-M SD sample
+    file, ROI scan 5b SD and 5b dummy (sample_file empty / absent); these failed on main since the template change.
 
 ### Hi-M SD: autofocus stop reported as a controlled stop
 
