@@ -335,7 +335,7 @@ if selected('metadata'):
     meta_sample = os.path.join(TMP, 'sample_dummy_run.yml')
     _si.save_sample_file(meta_sample, {'experiment_type': 'DNA-FISH', 'experimenter': 'X'})
     meta_exp = files(meta_inj, 'metadata', extra={'operator_note': 'kept in HiM_parameters.yml',
-                                                  'sample_file': meta_sample})
+                                                  'sample_file': meta_sample, 'imaging_modality': 'TIRF'})
     task = make_task(user_config_path=meta_exp)
     t0 = monotonic()
     result, err, _, _ = run(task)
@@ -390,6 +390,11 @@ if selected('metadata'):
           and meta is not None and meta.get('Sample') == [{'experiment_type': 'DNA-FISH'}, {'experimenter': 'X'}],
           meta.get('Sample') if meta else None)
 
+    check("(run files, dummy, imaging_modality 'TIRF') metadata.yml Acquisition imaging_modality = TIRF (template "
+          "field filled in place); HiM_parameters.yml global parameters: imaging_modality TIRF",
+          acq.get('imaging_modality') == 'TIRF' and 'imaging_modality' in [list(i)[0] for i in template['Acquisition']]
+          and him_global.get('imaging_modality') == 'TIRF', (acq.get('imaging_modality'), him_global.get('imaging_modality')))
+
     # Hi-M dummy without sample_file: no sample.yml, Sample section of the template (if any) left empty
     nos_exp = files(meta_inj, 'metadata_no_sample')
     task = make_task(user_config_path=nos_exp)
@@ -398,13 +403,14 @@ if selected('metadata'):
     nos_folder = result['directory'] if result else ''
     nos_meta_path = os.path.join(nos_folder, 'metadata.yml') if nos_folder else ''
     nos_meta = yaml.safe_load(open(nos_meta_path, encoding='utf-8')) if nos_meta_path and os.path.exists(nos_meta_path) else None
-    check('(run files, dummy, no sample_file) unchanged: no sample.yml, metadata.yml = the template sections (Sample '
-          'section of the template left empty)',
+    check('(run files, dummy, no sample_file, no imaging_modality) unchanged: no sample.yml, metadata.yml = the '
+          'template sections (Sample section of the template left empty, Acquisition imaging_modality empty)',
           err is None and result and result['cycles_done'] == 1
           and sorted(os.listdir(os.path.join(nos_folder, 'experiment_parameters'))) == ['HiM_parameters.yml', 'injections.yml']
           and 'sample.yml' not in os.listdir(nos_folder)
           and nos_meta is not None and list(nos_meta) == list(template)
-          and not nos_meta.get('Sample'),
+          and not nos_meta.get('Sample')
+          and section(nos_meta, 'Acquisition').get('imaging_modality') is None,
           (err, sorted(os.listdir(nos_folder)) if nos_folder else None, list(nos_meta or {})))
 
     # dummy configuration: field sample_file of him.yaml, sample options of the configurator

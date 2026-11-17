@@ -1256,7 +1256,8 @@ def _section_data_folder():
               and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (err, os.listdir(folder_run) if folder_run else None))
     # dummy with a sample file: same files as on the SD
     local = folder('local_5b_dummy')
-    task, rec = scan_task(rs.RoiScanDummyTask, scan_yaml('dummy_sample_set', save_path=local, sample_file=sample_path))
+    task, rec = scan_task(rs.RoiScanDummyTask, scan_yaml('dummy_sample_set', save_path=local, sample_file=sample_path,
+                                                         imaging_modality='spinning_disk'))
     result, err = run(task, {'start_roi': ''})
     folder_run = result.get('directory') if result else ''
     meta_path = os.path.join(folder_run, 'metadata.yml') if folder_run else ''
@@ -1270,6 +1271,26 @@ def _section_data_folder():
           and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Drosophila melanogaster'},
                                  {'formamide_percent': 50}, {'experimenter': 'X'}],
           (err, os.listdir(folder_run) if folder_run else None, meta.get('Sample')))
+    params_path = os.path.join(folder_run, 'experiment_parameters', 'parameters.yml') if folder_run else ''
+    params = yaml.safe_load(open(params_path, encoding='utf-8')) if params_path and os.path.exists(params_path) else {}
+    acq = {k: v for item in meta.get('Acquisition') or [] for k, v in item.items()}
+    check("(5b dummy, imaging_modality 'spinning_disk') metadata.yml Acquisition imaging_modality = spinning_disk; "
+          "parameters.yml 'experiment parameters': imaging_modality spinning_disk",
+          acq.get('imaging_modality') == 'spinning_disk'
+          and (params.get('experiment parameters') or {}).get('imaging_modality') == 'spinning_disk',
+          (acq.get('imaging_modality'), params.get('experiment parameters')))
+    # fill_run_metadata: Acquisition field imaging_modality filled when given, empty otherwise (e.g. basic imaging)
+    from qudi.tasks.common.run_metadata import fill_run_metadata, load_metadata_template
+    tpl = load_metadata_template(TEMPLATE)
+    acq_of = lambda m: {k: v for item in m['Acquisition'] for k, v in item.items()}  # noqa: E731
+    given = acq_of(fill_run_metadata(tpl, 's', [[488, 10.0]], {'ROI_001': [0, 0, 0]}, imaging_modality='TIRF'))
+    absent = acq_of(fill_run_metadata(tpl, 's', [[488, 10.0]], {'ROI_001': [0, 0, 0]}))
+    order = [list(item)[0] for item in fill_run_metadata(tpl, 's', [], {}, imaging_modality='TIRF')['Acquisition']]
+    check('fill_run_metadata: Acquisition imaging_modality = the value given (in the place of the template), empty '
+          'when not given; template unchanged',
+          given.get('imaging_modality') == 'TIRF' and 'imaging_modality' in absent and absent['imaging_modality'] is None
+          and order == [list(item)[0] for item in tpl['Acquisition']]
+          and acq_of(tpl).get('imaging_modality') is None, (given.get('imaging_modality'), absent.get('imaging_modality')))
     # dummy experiment definition: sample_file optional (empty by default), sample_tag kept
     dummy_def = yaml.safe_load(open(os.path.join(repo, 'custom_config', 'custom_experiments_config', 'dummy',
                                                  'roi_multicolour_scan.yaml'), encoding='utf-8'))['fields']

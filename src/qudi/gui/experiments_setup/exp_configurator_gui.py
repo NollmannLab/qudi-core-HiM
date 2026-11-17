@@ -179,6 +179,7 @@ class ExpConfiguratorGUI(GuiBase):
         "sample_name": "general",
         "sample_tag": "general",
         "sample_file": "general",
+        "imaging_modality": "general",
         "email": "general",
 
         "camera": "camera",
@@ -237,6 +238,11 @@ class ExpConfiguratorGUI(GuiBase):
             "sample_prep_lineEdit",
             "sample_prep_load_pushButton",
             "sample_prep_edit_pushButton",
+        ),
+
+        "imaging_modality": (
+            "imaging_label",
+            "imaging_modality_comboBox",
         ),
 
         "email": (
@@ -496,6 +502,13 @@ class ExpConfiguratorGUI(GuiBase):
         self._mw.sample_prep_load_pushButton.setToolTip('Select an existing sample file (*.yml)')
         self._mw.sample_prep_edit_pushButton.setToolTip('Create or edit the sample file')
         self._sample_dialog = None
+        # imaging modality (information only): the shared list of the logic, the default of the setup selected
+        if self._mw.imaging_modality_comboBox.count() == 0:
+            self._mw.imaging_modality_comboBox.addItems(list(self._exp_logic.IMAGING_MODALITIES))
+        self._mw.imaging_modality_comboBox.setCurrentText(self._exp_logic.imaging_modality_default)
+        self._mw.imaging_modality_comboBox.setToolTip('Imaging modality of the experiment (information only: written '
+                                                      'in the parameters and in metadata.yml)')
+        self._mw.imaging_modality_comboBox.currentTextChanged.connect(self._exp_logic.update_imaging_modality)
         self._mw.TransferData_checkBox.stateChanged.connect(self._exp_logic.update_data_transfer)
         self._mw.photobleaching_imaging_checkBox.stateChanged.connect(self._photobleaching_imaging_changed)
         self._mw.select_camera_comboBox.currentTextChanged.connect(self._exp_logic.update_camera)
@@ -870,6 +883,9 @@ class ExpConfiguratorGUI(GuiBase):
         for name in ('sample_prep_label', 'sample_prep_lineEdit', 'sample_prep_load_pushButton',
                      'sample_prep_edit_pushButton'):
             getattr(self._mw, name).setVisible(False)
+        # the imaging modality: only for the experiments that declare imaging_modality. Invisible as default.
+        self._mw.imaging_label.setVisible(False)
+        self._mw.imaging_modality_comboBox.setVisible(False)
         # same for the mail. It is only required for the HiM tasks
         self._mw.mail_LineEdit.setVisible(False)
         self._mw.mail_Label.setVisible(False)
@@ -1263,6 +1279,8 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.sample_name_LineEdit.setText(self._exp_logic.config_dict.get('sample_name', ''))
             self._show_sample_tag(config.get('sample_tag'))
             self._mw.sample_prep_lineEdit.setText(config.get('sample_file') or '')
+            self._mw.imaging_modality_comboBox.setCurrentText(
+                config.get('imaging_modality') or self._exp_logic.imaging_modality_default)
             self._select_camera_entry(self._exp_logic.config_dict.get('camera'))
             self._mw.exposure_DSpinBox.setValue(self._exp_logic.config_dict.get('exposure', 0.0))
             self._mw.gain_SpinBox.setValue(self._exp_logic.config_dict.get('gain', 0))
@@ -1381,6 +1399,7 @@ class ExpConfiguratorGUI(GuiBase):
             self._mw.sample_tag_comboBox,
             self._mw.sample_tag_lineEdit,
             self._mw.sample_prep_lineEdit,
+            self._mw.imaging_modality_comboBox,
             self._mw.TransferData_checkBox,
             self._mw.photobleaching_imaging_checkBox,
             self._mw.exposure_DSpinBox,

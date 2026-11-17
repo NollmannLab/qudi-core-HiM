@@ -140,6 +140,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     by the subclass (_read_microscope_parameters). photobleaching_imaging (optional, default false; declared by
     the SD definitions): image after the photobleaching - not implemented, True only gives the warning
     "photobleaching_imaging is not implemented yet - ignored" at the start of the run.
+    imaging_modality (optional, information only; one of the configurator's IMAGING_MODALITIES): written in the
+    Acquisition section of metadata.yml (and kept in HiM_parameters.yml with the other keys); no effect on the run.
 
     Data folder (all setups): <root>/YYYY_MM_DD/NNN_HiM_<sample_name>, created by qudi
     (tasks/common/data_folders.py); self.prefix = NNN. <root> is chosen before any hardware call
@@ -243,6 +245,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self._stop_info = None       # HiMRunStopped of the run: {'source', 'reason', ...details for the pop-up}
         self.prefix = ''
         self.sample_name = None
+        self.imaging_modality = None  # experiment key imaging_modality (information only, written in metadata.yml)
         self.save_path = None
         self.save_network_path = ''
         self._data_root = None
@@ -279,6 +282,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         except RuntimeError as err:
             problems.append(str(err))
         self.sample_name = params.get('sample_name')
+        self.imaging_modality = params.get('imaging_modality')  # optional, information only
         self.roi_list_path = params.get('roi_list_path')
         self.injections_path = params.get('injections_path')
         self.imaging_sequence = params.get('imaging_sequence') or []
@@ -789,7 +793,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
             _, _, hyb_list, pb_list, _ = injections
             positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self.roi_names}
             metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
-                                         self.num_z_planes)
+                                         self.num_z_planes, imaging_modality=self.imaging_modality)
             set_metadata_field(metadata, 'Fluidics', 'hybridization', hyb_list)
             set_metadata_field(metadata, 'Fluidics', 'photobleaching', pb_list)
         # sample file: copied as experiment_parameters/sample.yml, its content added as the 'Sample' section of

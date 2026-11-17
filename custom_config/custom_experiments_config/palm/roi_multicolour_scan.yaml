@@ -12,6 +12,11 @@ fields:
     required: true
     default: ""
 
+  # imaging modality (information only, written in the parameters and in metadata.yml)
+  imaging_modality:
+    required: true
+    default: "epifluorescence/widefield"
+
   filter_pos:
     required: true
     default: 1

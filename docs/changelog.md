@@ -6,6 +6,56 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-16
 
+### Imaging modality recorded for the Hi-M and ROI scan experiments
+
+Information only (no task changes its behaviour): the imaging modality of each experiment that saves images is
+chosen in the experiment configurator and written in the experiment file, the parameter file and metadata.yml.
+Key: `imaging_modality` (key of the Acquisition section of Spinning_Disk_setup.cfg).
+
+#### Added
+
+- Configurator logic (`logic/experiment_configurator_logic.py`):
+  - module constant `IMAGING_MODALITIES = ('epifluorescence/widefield', 'brightfield', 'confocal',
+    'spinning_disk', 'TIRF', 'light_sheet')`, shared by all instruments (also `ExpConfigLogic.IMAGING_MODALITIES`,
+    read by the GUI);
+  - option `default imaging modality` (default: the first item); an invalid value gives a warning at activation
+    and the first item is used; documented in the module docstring;
+  - field `imaging_modality`: `update_imaging_modality(value)` refuses a value not in the list (warning, value
+    kept). A new experiment whose definition declares the field starts with the option of the setup: the
+    default written in the definition is replaced by it in `_get_definition_defaults`, so the option is the only
+    source of the default. Loading a file without the key gives the default (no error); an unknown value gives
+    a warning and the default.
+- Configurator GUI (`gui/experiments_setup/exp_configurator_gui.py`): `imaging_modality_comboBox` filled with
+  `IMAGING_MODALITIES` (in order), default of the setup selected; field `imaging_modality` -> `imaging_label` +
+  `imaging_modality_comboBox` in the general section, shown only for the definitions that declare it (hidden by
+  default in `set_visibility_general_settings`); connected to `update_imaging_modality`; `update_entries`
+  selects the value of the configuration; signals blocked during refreshes.
+- `ui_exp_configurator.ui`: widgets `imaging_label` and `imaging_modality_comboBox` (row 4 of the general block,
+  added with Qt Designer).
+- Experiment definitions: field `imaging_modality` (required, default "epifluorescence/widefield") after the
+  sample fields in spinning_disk/him_epi.yaml, spinning_disk/roi_multicolour_scan.yaml, ramm/him.yaml,
+  ramm/roi_multicolour_scan.yaml, palm/roi_multicolour_scan.yaml, dummy/him.yaml,
+  dummy/roi_multicolour_scan.yaml. Not in the confocal SD definitions, the OPM definition and yet_to_be_used/.
+- `OPM_config.cfg`, experiments_configurator_logic: `default imaging modality: 'light_sheet'` (no effect yet: the
+  only OPM definition, psf_stack.yaml, does not declare imaging_modality). RAMM_config.cfg does not configure
+  the configurator logic; the other configurations use the default (epifluorescence/widefield).
+- Metadata templates: `- imaging_modality:` after `sample_name` in the Acquisition section of
+  Spinning_Disk_setup.cfg (added by hand), RAMM_setup.cfg, OPM_setup.cfg and PALM_setup.cfg.
+- `tasks/common/run_metadata.fill_run_metadata`: parameter `imaging_modality=None`, written in the Acquisition
+  field when given (left empty otherwise, e.g. callers that do not pass it). The Hi-M task (`HiMTaskBase`,
+  all setups) and the ROI scan task (`RoiScanTaskBase`, all setups) pass the value of the experiment file.
+  HiM_parameters.yml and parameters.yml already hold every key of the experiment file, imaging_modality
+  included (checked by the tests).
+- Tests:
+  - tests/test_logic_helpers.py, new section "configurator: imaging modality": list, option (default, TIRF,
+    invalid -> warning and first item), new experiment, update refused, load without the key / with TIRF / with
+    an unknown value, save; GUI combo box (six values in order, shown only for a definition that declares the
+    field, combo -> logic, loaded value selected); definitions, OPM option and templates of the repository.
+  - tests/test_roi_scan.py, section "run folder and run files": `fill_run_metadata` with / without the value;
+    ROI scan dummy: imaging_modality in metadata.yml (Acquisition) and in parameters.yml.
+  - tests/test_him.py, block `metadata`: Hi-M dummy imaging_modality in metadata.yml (Acquisition) and in
+    HiM_parameters.yml; without it, the Acquisition field stays empty.
+
 ### Dummy setup: field of cells for the dummy camera, sample file on the dummy experiments
 
 #### Changed
