@@ -80,6 +80,8 @@ class RoiScanTaskBase(ProgressModuleTask):
         sample_file: '/path/to/sample.yml'    # optional (required by the SD definition): YAML describing the
                                               # sample (tasks/common/sample_info.py); read before any hardware
                                               # call (missing / unreadable -> error); absent or empty -> none
+        imaging_modality: 'spinning_disk'    # optional, information only (one of the configurator's
+                                              # IMAGING_MODALITIES): Acquisition section of metadata.yml
 
     Call parameter (Task Runner):
         start_roi   first ROI to scan: a ROI name of the loaded list (e.g. 'ROI_005'); empty =
@@ -426,7 +428,8 @@ class RoiScanTaskBase(ProgressModuleTask):
         if self._metadata_template is not None:
             positions = {roi: self._roi_logic.get_roi_position(roi) for roi in self._scan_rois}
             metadata = fill_run_metadata(self._metadata_template, self.sample_name, self.imaging_sequence, positions,
-                                         self._user_params.get('num_z_planes'))
+                                         self._user_params.get('num_z_planes'),
+                                         imaging_modality=self._user_params.get('imaging_modality'))
         # sample file: copied as experiment_parameters/sample.yml, its content added as the 'Sample' section of
         # metadata.yml (top of the run folder)
         add_sample_to_run(self._parameters_dir, self._sample, metadata)

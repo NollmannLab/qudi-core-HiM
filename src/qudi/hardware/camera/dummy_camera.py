@@ -7,9 +7,13 @@ Modified with Claude code (Anthropic)
 This module was available in Qudi legacy version and was extended. It simulates a microscope camera following the
 contract defined in camera_interface.py, so that the GUI and the logic can be tested without any hardware.
 
-The camera "observes" a fixed synthetic scene (intensity gradient, blobs and a bright marker in the top-left corner)
-that is cropped by the ROI, with a noise level that depends on the exposure and the gain. Frames are produced at the
-rate imposed by the exposure time, starting when an acquisition is launched - like a real camera filling its buffer.
+The camera "observes" a fixed synthetic sample - a field of cells with a faint cytoplasm, a textured nucleus and a few
+bright foci, on a background of ~100 counts - that is cropped by the ROI, with a noise level that depends on the
+exposure and the gain. The cells are placed at a fixed density, so their number grows with the sensor size (about 14
+at 512 x 512, 28 at 1024 x 1024, 88 at 3200 x 3200); their size follows the module constants REFERENCE_SIZE,
+CELL_RADIUS_PX, CELL_SIZE_EXPONENT and CELL_SPACING. The field is built from a fixed random seed, so the image is the
+same at every start for a given sensor size. Frames are produced at the rate imposed by the exposure time, starting
+when an acquisition is launched - like a real camera filling its buffer.
 
 -----------------------------------------------------------------------------------
 qudi-core is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
@@ -24,8 +28,16 @@ You should have received a copy of the GNU General Public License along with Qud
 
 import numpy as np
 import time
+from scipy.ndimage import gaussian_filter
 from qudi.interface.camera_interface import CameraInterface
 from qudi.core.configoption import ConfigOption
+
+
+# simulated sample of the camera (field of cells, see CameraDummy._create_scene)
+REFERENCE_SIZE = 512  # sensor size (px) for which CELL_RADIUS_PX is defined
+CELL_RADIUS_PX = 44  # mean cell semi-axis (px) on a 512 px sensor
+CELL_SIZE_EXPONENT = 0.5  # cell size ~ (sensor size / 512) ** exponent; 0: fixed size in px
+CELL_SPACING = 2.0  # minimum distance between cell centres, in mean cell radii
 
 
 class CameraDummy(CameraInterface):
@@ -433,20 +445,83 @@ class CameraDummy(CameraInterface):
             count = min(count, self.n_frames)
         return count
 
+    # simulated sample: field of cells (see _create_scene and the module constants)
+    SCENE_SEED = 7  # fixed seed: the same field of cells at every start
+    SCENE_BACKGROUND = 100.  # background level (counts at the default exposure)
+
     @staticmethod
-    def _create_scene(height, width):
-        """ Create the image of the simulated sample: an intensity gradient, three blobs of different sizes and a bright
-        marker in the top-left corner (to check the orientation of the image and the ROI).
+    def _cell_centres(height, width, rng):
+        """ Mean cell radius and cell centres of the simulated sample: random positions at a fixed density, at least
+        CELL_SPACING mean radii apart (dart throwing with a grid lookup, fast on large sensors), so that the number of
+        cells grows with the sensor area. The mean radius is CELL_RADIUS_PX on a REFERENCE_SIZE sensor and scales as
+        (sensor size / REFERENCE_SIZE) ** CELL_SIZE_EXPONENT.
 
         :param: int height, width: size of the sensor
+        :param: numpy.random.Generator rng: random generator (consumed)
+        :return: (float radius, list of numpy arrays (y, x) of the centres)
+        """
+        scale = min(height, width)
+        radius = CELL_RADIUS_PX * (scale / REFERENCE_SIZE) ** CELL_SIZE_EXPONENT
+        spacing = CELL_SPACING * radius
+        n_target = int(0.55 * height * width / (np.pi * (spacing / 2) ** 2) * 0.6)
+        cell = spacing / np.sqrt(2)  # grid step: at most one centre per grid cell
+        grid, centres, attempts = {}, [], 0
+        while len(centres) < n_target and attempts < 30 * n_target:
+            attempts += 1
+            c = rng.uniform((0.5 * radius, 0.5 * radius), (height - 0.5 * radius, width - 0.5 * radius))
+            gy, gx = int(c[0] // cell), int(c[1] // cell)
+            if any(np.hypot(*(c - grid[(gy + i, gx + j)])) < spacing
+                   for i in range(-2, 3) for j in range(-2, 3) if (gy + i, gx + j) in grid):
+                continue
+            grid[(gy, gx)] = c
+            centres.append(c)
+        return radius, centres
+
+    @classmethod
+    def _create_scene(cls, height, width, seed=None):
+        """ Create the image of the simulated sample: a field of fixed cells on a uniform background (SCENE_BACKGROUND).
+        Each cell is an ellipse with a faint cytoplasm and a soft edge, a nucleus slightly off-centre with a
+        chromatin-like texture and, in most cells, one to three bright foci. The cells are placed at a fixed density
+        (see _cell_centres), so their number grows with the sensor size (about 14 at 512 x 512, 28 at 1024 x 1024,
+        88 at 3200 x 3200); their size follows REFERENCE_SIZE, CELL_RADIUS_PX, CELL_SIZE_EXPONENT and CELL_SPACING.
+        The random generator uses a fixed seed, so the scene is the same at every start for a given sensor size
+        (built once, at activation: ~0.1 s at 1024 x 1024, ~1 s at 3200 x 3200).
+
+        :param: int height, width: size of the sensor
+        :param: int seed: seed of the random generator (default SCENE_SEED)
         :return: numpy array (float32) of shape (height, width)
         """
-        rows, cols = np.mgrid[0:height, 0:width].astype(np.float32)
-        scene = 100 + 500 * cols / max(width - 1, 1)  # horizontal gradient
-        for (row, col, size, amplitude) in [(0.30, 0.30, 0.04, 3000), (0.65, 0.70, 0.08, 2000), (0.80, 0.25, 0.02, 4000)]:
-            sigma = size * max(height, width)
-            scene += amplitude * np.exp(-((rows - row * height) ** 2 + (cols - col * width) ** 2) / (2 * sigma ** 2))
-        scene[:max(int(0.08 * height), 1), :max(int(0.15 * width), 1)] = 5000  # marker of the top-left corner
+        rng = np.random.default_rng(cls.SCENE_SEED if seed is None else seed)
+        scene = np.full((height, width), cls.SCENE_BACKGROUND, dtype=np.float32)
+        radius, centres = cls._cell_centres(height, width, rng)
+
+        # chromatin-like texture of the nuclei, computed once on the full frame
+        texture = gaussian_filter(rng.normal(size=(height, width)).astype(np.float32), radius * 0.035)
+        texture /= texture.std() or 1.
+
+        for (cy, cx) in centres:
+            a = radius * rng.uniform(0.8, 1.15)  # semi-axes and orientation of the cell
+            b = a * rng.uniform(0.6, 0.9)
+            th = rng.uniform(0, np.pi)
+            r0, r1 = int(max(cy - a * 1.3, 0)), int(min(cy + a * 1.3, height))
+            c0, c1 = int(max(cx - a * 1.3, 0)), int(min(cx + a * 1.3, width))
+            yy, xx = np.mgrid[r0:r1, c0:c1].astype(np.float32)
+            dy, dx = yy - cy, xx - cx
+            u = dx * np.cos(th) + dy * np.sin(th)
+            v = -dx * np.sin(th) + dy * np.cos(th)
+            rc = np.sqrt((u / a) ** 2 + (v / b) ** 2)
+            cyto = 400 / (1 + np.exp((rc - 1) * 12))  # faint cytoplasm, soft edge
+            ox, oy = rng.uniform(-0.15, 0.15, 2) * a  # nucleus slightly off-centre
+            rn = np.sqrt(((u - ox) / (0.45 * a)) ** 2 + ((v - oy) / (0.40 * a)) ** 2)
+            nmask = 1 / (1 + np.exp((rn - 1) * 15))
+            patch = cyto + nmask * (1500 + 350 * texture[r0:r1, c0:c1])
+            if rng.random() < 0.7:  # one to three bright foci in most nuclei
+                spot = 0.05 * radius
+                for _ in range(rng.integers(1, 4)):
+                    rr, ang = rng.uniform(0, 0.3 * a), rng.uniform(0, 2 * np.pi)
+                    sy, sx = cy + oy + rr * np.sin(ang), cx + ox + rr * np.cos(ang)
+                    patch += 3500 * np.exp(-((yy - sy) ** 2 + (xx - sx) ** 2) / (2 * spot ** 2))
+            scene[r0:r1, c0:c1] += patch
         return scene
 
     def _create_frame(self):

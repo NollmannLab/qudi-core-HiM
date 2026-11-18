@@ -9,8 +9,9 @@ qudi-core-HiM: files describing a task run, written in its run folder (ROI scan,
   - set_metadata_field(metadata, section, key, value): set one field of a section of the template
     layout (a section is a list of one-key mappings, or a mapping); missing keys are added.
   - write_metadata(folder, metadata, name='metadata.yml'): YAML dump, keys in template order.
-  - fill_run_metadata(template, sample_name, imaging_sequence, roi_positions, num_z_planes=None): copy of
-    the template with Time and the Acquisition fields known to the ROI scan and Hi-M tasks.
+  - fill_run_metadata(template, sample_name, imaging_sequence, roi_positions, num_z_planes=None,
+    imaging_modality=None): copy of the template with Time and the Acquisition fields known to the ROI scan
+    and Hi-M tasks.
   - optional_metadata_template(task): template of the task option metadata_template - None (one
     warning) when the option is not set, RuntimeError when the file is missing or unreadable.
   - experiment_parameters_folder(metadata_folder) -> <metadata_folder>/experiment_parameters (created): the
@@ -95,17 +96,21 @@ def write_metadata(folder, metadata: dict, name='metadata.yml') -> str:
     return path
 
 
-def fill_run_metadata(template: dict, sample_name, imaging_sequence, roi_positions, num_z_planes=None) -> dict:
-    """Copy of the template with Time (date-time) and the Acquisition fields sample_name, laser_lines and
-    laser_power_(%) (imaging sequence order), number_z_planes (when given) and roi_list_(xyz) (one
-    {roi name: [x, y, z]} entry per ROI of roi_positions {name: position}, in order). Other fields stay as in
-    the template."""
+def fill_run_metadata(template: dict, sample_name, imaging_sequence, roi_positions, num_z_planes=None,
+                      imaging_modality=None) -> dict:
+    """Copy of the template with Time (date-time) and the Acquisition fields sample_name, imaging_modality
+    (when given: experiment key imaging_modality, information only), laser_lines and laser_power_(%) (imaging
+    sequence order), number_z_planes (when given) and roi_list_(xyz) (one {roi name: [x, y, z]} entry per ROI
+    of roi_positions {name: position}, in order). Other fields stay as in the template (imaging_modality left
+    empty when not given)."""
     metadata = copy.deepcopy(template)
     metadata['Time'] = datetime.now().strftime('%m-%d-%Y, %H:%M:%S')
     sequence = list(imaging_sequence or [])
-    fields = {'sample_name': sample_name,
-              'laser_lines': [entry[0] for entry in sequence],
-              'laser_power_(%)': [entry[1] for entry in sequence]}
+    fields = {'sample_name': sample_name}
+    if imaging_modality is not None:
+        fields['imaging_modality'] = imaging_modality
+    fields.update({'laser_lines': [entry[0] for entry in sequence],
+                   'laser_power_(%)': [entry[1] for entry in sequence]})
     if num_z_planes is not None:
         fields['number_z_planes'] = num_z_planes
     fields['roi_list_(xyz)'] = [{name: [float(v) for v in position]} for name, position in roi_positions.items()]

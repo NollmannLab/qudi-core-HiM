@@ -1,5 +1,6 @@
 """ROI scan task (qudi.tasks.roi_multicolour_scan): progress display, start ROI, ZEN settings pop-up of the
-spinning disk, run folder on the server folder or in the local folder (also the Hi-M task).
+spinning disk, run folder on the server folder or in the local folder (also the Hi-M task); simulated
+sample of the dummy camera (field of cells).
 
 Usage: QT_QPA_PLATFORM=offscreen python tests/test_roi_scan.py [<repo_root> [<roi_scan_with_resume.py>]]
 <roi_scan_with_resume.py>: the ROI scan module before the start_roi change; the comparison "same calls as
@@ -1221,11 +1222,16 @@ def _section_data_folder():
     meta_path = os.path.join(run_folder, 'metadata.yml')
     meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else {}
     template_sections = list(yaml.safe_load(open(TEMPLATE, encoding='utf-8')))
+    # sections of metadata.yml with a sample file: the Sample section keeps its place in the template (appended when
+    # the template has none); without a sample file the template's Sample section stays empty
+    with_sample = template_sections + ([] if 'Sample' in template_sections else ['Sample'])
+    no_sample_ok = lambda m: ('Sample' not in m if 'Sample' not in template_sections  # noqa: E731
+                              else list(m) == template_sections and not m['Sample'])
     check('(5b SD, sample_file set) sample.yml (exact copy) in the metadata folder; metadata.yml: template sections '
-          'then a Sample section with the values of the file, in order',
+          'with the Sample section (place of the template) holding the values of the file, in order',
           err is None and os.path.exists(os.path.join(run_folder, 'experiment_parameters', 'sample.yml'))
           and open(os.path.join(run_folder, 'experiment_parameters', 'sample.yml'), 'rb').read() == open(sample_path, 'rb').read()
-          and list(meta) == template_sections + ['Sample']
+          and list(meta) == with_sample
           and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Drosophila melanogaster'},
                                  {'formamide_percent': 50}, {'experimenter': 'X'}],
           (err, os.listdir(run_folder) if os.path.isdir(run_folder) else None, meta.get('Sample')))
@@ -1243,10 +1249,54 @@ def _section_data_folder():
         result, err = run(task, {'start_roi': ''})
         folder_run = result.get('directory') if result else ''
         meta = yaml.safe_load(open(os.path.join(folder_run, 'metadata.yml'), encoding='utf-8')) if folder_run else {}
-        check(f'(5b dummy, sample_file {label}) no change: no sample.yml, no Sample section, no warning',
+        check(f'(5b dummy, sample_file {label}) no change: no sample.yml, Sample section of the template empty (none '
+              f'without one in the template), no warning',
               err is None and 'sample.yml' not in os.listdir(folder_run)
-              and 'sample.yml' not in os.listdir(os.path.join(folder_run, 'experiment_parameters')) and 'Sample' not in meta
+              and 'sample.yml' not in os.listdir(os.path.join(folder_run, 'experiment_parameters')) and no_sample_ok(meta)
               and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (err, os.listdir(folder_run) if folder_run else None))
+    # dummy with a sample file: same files as on the SD
+    local = folder('local_5b_dummy')
+    task, rec = scan_task(rs.RoiScanDummyTask, scan_yaml('dummy_sample_set', save_path=local, sample_file=sample_path,
+                                                         imaging_modality='spinning_disk'))
+    result, err = run(task, {'start_roi': ''})
+    folder_run = result.get('directory') if result else ''
+    meta_path = os.path.join(folder_run, 'metadata.yml') if folder_run else ''
+    meta = yaml.safe_load(open(meta_path, encoding='utf-8')) if meta_path and os.path.exists(meta_path) else {}
+    copy_path = os.path.join(folder_run, 'experiment_parameters', 'sample.yml') if folder_run else ''
+    check('(5b dummy, sample_file set) sample.yml (exact copy) in experiment_parameters/ (not at the top); metadata.yml: '
+          'template sections, the Sample section (place of the template) with the values of the file, in order',
+          err is None and os.path.exists(copy_path) and open(copy_path, 'rb').read() == open(sample_path, 'rb').read()
+          and 'sample.yml' not in os.listdir(folder_run)
+          and list(meta) == with_sample
+          and meta['Sample'] == [{'experiment_type': 'DNA-FISH'}, {'organism': 'Drosophila melanogaster'},
+                                 {'formamide_percent': 50}, {'experimenter': 'X'}],
+          (err, os.listdir(folder_run) if folder_run else None, meta.get('Sample')))
+    params_path = os.path.join(folder_run, 'experiment_parameters', 'parameters.yml') if folder_run else ''
+    params = yaml.safe_load(open(params_path, encoding='utf-8')) if params_path and os.path.exists(params_path) else {}
+    acq = {k: v for item in meta.get('Acquisition') or [] for k, v in item.items()}
+    check("(5b dummy, imaging_modality 'spinning_disk') metadata.yml Acquisition imaging_modality = spinning_disk; "
+          "parameters.yml 'experiment parameters': imaging_modality spinning_disk",
+          acq.get('imaging_modality') == 'spinning_disk'
+          and (params.get('experiment parameters') or {}).get('imaging_modality') == 'spinning_disk',
+          (acq.get('imaging_modality'), params.get('experiment parameters')))
+    # fill_run_metadata: Acquisition field imaging_modality filled when given, empty otherwise (e.g. basic imaging)
+    from qudi.tasks.common.run_metadata import fill_run_metadata, load_metadata_template
+    tpl = load_metadata_template(TEMPLATE)
+    acq_of = lambda m: {k: v for item in m['Acquisition'] for k, v in item.items()}  # noqa: E731
+    given = acq_of(fill_run_metadata(tpl, 's', [[488, 10.0]], {'ROI_001': [0, 0, 0]}, imaging_modality='TIRF'))
+    absent = acq_of(fill_run_metadata(tpl, 's', [[488, 10.0]], {'ROI_001': [0, 0, 0]}))
+    order = [list(item)[0] for item in fill_run_metadata(tpl, 's', [], {}, imaging_modality='TIRF')['Acquisition']]
+    check('fill_run_metadata: Acquisition imaging_modality = the value given (in the place of the template), empty '
+          'when not given; template unchanged',
+          given.get('imaging_modality') == 'TIRF' and 'imaging_modality' in absent and absent['imaging_modality'] is None
+          and order == [list(item)[0] for item in tpl['Acquisition']]
+          and acq_of(tpl).get('imaging_modality') is None, (given.get('imaging_modality'), absent.get('imaging_modality')))
+    # dummy experiment definition: sample_file optional (empty by default), sample_tag kept
+    dummy_def = yaml.safe_load(open(os.path.join(repo, 'custom_config', 'custom_experiments_config', 'dummy',
+                                                 'roi_multicolour_scan.yaml'), encoding='utf-8'))['fields']
+    check('(5b dummy definition) roi_multicolour_scan.yaml: sample_file optional with an empty default, sample_tag kept',
+          dummy_def.get('sample_file') == {'required': False, 'default': ''} and 'sample_tag' in dummy_def,
+          dummy_def.get('sample_file'))
 
     # ------------------------------------------------------------------ Hi-M (real dummy modules)
     class FakeMain(QtCore.QObject):
@@ -1413,11 +1463,91 @@ def _section_data_folder():
     return results
 
 
+# --- dummy camera ---
+def _section_dummy_camera():
+    """Dummy camera (qudi.hardware.camera.dummy_camera.CameraDummy): simulated sample (field of cells, fixed
+    seed, number of cells growing with the sensor size), frames cropped by the camera ROI. Camera options of
+    dummy_camera_1 in dummy_config.cfg."""
+    import weakref, time
+    import numpy as np
+    import yaml
+    from qtpy import QtCore
+    from qudi.hardware.camera.dummy_camera import CameraDummy
+
+    results = []
+
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond)))
+        print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+
+    class FakeMain(QtCore.QObject):
+        pass
+
+    MAIN = FakeMain()
+    CFG = yaml.safe_load(open(os.path.join(repo, 'custom_config/dummy_config.cfg'), encoding='utf-8'))
+    options = CFG['hardware']['dummy_camera_1']['options']
+
+    def camera(name):
+        cam = CameraDummy(qudi_main_weakref=weakref.ref(MAIN), name=name, config=dict(options))
+        cam.module_state.activate()
+        return cam
+
+    cam_a, cam_b = camera('dummy_camera_a'), camera('dummy_camera_b')
+    rows, cols = int(options['resolution'][0]), int(options['resolution'][1])
+    scene = cam_a._scene
+    check(f'scene: sensor size ({rows}, {cols}), float32, background ~{CameraDummy.SCENE_BACKGROUND:g} (median), '
+          f'cells brighter than the background',
+          scene.shape == (rows, cols) and scene.dtype == np.float32
+          and abs(float(np.median(scene)) - CameraDummy.SCENE_BACKGROUND) < 20 and float(scene.max()) > 1000,
+          (scene.shape, scene.dtype, float(np.median(scene)), float(scene.max())))
+    corner = scene[:max(int(0.08 * rows), 1), :max(int(0.15 * cols), 1)]
+    check('scene: no saturated block in the top-left corner (former marker at 5000)',
+          not np.all(corner >= 5000) and float(np.median(corner)) < 1000, float(np.median(corner)))
+    check('scene: same image for two cameras of the same size (fixed seed)', np.array_equal(cam_a._scene, cam_b._scene))
+    frame = cam_a._create_frame()
+    check('frame (default exposure, gain 1): full sensor, uint16, values within 0..65535, not clipped at the top',
+          frame.shape == (rows, cols) and frame.dtype == np.uint16 and int(frame.min()) >= 0
+          and int(frame.max()) < 65535, (frame.shape, frame.dtype, int(frame.max())))
+    cam_a.set_exposure(10 * options['default_exposure'])
+    cam_a.set_gain(50)
+    bright = cam_a._create_frame()
+    check('frame (10x exposure, gain 50): values clipped within 0..65535 (uint16)',
+          bright.dtype == np.uint16 and int(bright.max()) == 65535 and int(bright.min()) >= 0, int(bright.max()))
+    cam_a.set_exposure(options['default_exposure'])
+    cam_a.set_gain(1)
+    ok = cam_a.set_image(1, 1, 101, 300, 51, 150)  # columns 101..300, rows 51..150 (1-based, inclusive)
+    cropped = cam_a._create_frame()
+    expected = scene[50:150, 100:300]
+    check('camera ROI: the frame is the ROI of the scene (100 x 200), plus the noise',
+          ok and cropped.shape == (100, 200) and cam_a.get_image_size() == (100, 200)
+          and abs(float(cropped.astype(float).mean()) - float(expected.mean())) < 5
+          and np.corrcoef(cropped.ravel().astype(float), expected.ravel())[0, 1] > 0.9,
+          (cropped.shape, float(cropped.mean()), float(expected.mean())))
+    # number of cells: grows with the sensor size (fixed density), cell centres inside the sensor
+    n_cells = {n: len(CameraDummy._cell_centres(n, n, np.random.default_rng(CameraDummy.SCENE_SEED))[1])
+               for n in (512, 1024)}
+    centres_in = all(0 <= c[0] < 1024 and 0 <= c[1] < 1024
+                     for c in CameraDummy._cell_centres(1024, 1024, np.random.default_rng(CameraDummy.SCENE_SEED))[1])
+    check(f'more cells on a larger sensor: {n_cells[512]} at 512 x 512, {n_cells[1024]} at 1024 x 1024 (at least twice '
+          f'as many), centres inside the sensor',
+          n_cells[512] >= 5 and n_cells[1024] >= 2 * n_cells[512] and centres_in, n_cells)
+    t = time.perf_counter()
+    big = CameraDummy._create_scene(3200, 3200)
+    dt = time.perf_counter() - t
+    check(f'scene creation at 3200 x 3200 in less than 3 s ({dt * 1000:.0f} ms), float32',
+          dt < 3.0 and big.shape == (3200, 3200) and big.dtype == np.float32, dt)
+    del big
+    for cam in (cam_a, cam_b):
+        cam.on_deactivate()  # not module_state.deactivate(): no status file written in the qudi app data
+    return results
+
+
 SECTIONS = [
     ('progress display', _section_progress),
     ('start ROI', _section_start_roi),
     ('ZEN settings pop-up', _section_zen_popup),
     ('run folder and run files', _section_data_folder),
+    ('dummy camera', _section_dummy_camera),
 ]
 
 if __name__ == '__main__':

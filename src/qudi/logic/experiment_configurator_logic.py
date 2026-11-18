@@ -71,6 +71,9 @@ Adding a new experiment
            default sample path: /path/to/sample/files    # optional: start folder of the sample file dialogs
            sample template: /path/to/custom_metadata_templates/sample_template.yml   # optional: fields of the
                                                          # sample file dialog (without it, "Edit" is disabled)
+           default imaging modality: 'epifluorescence/widefield'   # optional: one of IMAGING_MODALITIES
+                                                         # (default: the first one); initial value of the
+                                                         # imaging_modality field of every new experiment
 
    The hardware connectors are optional and may be omitted when the setup does not provide the corresponding module.
 
@@ -110,6 +113,10 @@ from qtpy import QtCore
 from qudi.core.module import LogicBase
 from qudi.core.configoption import ConfigOption
 from qudi.core.connector import Connector
+
+# imaging modalities offered by the field imaging_modality (information only: recorded in the experiment file, the
+# parameter file and metadata.yml of the run; no task changes its behaviour). Shared by all the instruments.
+IMAGING_MODALITIES = ('epifluorescence/widefield', 'brightfield', 'confocal', 'spinning_disk', 'TIRF', 'light_sheet')
 
 
 # ======================================================================================================================
@@ -236,11 +243,17 @@ class ExpConfigLogic(LogicBase):
     default_zen_path = ConfigOption('default zen path', default='')  # start folder of the ZEN folder dialogs
     default_sample_path = ConfigOption('default sample path', default='')  # start folder of the sample file dialogs
     sample_template_path = ConfigOption('sample template', default='')  # fields of the sample file dialog
+    # initial value of the field imaging_modality (one of IMAGING_MODALITIES); it replaces the default written in the
+    # experiment definitions, so that each setup sets its own modality
+    default_imaging_modality = ConfigOption('default imaging modality', default=IMAGING_MODALITIES[0])
 
     # sample tag of the ROI scan (experiment key sample_tag): one of these items, or a free tag
     SAMPLE_TAG_ITEMS = ('DAPI', 'RNA', 'IF')
     SAMPLE_TAG_FREE = 'Free'
     SAMPLE_TAG_PATTERN = r'^[A-Za-z0-9]+$'  # letters and digits only (no '-', no space, no '_': file name separator)
+
+    # imaging modalities of the field imaging_modality (module constant, also read by the GUI)
+    IMAGING_MODALITIES = IMAGING_MODALITIES
 
     # attributes
     _experiment_definitions = {}
@@ -257,6 +270,7 @@ class ExpConfigLogic(LogicBase):
     img_sequence_model = None
     is_timelapse_ramm = False
     is_timelapse_palm = False
+    _imaging_modality_default = IMAGING_MODALITIES[0]
 
     def on_activate(self):
         """Initialize setup-dependent state and load enabled experiment definitions.
@@ -271,6 +285,14 @@ class ExpConfigLogic(LogicBase):
         self._filter_logic = self.filter_logic()
         self._roi_logic = self.roi_logic()
         self._injections_logic = self.injections_logic()
+
+        # initial value of the field imaging_modality: option 'default imaging modality', first item if invalid
+        modality = self.default_imaging_modality
+        if modality not in IMAGING_MODALITIES:
+            self.log.warning(f"Option 'default imaging modality' {modality!r} is not one of {list(IMAGING_MODALITIES)}: "
+                             f"{IMAGING_MODALITIES[0]!r} used.")
+            modality = IMAGING_MODALITIES[0]
+        self._imaging_modality_default = modality
 
         # prepare the items that will be displayed in the ComboBoxes on the GUI
         self.lasers = []
@@ -343,6 +365,11 @@ class ExpConfigLogic(LogicBase):
 # Methods to load template file for experiments
 # ----------------------------------------------------------------------------------------------------------------------
     @property
+    def imaging_modality_default(self) -> str:
+        """Initial value of the field imaging_modality (option 'default imaging modality', checked at activation)."""
+        return self._imaging_modality_default
+
+    @property
     def experiment_definitions(self):
         """Return a shallow copy of the loaded definition registry.
 
@@ -388,6 +415,13 @@ class ExpConfigLogic(LogicBase):
         self.config_dict.update(loaded_config)
         if "sample_tag" in (definition.get("fields") or {}):
             self._sample_tag_from_old_keys(loaded_config, path)
+        if "imaging_modality" in (definition.get("fields") or {}):
+            # file without the key: default of the setup (from the definition defaults); unknown value: default
+            modality = self.config_dict.get("imaging_modality")
+            if modality not in IMAGING_MODALITIES:
+                self.log.warning(f"{path}: imaging_modality {modality!r} is not one of {list(IMAGING_MODALITIES)}: "
+                                 f"{self._imaging_modality_default!r} used.")
+                self.config_dict["imaging_modality"] = self._imaging_modality_default
         self.current_experiment = experiment
         self._restore_imaging_sequence_model()
         self.log.info(f"Experiment configuration loaded from {path}")
@@ -489,7 +523,9 @@ class ExpConfigLogic(LogicBase):
 
         The returned dictionary always contains ``experiment``. Each declared field is
         initialized from either its literal ``default`` or its setup-dependent
-        ``default_from`` source.
+        ``default_from`` source. Exception: the field ``imaging_modality`` always starts
+        from the option 'default imaging modality' of the setup (the default written in the
+        definition is not used).
 
         Args:
             definition: Parsed experiment-definition mapping.
@@ -510,6 +546,9 @@ class ExpConfigLogic(LogicBase):
                 raise TypeError(f"Definition of field {field_name!r} must be a dictionary.")
 
             config[field_name] = self._get_field_default(field_definition)
+
+        if "imaging_modality" in fields:
+            config["imaging_modality"] = self._imaging_modality_default
 
         return config
 
@@ -731,6 +770,22 @@ class ExpConfigLogic(LogicBase):
         self.config_dict.pop('rna', None)
         self.log.warning(f"{path} uses the former keys dapi / rna: sample_tag set to "
                          f"{self.config_dict.get('sample_tag')!r}. Save the configuration again to update the file.")
+
+    @QtCore.Slot(str)
+    def update_imaging_modality(self, value):
+        """Imaging modality of the experiment (information only): one of IMAGING_MODALITIES; any other value is
+        refused (warning, current value kept).
+
+        Returns:
+            bool: True when the value was accepted.
+        """
+        value = str(value)
+        if value not in IMAGING_MODALITIES:
+            self.log.warning(f"Imaging modality {value!r} refused: not one of {list(IMAGING_MODALITIES)}.")
+            return False
+        self.config_dict['imaging_modality'] = value
+        self.sigConfigDictUpdated.emit()
+        return True
 
     @QtCore.Slot(int)
     def update_photobleaching_imaging(self, state):

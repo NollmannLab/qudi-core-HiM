@@ -1107,12 +1107,175 @@ def _section_autofocus_report():
     return results
 
 
+# --- configurator: imaging modality ---
+def _section_imaging_modality():
+    """Experiment configurator: imaging modality (field imaging_modality, information only) - list
+    IMAGING_MODALITIES, option 'default imaging modality' (invalid -> warning, first item), update, load of a file
+    without the key / with 'TIRF' / with an unknown value, combo box of the GUI shown only for a definition that
+    declares imaging_modality; experiment definitions and qudi configurations of the repository."""
+    import os, weakref, importlib, tempfile, logging
+    from qtpy import QtCore
+    import yaml
+    from qudi.core.connector import Connector
+    from qudi.logic import experiment_configurator_logic as ecl
+
+    results = []
+    def check(label, cond, detail=''):
+        results.append((label, bool(cond))); print(f'[{"PASS" if cond else "FAIL"}] {label} {detail if not cond else ""}', flush=True)
+    LOGS = []
+    class H(logging.Handler):
+        def emit(self, r): LOGS.append((r.levelno, r.getMessage()))
+    handler = H(); logging.getLogger().addHandler(handler)
+    class FakeMain(QtCore.QObject): pass
+    MAIN = FakeMain()
+    CFG = yaml.safe_load(open(os.path.join(repo, 'custom_config/dummy_config.cfg')))
+    TMP = tempfile.mkdtemp()
+    DEFS = os.path.join(repo, 'custom_config/custom_experiments_config')
+    EXPECTED = ('epifluorescence/widefield', 'brightfield', 'confocal', 'spinning_disk', 'TIRF', 'light_sheet')
+
+    def logic_options(**extra):
+        opts = _short.module_options('experiments_configurator_logic',
+                                     CFG['logic']['experiments_configurator_logic'].get('options'))
+        opts['experiment_definitions_directory'] = os.path.join(DEFS, 'dummy') + '/'
+        opts['experiments'] = ['roi_multicolour_scan.yaml', 'him.yaml', 'photobleaching.yaml']
+        opts.update(extra)
+        return opts
+
+    def bare_logic(name, **extra):
+        """Configurator logic alone (no connector), activated with the options of dummy_config.cfg + extra."""
+        m = ecl.ExpConfigLogic(qudi_main_weakref=weakref.ref(MAIN), name=name, config=logic_options(**extra))
+        m.module_state.activate()
+        return m
+
+    # ------------------------------------------------------------------ list and option
+    check('IMAGING_MODALITIES: the six modalities in order (module constant, also an attribute of the logic)',
+          ecl.IMAGING_MODALITIES == EXPECTED and ecl.ExpConfigLogic.IMAGING_MODALITIES == EXPECTED, ecl.IMAGING_MODALITIES)
+    LOGS.clear()
+    plain = bare_logic('imaging_logic_default')
+    check("no option: default 'epifluorescence/widefield', no warning",
+          plain.imaging_modality_default == EXPECTED[0]
+          and not any(lvl >= logging.WARNING and 'imaging modality' in m for lvl, m in LOGS), plain.imaging_modality_default)
+    LOGS.clear()
+    tirf = bare_logic('imaging_logic_tirf', **{'default imaging modality': 'TIRF'})
+    check("option 'default imaging modality: TIRF' -> default TIRF",
+          tirf.imaging_modality_default == 'TIRF', tirf.imaging_modality_default)
+    LOGS.clear()
+    bad = bare_logic('imaging_logic_bad', **{'default imaging modality': 'two-photon'})
+    warned = [m for lvl, m in LOGS if lvl == logging.WARNING and 'default imaging modality' in m]
+    check("invalid option 'two-photon' -> warning, first item used",
+          bad.imaging_modality_default == EXPECTED[0] and warned, (bad.imaging_modality_default, warned))
+
+    # ------------------------------------------------------------------ new experiment, update, load (logic)
+    tirf.init_config_from_definition('Hi-M Dummy')
+    check("new experiment declaring imaging_modality starts with the option of the setup (TIRF), not the "
+          "definition's default",
+          tirf.config_dict.get('imaging_modality') == 'TIRF', tirf.config_dict.get('imaging_modality'))
+    tirf.init_config_from_definition('photobleaching')
+    check('new experiment without imaging_modality in its definition: no key in the configuration',
+          'imaging_modality' not in tirf.config_dict)
+    plain.init_config_from_definition('ROI multicolor scan Dummy')
+    LOGS.clear()
+    ok_conf = plain.update_imaging_modality('confocal')
+    refused = plain.update_imaging_modality('two-photon')
+    check("update_imaging_modality: 'confocal' accepted; 'two-photon' refused (warning, 'confocal' kept)",
+          ok_conf is True and refused is False and plain.config_dict.get('imaging_modality') == 'confocal'
+          and any(lvl == logging.WARNING and 'two-photon' in m for lvl, m in LOGS), plain.config_dict.get('imaging_modality'))
+
+    def experiment_file(name, **values):
+        data = {'experiment': 'ROI multicolor scan Dummy', 'sample_name': 's', 'sample_tag': 'DAPI',
+                'imaging_sequence': [['488 nm', 10.0]], 'save_path': TMP, 'roi_list_path': TMP}
+        data.update(values)
+        path = os.path.join(TMP, name); yaml.safe_dump(data, open(path, 'w')); return path
+    LOGS.clear()
+    tirf.load_config_file(experiment_file('no_key.yml'))
+    check('load: file without imaging_modality -> default of the setup (TIRF), no error, no warning',
+          tirf.config_dict.get('imaging_modality') == 'TIRF'
+          and not any(lvl >= logging.WARNING for lvl, _ in LOGS), (tirf.config_dict.get('imaging_modality'), LOGS))
+    plain.load_config_file(experiment_file('tirf.yml', imaging_modality='TIRF'))
+    check("load: file with 'TIRF' keeps TIRF", plain.config_dict.get('imaging_modality') == 'TIRF')
+    LOGS.clear()
+    plain.load_config_file(experiment_file('unknown.yml', imaging_modality='two-photon'))
+    check("load: unknown value 'two-photon' -> warning, default used",
+          plain.config_dict.get('imaging_modality') == EXPECTED[0]
+          and any(lvl == logging.WARNING and 'two-photon' in m for lvl, m in LOGS), plain.config_dict.get('imaging_modality'))
+    plain.update_imaging_modality('light_sheet')
+    for required in ('sample_name', 'roi_list_path', 'save_path'):
+        plain.config_dict[required] = plain.config_dict.get(required) or TMP
+    plain.save_to_exp_config_file(TMP, 'ROI multicolor scan Dummy', filename='saved.yml')
+    saved_path = os.path.join(TMP, 'saved.yml')
+    saved = yaml.safe_load(open(saved_path)) if os.path.exists(saved_path) else {}
+    check('save writes imaging_modality (light_sheet)', saved.get('imaging_modality') == 'light_sheet', saved)
+
+    # ------------------------------------------------------------------ GUI
+    MODS = {}
+    def build(name):
+        if name in MODS: return MODS[name]
+        base = next(b for b in ('hardware', 'logic', 'gui') if name in (CFG.get(b) or {}))
+        entry = CFG[base][name]; mod, cls = entry['module.Class'].rsplit('.', 1)
+        klass = getattr(importlib.import_module(f'qudi.{base}.{mod}'), cls)
+        opts = logic_options() if name == 'experiments_configurator_logic' else _short.module_options(name, entry.get('options'))
+        m = klass(qudi_main_weakref=weakref.ref(MAIN), name=name, config=opts)
+        by_name = {c.name: c for k in dir(klass) if isinstance(c := getattr(klass, k, None), Connector)}
+        for key, target in (entry.get('connect') or {}).items():
+            m._meta['connectors'][next(k for k in m._meta['connectors'] if by_name[key] is getattr(klass, k))].connect(build(target))
+        m.module_state.activate(); MODS[name] = m; return m
+    gui = build('experiments_configurator_gui'); app.processEvents()
+    mw, logic = gui._mw, gui._exp_logic
+    combo, label = mw.imaging_modality_comboBox, mw.imaging_label
+    def shown(w): return not w.isHidden()
+    check('GUI combo box: the six modalities in order, default of the setup selected',
+          tuple(combo.itemText(k) for k in range(combo.count())) == EXPECTED and combo.currentText() == EXPECTED[0],
+          [combo.itemText(k) for k in range(combo.count())])
+    for experiment, declared in (('Hi-M Dummy', True), ('ROI multicolor scan Dummy', True), ('photobleaching', False)):
+        gui.start_new_experiment_config(experiment); app.processEvents()
+        check(f'({experiment}) label and combo box {"shown" if declared else "hidden"}'
+              + (', default selected and stored' if declared else ''),
+              shown(label) == declared and shown(combo) == declared
+              and (not declared or (combo.currentText() == EXPECTED[0]
+                                    and logic.config_dict.get('imaging_modality') == EXPECTED[0])),
+              (shown(label), shown(combo), combo.currentText(), logic.config_dict.get('imaging_modality')))
+    gui.start_new_experiment_config('ROI multicolor scan Dummy'); app.processEvents()
+    combo.setCurrentText('spinning_disk'); app.processEvents()
+    check('combo box -> logic (update_imaging_modality)', logic.config_dict.get('imaging_modality') == 'spinning_disk')
+    logic.load_config_file(experiment_file('gui_tirf.yml', imaging_modality='TIRF')); app.processEvents()
+    check("loading a file with 'TIRF' selects TIRF in the combo box",
+          combo.currentText() == 'TIRF' and logic.config_dict.get('imaging_modality') == 'TIRF', combo.currentText())
+
+    # ------------------------------------------------------------------ definitions and configurations of the repository
+    with_field = ['spinning_disk/him_epi.yaml', 'spinning_disk/roi_multicolour_scan.yaml', 'ramm/him.yaml',
+                  'ramm/roi_multicolour_scan.yaml', 'palm/roi_multicolour_scan.yaml', 'dummy/him.yaml',
+                  'dummy/roi_multicolour_scan.yaml']
+    without_field = ['spinning_disk/him_confocal.yaml', 'spinning_disk/roi_multicolour_scan_confocal.yaml',
+                     'opm/psf_stack.yaml']
+    fields = {f: yaml.safe_load(open(os.path.join(DEFS, f), encoding='utf-8'))['fields'] for f in with_field + without_field}
+    check('definitions: imaging_modality required, default epifluorescence/widefield, in the 7 Hi-M / ROI scan '
+          'definitions; not in the confocal SD and OPM definitions',
+          all(fields[f].get('imaging_modality') == {'required': True, 'default': 'epifluorescence/widefield'}
+              for f in with_field) and not any('imaging_modality' in fields[f] for f in without_field),
+          {f: fields[f].get('imaging_modality') for f in with_field + without_field})
+    opm = yaml.safe_load(open(os.path.join(repo, 'custom_config/OPM_config.cfg'), encoding='utf-8'))
+    check("OPM_config.cfg: 'default imaging modality: light_sheet' (option of experiments_configurator_logic)",
+          opm['logic']['experiments_configurator_logic']['options'].get('default imaging modality') == 'light_sheet')
+    templates = os.path.join(repo, 'custom_config/custom_metadata_templates')
+    acq = {}
+    for t in ('Spinning_Disk_setup.cfg', 'RAMM_setup.cfg', 'OPM_setup.cfg', 'PALM_setup.cfg'):
+        keys = [list(item)[0] for item in yaml.safe_load(open(os.path.join(templates, t), encoding='utf-8'))['Acquisition']]
+        acq[t] = keys[:3]
+    check('metadata templates: imaging_modality right after sample_name in the Acquisition section (SD, RAMM, OPM, '
+          'PALM)', all(k[:2] == ['sample_name', 'imaging_modality'] for k in acq.values()), acq)
+
+    logging.getLogger().removeHandler(handler)
+    KEEP_ALIVE.append(locals())  # modules, threads and widgets of the section live until the end
+    return results
+
+
 SECTIONS = [
     ('data folders in the logic', _section_data_folders),
     ('random ROI list helper', _section_random_roi_list),
     ('configurator: local / server folder buttons', _section_folder_buttons),
     ('configurator: sample tag and ZEN folder dialogs', _section_sample_tag),
     ('sample file: helper, configurator, sample dialog', _section_sample_file),
+    ('configurator: imaging modality', _section_imaging_modality),
     ('autofocus report', _section_autofocus_report),
 ]
 
