@@ -1780,10 +1780,13 @@ if ONLY:
 # --- Hi-M cycles: run, progress, interrupt, errors, needle, SD, RAMM ---
 
 # ------------------------------------------------------------------ (1) full 2-probe run (example injections file)
-# incubation long enough for the live countdown checked below
-task = make_task(user_config_path=files(_short.with_incubation(EXAMPLE, _short.COUNTDOWN_INCUBATION_S), 'full'))
+# incubation long enough for the live countdown checked below; option needle_rinsing_duration_s set to another value
+# than needle_rinsing_time of the injections file (1 s): the rinse must use the file value
+task = make_task(user_config_path=files(_short.with_incubation(EXAMPLE, _short.COUNTDOWN_INCUBATION_S), 'full'),
+                 needle_rinsing_duration_s=5)
 CALLS.clear()
 t0 = monotonic()
+n_logs_full = len(LOGS)
 result, err, _, _ = run(task)
 print('    result:', result, err)
 check('(full run) 2 cycles done, no error', err is None and result and result['cycles_done'] == 2
@@ -1845,6 +1848,45 @@ check(f'(full run) rinse: start_rinsing({_short.RINSE_S:g}) runs in the flow log
       len(rinse) == 2 and rinse[0][2] == (float(_short.RINSE_S),) and rinse[0][3] == 'MainThread'
       and not [m for m in QT_MESSAGES if 'Timer' in m], (rinse, QT_MESSAGES))
 end_state_ok('full run', t0)
+full_logs = [m for _, lvl, m in LOGS[n_logs_full:] if lvl == logging.INFO]
+full_params = {}
+if result and result.get('directory'):
+    with open(os.path.join(result['directory'], 'experiment_parameters', 'HiM_parameters.yml')) as stream:
+        full_params = (yaml.safe_load(stream) or {}).get('2- fluidic parameters', {})
+check('(rinsing time) needle_rinsing_time of the injections file (1 s) used, not the option (5 s): info line naming '
+      "the source; HiM_parameters.yml '2- fluidic parameters': needle rinsing time (s) = 1",
+      EXAMPLE.get('needle_rinsing_time') == 1 and rinse and all(c[2] == (1.0,) for c in rinse)
+      and any(m.startswith('Needle rinsing time: 1 s - needle_rinsing_time of the injections file') for m in full_logs)
+      and full_params.get('needle rinsing time (s)') == 1.0, (rinse, full_params, [m for m in full_logs if 'rins' in m]))
+
+# file without needle_rinsing_time -> option needle_rinsing_duration_s; 0 -> no rinse (short 2-cycle runs)
+no_key = copy.deepcopy(EXAMPLE)
+no_key.pop('needle_rinsing_time')
+no_rinse = copy.deepcopy(EXAMPLE)
+no_rinse['needle_rinsing_time'] = 0
+for label, injections in (('no key', no_key), ('0 s', no_rinse)):
+    task = make_task(user_config_path=files(injections, f'rinse_{label.replace(" ", "_")}'))
+    task.dummy_imaging_time_s = 0.0
+    t0 = monotonic()
+    n0 = len(LOGS)
+    result, err, _, _ = run(task)
+    done = err is None and result and result['cycles_done'] == 2
+    logs = [m for _, lvl, m in LOGS[n0:] if lvl == logging.INFO]
+    rinses = [a for n_, a in calls(t0) if n_ == 'flow.start_rinsing']
+    if label == 'no key':
+        check(f'(rinsing time, file without needle_rinsing_time) option needle_rinsing_duration_s used '
+              f'(start_rinsing({_short.RINSE_S:g}) after each of the 2 cycles); info line naming the option',
+              done and rinses == [(float(_short.RINSE_S),)] * 2
+              and any(m.startswith(f'Needle rinsing time: {_short.RINSE_S:g} s - task option needle_rinsing_duration_s '
+                                   '(no needle_rinsing_time in the injections file') for m in logs),
+              (rinses, [m for m in logs if 'rins' in m]))
+    else:
+        check('(rinsing time 0) 2 cycles without rinse: no start_rinsing call; info line "Needle rinse skipped '
+              '(needle_rinsing_time = 0)" after each cycle; no "Rinsing needle" progress',
+              done and rinses == [] and logs.count('Needle rinse skipped (needle_rinsing_time = 0)') == 2
+              and not any('Rinsing needle' in t for _, s, t in PROGRESS),
+              (rinses, [m for m in logs if 'rins' in m.lower()]))
+    end_state_ok(f'rinsing time {label}', t0)
 
 if not QUICK:
     # ------------------------------------------------------------------ (2) interrupts
@@ -1934,6 +1976,12 @@ if not QUICK:
     check("('same' mode, 2 probe injections per cycle) no tube problem: the run starts (interrupted at the first ROI)",
           t_int is not None and 'Hi-M task not started' not in str(err), err)
     expect_error('empty ROI list', EXAMPLE, (f'the ROI list {ROI0} is empty',), roi_list=ROI0, n=1)
+    for value in (601, -1, 'long'):
+        bad_rinse = copy.deepcopy(EXAMPLE)
+        bad_rinse['needle_rinsing_time'] = value
+        expect_error(f'needle_rinsing_time {value!r}', bad_rinse,
+                     (f'needle rinsing time {value!r} (needle_rinsing_time of the injections file',
+                      'must be a number of seconds within 0..600'), n=1)
     all_bad = copy.deepcopy(collide)
     all_bad['hybridization list'][0]['product'] = 'Unknown buffer'
     msg = expect_error('everything at once', all_bad, ('Unknown buffer', 'tube 2 is probe RT2', 'is empty'),

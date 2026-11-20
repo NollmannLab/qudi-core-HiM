@@ -1,6 +1,6 @@
 # Test injections file for the Hi-M task (HiMDummyTask), short settings of docs/TESTING.md:
 # 5 µl injections at 1000 µl/min (short regulation ramp with the dummy flow chain), 1 s incubation,
-# 2 probes. Same format as the files written by the injections configurator.
+# 2 probes, 1 s needle rinse. Same format as the files written by the injections configurator.
 buffer:
   1: SSC
   2: Wash buffer
@@ -10,6 +10,7 @@ probes:
   1: RT1
   2: RT2
 probe_needle_mode: next
+needle_rinsing_time: 1
 hybridization list:
 - step_number: 1
   procedure: Hybridization

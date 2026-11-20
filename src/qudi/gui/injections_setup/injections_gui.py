@@ -49,6 +49,12 @@ class InjectionsGUI(GuiBase):
         connect:
             injections_logic: 'injections_logic'
 
+    Needle rinsing time (rinsing_time_spinBox, 0..600 s): rinse of the needle after each Hi-M cycle, saved in
+    the injections file. Time estimates (read-only, seconds rounded to the second, updated on every change):
+    hybridization_time_lineEdit and photobleaching_time_lineEdit (each list), injection_time_lineEdit (per cycle:
+    hybridization + photobleaching + rinse; whole experiment in its tooltip). A '*' marks a value with ignored
+    steps (missing volume or flowrate), listed in the tooltip.
+
     The load and save dialogs start in the folder of the injections files, option injections_directory of
     the injections logic. The former option default_path of this GUI is still read: it is used only if
     injections_directory is not set, with one warning at activation (the value belongs to the logic).
@@ -78,6 +84,8 @@ class InjectionsGUI(GuiBase):
                                ('Stay in the same tube', 'same'))
     PROBE_NEEDLE_MODE_TOOLTIP = ('When the probe valve is used several times in the sequence: move the needle to the '
                                  'next tube (tube + 1) for each new probe injection, or keep it in the same tube.')
+    RINSING_TIME_TOOLTIP = 'Needle rinsing after each Hi-M cycle (0 = no rinse)'
+    MINIMUM_TIME_NOTE = 'Minimum times: valve switching, needle moves and the flow regulation ramp are not included.'
 
     def __init__(self, config, **kwargs):
         super().__init__(config=config, **kwargs)
@@ -123,6 +131,17 @@ class InjectionsGUI(GuiBase):
         self._mw.probe_handling_comboBox.setToolTip(self.PROBE_NEEDLE_MODE_TOOLTIP)
         self.update_probe_handling_combobox(self._injections_logic.probe_needle_mode)
 
+        # needle rinsing time and time estimates (read-only)
+        low, high = self._injections_logic.NEEDLE_RINSING_TIME_RANGE_S
+        self._mw.rinsing_time_spinBox.setRange(low, high)
+        self._mw.rinsing_time_spinBox.setSuffix(' s')
+        self._mw.rinsing_time_spinBox.setToolTip(self.RINSING_TIME_TOOLTIP)
+        self.update_rinsing_time_spinbox(self._injections_logic.needle_rinsing_time)
+        for line_edit in (self._mw.hybridization_time_lineEdit, self._mw.photobleaching_time_lineEdit,
+                          self._mw.injection_time_lineEdit):
+            line_edit.setReadOnly(True)
+        self.update_time_estimates()
+
         # signals
         # internal signals
         # menubar
@@ -147,6 +166,8 @@ class InjectionsGUI(GuiBase):
 
         # comboboxes
         self._mw.probe_handling_comboBox.currentIndexChanged.connect(self.probe_handling_changed)
+        # spinbox
+        self._mw.rinsing_time_spinBox.valueChanged.connect(self._injections_logic.set_needle_rinsing_time)
 
         # signals to logic
         self.sigAddBuffer.connect(self._injections_logic.add_buffer)
@@ -172,6 +193,8 @@ class InjectionsGUI(GuiBase):
         self._injections_logic.sigPhotobleachingListChanged.connect(self.update_photobleaching_listview)
         self._injections_logic.sigIncompleteLoad.connect(self.show_incomplete_load_warning)
         self._injections_logic.sigProbeNeedleModeChanged.connect(self.update_probe_handling_combobox)
+        self._injections_logic.sigRinsingTimeChanged.connect(self.update_rinsing_time_spinbox)
+        self._injections_logic.sigTimeEstimatesChanged.connect(self.update_time_estimates)
 
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
@@ -283,6 +306,44 @@ class InjectionsGUI(GuiBase):
             return
         with QtCore.QSignalBlocker(self._mw.probe_handling_comboBox):
             self._mw.probe_handling_comboBox.setCurrentIndex(index)
+
+    def update_rinsing_time_spinbox(self, value):
+        """ Callback of sigRinsingTimeChanged (and used at activation): shows the needle rinsing time without sending
+        it back to the logic. """
+        with QtCore.QSignalBlocker(self._mw.rinsing_time_spinBox):
+            self._mw.rinsing_time_spinBox.setValue(int(value))
+
+    @staticmethod
+    def _duration_text(seconds) -> str:
+        """ '<s> s (~<h> h <m> min)' for a duration in seconds. """
+        total = int(round(seconds))
+        return f'{total} s (~{total // 3600} h {total % 3600 // 60} min)'
+
+    def update_time_estimates(self):
+        """ Callback of sigTimeEstimatesChanged (and used at activation): time estimates of the hybridization list,
+        the photobleaching list and one cycle (hybridization + photobleaching + rinse), seconds rounded to the second.
+        A '*' marks a value with ignored steps (missing volume or flowrate), listed in the tooltip. """
+        est = self._injections_logic.time_estimates()
+        ignored_note = 'Ignored step(s) (missing volume or flowrate, counted as 0 s): '
+
+        def show(line_edit, seconds, ignored, tooltip):
+            mark = '*' if ignored else ''
+            line_edit.setText(f'{int(round(seconds))}{mark}')
+            line_edit.setToolTip(tooltip)
+
+        hyb_ignored, pb_ignored = est['hybridization_ignored'], est['photobleaching_ignored']
+        show(self._mw.hybridization_time_lineEdit, est['hybridization_s'], hyb_ignored,
+             'Hybridization list (s). ' + self.MINIMUM_TIME_NOTE
+             + (f'\n{ignored_note}{", ".join(map(str, hyb_ignored))}' if hyb_ignored else ''))
+        show(self._mw.photobleaching_time_lineEdit, est['photobleaching_s'], pb_ignored,
+             'Photobleaching list (s). ' + self.MINIMUM_TIME_NOTE
+             + (f'\n{ignored_note}{", ".join(map(str, pb_ignored))}' if pb_ignored else ''))
+        ignored = [f'hybridization {", ".join(map(str, hyb_ignored))}'] if hyb_ignored else []
+        ignored += [f'photobleaching {", ".join(map(str, pb_ignored))}'] if pb_ignored else []
+        show(self._mw.injection_time_lineEdit, est['cycle_s'], ignored,
+             f'Per cycle: hybridization + photobleaching + needle rinse. Whole experiment '
+             f'({est["number_of_probes"]} probes): {self._duration_text(est["experiment_s"])}. '
+             + self.MINIMUM_TIME_NOTE + (f'\n{ignored_note}{"; ".join(ignored)}' if ignored else ''))
 
     def update_buffer_listview(self):
         """ Callback of a signal sent from logic (sigBufferListChanged) notifying that the listview model has

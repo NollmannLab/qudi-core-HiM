@@ -28,6 +28,79 @@ from scipy.optimize import _root
 # from the outlet of this entry (tasks/common/fluidics_steps.py).
 PROBE_BUFFER_NAME = 'Probe'
 
+# Needle rinsing after each Hi-M cycle (key needle_rinsing_time of the injections file, seconds; 0 = no rinse)
+DEFAULT_NEEDLE_RINSING_TIME_S = 30
+NEEDLE_RINSING_TIME_RANGE_S = (0, 600)
+
+
+# ======================================================================================================================
+# Time estimates of an injection sequence (pure functions, no Qt)
+# ======================================================================================================================
+
+def _step_values(step):
+    """(product, volume, flowrate, time) of a step: an item of a sequence model (procedure, product, volume, flowrate,
+    time) or an entry of an injections file (dict with the same keys)."""
+    if isinstance(step, dict):
+        return step.get('product'), step.get('volume'), step.get('flowrate'), step.get('time')
+    _, product, volume, flowrate, time = step
+    return product, volume, flowrate, time
+
+
+def _positive_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _step_time(step):
+    """Duration (s) of one step, or None when it cannot be estimated: injection step -> volume (ul) / flowrate
+    (ul/min) * 60, None if the volume or the flowrate is missing or zero; incubation step (product None) -> its time,
+    None if the time is missing or negative."""
+    product, volume, flowrate, time = _step_values(step)
+    if product is None:
+        if isinstance(time, (int, float)) and not isinstance(time, bool) and time >= 0:
+            return float(time)
+        return None
+    if _positive_number(volume) and _positive_number(flowrate):
+        return volume / flowrate * 60.
+    return None
+
+
+def estimate_sequence_time(steps) -> float:
+    """Estimated duration (s) of an injection sequence: sum of the injection steps (volume / flowrate * 60) and of
+    the incubation steps (their time). Steps that cannot be estimated (missing or zero volume or flowrate, missing
+    incubation time) count as 0 - see ignored_sequence_steps. Minimum time: valve switching, needle moves and the
+    flow regulation ramp are not included.
+
+    :param steps: items of a sequence model (procedure, product, volume, flowrate, time) or entries of an injections
+                  file (dicts with the same keys)
+    :return: float seconds
+    """
+    return float(sum(t for t in (_step_time(step) for step in steps) if t is not None))
+
+
+def ignored_sequence_steps(steps) -> list:
+    """Numbers (1-based) of the steps that estimate_sequence_time ignores (missing or zero volume or flowrate,
+    missing incubation time)."""
+    return [number for number, step in enumerate(steps, 1) if _step_time(step) is None]
+
+
+def experiment_time_estimates(hybridization_steps, photobleaching_steps, needle_rinsing_time, number_of_probes) -> dict:
+    """Time estimates (s) of a Hi-M experiment from its injections:
+        hybridization_s, photobleaching_s: estimate_sequence_time of each list
+        rinsing_s: needle rinse after each cycle
+        cycle_s: hybridization_s + photobleaching_s + rinsing_s
+        number_of_probes: one cycle per probe
+        experiment_s: cycle_s * number_of_probes
+        hybridization_ignored, photobleaching_ignored: ignored_sequence_steps of each list
+    Minimum times: valve switching, needle moves, the flow regulation ramp and the imaging are not included."""
+    hybridization = estimate_sequence_time(hybridization_steps)
+    photobleaching = estimate_sequence_time(photobleaching_steps)
+    cycle = hybridization + photobleaching + float(needle_rinsing_time)
+    return {'hybridization_s': hybridization, 'photobleaching_s': photobleaching,
+            'rinsing_s': float(needle_rinsing_time), 'cycle_s': cycle, 'number_of_probes': int(number_of_probes),
+            'experiment_s': cycle * int(number_of_probes),
+            'hybridization_ignored': ignored_sequence_steps(hybridization_steps),
+            'photobleaching_ignored': ignored_sequence_steps(photobleaching_steps)}
+
 # ======================================================================================================================
 # Child classes of QAbstractListModel for the List Views
 # ======================================================================================================================
@@ -113,6 +186,16 @@ class InjectionsLogic(LogicBase):
     probe_valve_outlet: outlet of the buffer valve connected to the probe needle on this setup. It is written
     into every injections file as the buffer entry PROBE_BUFFER_NAME ('Probe') -> outlet; the fluidics and Hi-M
     tasks read the probe valve from the injections files written with it (no separate task option).
+
+    Needle rinsing time (needle_rinsing_time, s, NEEDLE_RINSING_TIME_RANGE_S, default
+    DEFAULT_NEEDLE_RINSING_TIME_S): rinse of the needle after each Hi-M cycle, 0 = no rinse. Written in the
+    injections file (top-level key needle_rinsing_time) and read by the Hi-M task; files without the key load with
+    the default (info line). set_needle_rinsing_time refuses values outside the range; sigRinsingTimeChanged(int)
+    is emitted when the value changes and by load_injections.
+
+    Time estimates (time_estimates(), see experiment_time_estimates): hybridization and photobleaching lists,
+    per-cycle total (+ needle rinse) and whole experiment (one cycle per probe). sigTimeEstimatesChanged is
+    emitted whenever a list, the probes or the rinsing time change (and after load_injections).
     """
     # define connectors to logic modules
     valve = Connector(name='valve_logic', interface='FluidicsValveLogic')
@@ -130,6 +213,8 @@ class InjectionsLogic(LogicBase):
     sigPhotobleachingListChanged = QtCore.Signal()
     sigIncompleteLoad = QtCore.Signal()
     sigProbeNeedleModeChanged = QtCore.Signal(str)  # probe needle mode set by load_injections
+    sigRinsingTimeChanged = QtCore.Signal(int)  # needle rinsing time (s): changed, or set by load_injections
+    sigTimeEstimatesChanged = QtCore.Signal()  # a list, the probes or the rinsing time changed (see time_estimates)
 
     # attributes
     _robot = None
@@ -144,6 +229,10 @@ class InjectionsLogic(LogicBase):
     PROBE_NEEDLE_MODES = ('next', 'same')
     DEFAULT_PROBE_NEEDLE_MODE = 'next'
     _probe_needle_mode = DEFAULT_PROBE_NEEDLE_MODE
+    # needle rinsing time (module constants, also read by the GUI)
+    NEEDLE_RINSING_TIME_RANGE_S = NEEDLE_RINSING_TIME_RANGE_S
+    DEFAULT_NEEDLE_RINSING_TIME_S = DEFAULT_NEEDLE_RINSING_TIME_S
+    _needle_rinsing_time = DEFAULT_NEEDLE_RINSING_TIME_S
 
     buffer_dict = {}  # key: value = valve_number: buffer_name (to make sure that each valve is only used once)
     probe_dict = {}  # key: value = position_number: probe_name (same comment)
@@ -167,6 +256,12 @@ class InjectionsLogic(LogicBase):
         self.hybridization_injection_sequence_model = InjectionSequenceModel()
         self.photobleaching_injection_sequence_model = InjectionSequenceModel()
 
+        # time estimates follow every change of the lists, the probes and the rinsing time
+        for signal in (self.sigHybridizationListChanged, self.sigPhotobleachingListChanged, self.sigProbeListChanged,
+                       self.sigRinsingTimeChanged):
+            signal.connect(self._emit_time_estimates)
+        self._needle_rinsing_time = DEFAULT_NEEDLE_RINSING_TIME_S
+
         # add the probe entry as default into the bufferlist
         self.add_buffer(PROBE_BUFFER_NAME, self.probe_valve_number)
 
@@ -174,7 +269,60 @@ class InjectionsLogic(LogicBase):
 
     def on_deactivate(self):
         """ Perform required deactivation. """
-        pass
+        for signal in (self.sigHybridizationListChanged, self.sigPhotobleachingListChanged, self.sigProbeListChanged,
+                       self.sigRinsingTimeChanged):
+            try:
+                signal.disconnect(self._emit_time_estimates)
+            except (RuntimeError, TypeError):
+                pass
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Needle rinsing time and time estimates
+# ----------------------------------------------------------------------------------------------------------------------
+
+    @property
+    def needle_rinsing_time(self) -> int:
+        """ Needle rinsing after each Hi-M cycle (s, 0 = no rinse), written in the injections file. """
+        return self._needle_rinsing_time
+
+    @needle_rinsing_time.setter
+    def needle_rinsing_time(self, value):
+        self.set_needle_rinsing_time(value)
+
+    @staticmethod
+    def _valid_rinsing_time(value) -> bool:
+        low, high = NEEDLE_RINSING_TIME_RANGE_S
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        return low <= value <= high and float(value).is_integer()  # NaN and inf fail the range test
+
+    @QtCore.Slot(int)
+    def set_needle_rinsing_time(self, value):
+        """ Set the needle rinsing time.
+        :param: int value: seconds, within NEEDLE_RINSING_TIME_RANGE_S (0 = no rinse)
+        :return: bool: True if the value was set, False if it is not valid (error logged, value unchanged)
+        """
+        if not self._valid_rinsing_time(value):
+            low, high = NEEDLE_RINSING_TIME_RANGE_S
+            self.log.error(f'Invalid needle rinsing time {value!r} - a whole number of seconds within {low}..{high} '
+                           f'is expected.')
+            return False
+        value = int(value)
+        if value != self._needle_rinsing_time:
+            self._needle_rinsing_time = value
+            self.sigRinsingTimeChanged.emit(value)
+        return True
+
+    def time_estimates(self) -> dict:
+        """ Time estimates (s) of the current injections: see experiment_time_estimates (hybridization_s,
+        photobleaching_s, rinsing_s, cycle_s, number_of_probes, experiment_s, hybridization_ignored,
+        photobleaching_ignored). """
+        return experiment_time_estimates(self.hybridization_injection_sequence_model.items,
+                                         self.photobleaching_injection_sequence_model.items,
+                                         self._needle_rinsing_time, len(self.probe_dict))
+
+    def _emit_time_estimates(self, *args):
+        self.sigTimeEstimatesChanged.emit()
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Probe needle mode
@@ -361,6 +509,13 @@ class InjectionsLogic(LogicBase):
                 photobleaching_list = documents['photobleaching list']
                 # files written before this key existed use the default mode
                 probe_needle_mode = documents.get('probe_needle_mode', self.DEFAULT_PROBE_NEEDLE_MODE)
+                # files written before this key existed use the default needle rinsing time
+                if 'needle_rinsing_time' in documents:
+                    rinsing_time = documents['needle_rinsing_time']
+                else:
+                    rinsing_time = DEFAULT_NEEDLE_RINSING_TIME_S
+                    self.log.info(f'{path}: no needle_rinsing_time - default needle rinsing time '
+                                  f'{DEFAULT_NEEDLE_RINSING_TIME_S} s used.')
 
                 # update the models based on the dictionaries / lists content
                 self.buffer_list_model.items = [(self.buffer_dict[key], key) for key in self.buffer_dict]
@@ -385,6 +540,15 @@ class InjectionsLogic(LogicBase):
                     probe_needle_mode = self.DEFAULT_PROBE_NEEDLE_MODE
                 self._probe_needle_mode = probe_needle_mode
                 self.sigProbeNeedleModeChanged.emit(self._probe_needle_mode)
+
+                if not self._valid_rinsing_time(rinsing_time):
+                    low, high = NEEDLE_RINSING_TIME_RANGE_S
+                    self.log.error(f'Invalid needle_rinsing_time {rinsing_time!r} in {path} (whole number of seconds '
+                                   f'within {low}..{high}) - using {DEFAULT_NEEDLE_RINSING_TIME_S} s.')
+                    rinsing_time = DEFAULT_NEEDLE_RINSING_TIME_S
+                self._needle_rinsing_time = int(rinsing_time)
+                self.sigRinsingTimeChanged.emit(self._needle_rinsing_time)
+                self.sigTimeEstimatesChanged.emit()
 
         except KeyError:
             self.log.warning('Injections not loaded. Document is incomplete.')
@@ -425,7 +589,8 @@ class InjectionsLogic(LogicBase):
 
             with open(file_path, 'w') as file:
                 dict_file = {'buffer': self.buffer_dict, 'probes': self.probe_dict, 'hybridization list': hybridization_list, 'photobleaching list': photobleaching_list,
-                             'probe_needle_mode': self._probe_needle_mode}
+                             'probe_needle_mode': self._probe_needle_mode,
+                             'needle_rinsing_time': self._needle_rinsing_time}
                 yaml.safe_dump(dict_file, file, default_flow_style=False)  # , sort_keys=False
                 self.log.info('Injections saved to {}'.format(file_path))
 

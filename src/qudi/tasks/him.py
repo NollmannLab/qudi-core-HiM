@@ -63,7 +63,7 @@ from qudi.tasks.common import run_metadata as run_metadata_module
 from qudi.tasks.common.data_folders import choose_data_root, create_mirror_folder, create_run_folder, local_dated_root
 from qudi.tasks.common.data_transfer import DataTransfer
 from qudi.tasks.common.popups import show_info_popup, show_warning_popup
-from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin
+from qudi.tasks.common.fluidics_steps import FluidicsStepsMixin, _is_number
 from qudi.util import autofocus_report
 from qudi.tasks.common.run_metadata import (experiment_parameters_folder, fill_run_metadata, optional_metadata_template,
                                             set_metadata_field, write_metadata)
@@ -158,7 +158,14 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     and its content as the 'Sample' section of metadata.yml (appended after the template sections, or filled in the template's
     'Sample' section).
     Injections file (injections configurator): buffer {outlet: name}, probes {tube: name},
-    hybridization list, photobleaching list, probe_needle_mode 'next' | 'same' (missing -> 'next').
+    hybridization list, photobleaching list, probe_needle_mode 'next' | 'same' (missing -> 'next'),
+    needle_rinsing_time (s, 0..600).
+
+    Needle rinse after each cycle: needle_rinsing_time of the injections file; files without the key use the
+    task option needle_rinsing_duration_s (default 30 s). The value and its source are logged; a value outside
+    0..600 s is reported with the other problems, before any hardware call. 0 skips the rinse (info line
+    "Needle rinse skipped (needle_rinsing_time = 0)"). The value is written in HiM_parameters.yml
+    ('2- fluidic parameters', 'needle rinsing time (s)').
 
     Needle: each cycle starts with the needle in the tube of its probe. With 'next', every further
     injection from the probe valve in the hybridization list goes to the next tube (tube + 1, + 2,
@@ -214,7 +221,9 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
     # probe valve is read from the injections file
     probe_valve_number = None
 
-    needle_rinsing_duration_s = 30  # rinsing of the needle after each cycle (s)
+    # rinsing of the needle after each cycle (s): fallback used when the injections file has no needle_rinsing_time
+    needle_rinsing_duration_s = 30
+    NEEDLE_RINSING_TIME_RANGE_S = (0, 600)  # allowed needle rinsing time (s), injections file or option
 
     # required keys of the experiment file; a setup subclass may override it. num_z_planes is read, written in
     # HiM_parameters.yml and in metadata.yml only when it is one of these keys.
@@ -235,6 +244,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         self._arrival_slot = None
         self._needle_arrived_at = None
         self._needle_mode = None
+        self._rinsing_time = None      # needle rinse after each cycle (s): injections file or needle_rinsing_duration_s
         self._tubes_used = []
         self._prev_stage_velocity = None
         self._cycles_done = 0
@@ -309,6 +319,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
                 _, _, pb_list, _ = self._read_injections(self.injections_path, 'photobleaching list')
                 probe_valve = self._probe_valve_of(buffer_valves)
                 injections = (buffer_valves, probes, hyb_list, pb_list, needle_mode)
+                self._rinsing_time = self._needle_rinsing_time_of(self.injections_path, problems)
             except RuntimeError as err:
                 problems.append(str(err))
         self._warn_ignored_probe_option(probe_valve, file_read=injections is not None)
@@ -642,10 +653,33 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
                 self._incubate(step, label)
         self._set_valves(self.cleanup_valve_positions)
 
+    def _needle_rinsing_time_of(self, path, problems) -> float:
+        """Needle rinsing time (s) of the run: key needle_rinsing_time of the injections file, or the task option
+        needle_rinsing_duration_s when the key is missing (older files). The value and its source are logged; a
+        value that is not a number within NEEDLE_RINSING_TIME_RANGE_S is added to problems (None returned)."""
+        content = self._read_yaml(path, 'injections file')
+        low, high = self.NEEDLE_RINSING_TIME_RANGE_S
+        if 'needle_rinsing_time' in content:
+            value, source = content['needle_rinsing_time'], f'needle_rinsing_time of the injections file {path}'
+        else:
+            value = self.needle_rinsing_duration_s
+            source = f'task option needle_rinsing_duration_s (no needle_rinsing_time in the injections file {path})'
+        if not _is_number(value) or not low <= value <= high:
+            problems.append(f'needle rinsing time {value!r} ({source}) must be a number of seconds within '
+                            f'{low}..{high}')
+            return None
+        self.log.info(f'Needle rinsing time: {value:g} s - {source}')
+        return float(value)
+
     def _rinse_needle(self, label) -> None:
-        """Rinse the needle (flow logic rinsing pump and rinsing valve positions) and wait for the end
-        of the rinse (interruptible); raise if it has not ended within the duration + 30 s."""
-        duration = float(self.needle_rinsing_duration_s)
+        """Rinse the needle (flow logic rinsing pump and rinsing valve positions) for the needle rinsing time of
+        the run and wait for the end of the rinse (interruptible); raise if it has not ended within the duration +
+        30 s. A rinsing time of 0 skips the rinse (info line)."""
+        rinsing_time = getattr(self, '_rinsing_time', None)  # None: run values not read (option used)
+        duration = rinsing_time if rinsing_time is not None else float(self.needle_rinsing_duration_s)
+        if duration == 0:
+            self.log.info('Needle rinse skipped (needle_rinsing_time = 0)')
+            return
         self._report_progress(label, f'Rinsing needle ({duration:g} s)')
         _call_in_thread_of(self._flow, lambda: self._flow.start_rinsing(duration))
         step_info = {'kind': 'rinse', 'number': None, 'product': 'rinse', 'probe': False, 'flowrate': None,
@@ -749,7 +783,8 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
 
     def _save_parameters(self, params, injections) -> None:
         """Write HiM_parameters.yml in <self.directory>/experiment_parameters/: every key of the experiment file ('1- global parameters'),
-        probes, hybridization and photobleaching lists, imaging parameters, ROI positions."""
+        probes, needle mode, needle rinsing time, hybridization and photobleaching lists, imaging parameters, ROI
+        positions."""
         _, probes, hyb_list, pb_list, needle_mode = injections
         rois = {}
         for roi_name in self.roi_names:
@@ -763,6 +798,7 @@ class HiMTaskBase(FluidicsStepsMixin, ProgressModuleTask):
         param = {'1- global parameters': global_parameters,
                  '2- fluidic parameters': {'probes': probes,
                                            'probe_needle_mode': needle_mode,
+                                           'needle rinsing time (s)': self._rinsing_time,
                                            'hybridization list': hyb_list,
                                            'photobleaching list': pb_list},
                  '3- imaging parameters': {'number of laser lines': len(self.imaging_sequence),

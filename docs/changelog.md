@@ -4,7 +4,58 @@ This file records the main changes made to the project.
 
 ## [Unreleased]
 
-Last updated: 2026-11-16
+Last updated: 2026-11-20
+
+### Fluidics timing: needle rinsing time in the injections file, estimated injection times
+
+#### Added
+
+- Needle rinsing time (injections configurator logic `logic/injections_configurator_logic.py`):
+  - module constants `DEFAULT_NEEDLE_RINSING_TIME_S = 30`, `NEEDLE_RINSING_TIME_RANGE_S = (0, 600)` (also
+    attributes of `InjectionsLogic`, read by the GUI);
+  - property `needle_rinsing_time` (int, s), `set_needle_rinsing_time(value)` (refuses a value that is not a
+    whole number of seconds within 0..600: error logged, value unchanged), signal `sigRinsingTimeChanged(int)`
+    (emitted when the value changes and by `load_injections`);
+  - `save_injections` writes the top-level key `needle_rinsing_time`; `load_injections` reads it (missing in
+    older files: default 30 s and an info line; invalid value: error and default).
+- Injections GUI (`gui/injections_setup/injections_gui.py`): `rinsing_time_spinBox` 0..600, suffix " s",
+  tooltip "Needle rinsing after each Hi-M cycle (0 = no rinse)", connected to `set_needle_rinsing_time`, updated
+  from `sigRinsingTimeChanged` (signals blocked).
+- Hi-M task (`HiMTaskBase`, all setups): needle rinse after each cycle from `needle_rinsing_time` of the
+  injections file (read with the injections file, `_needle_rinsing_time_of`); files without the key use the task
+  option `needle_rinsing_duration_s` (default 30, unchanged). The value and its source are logged (info line).
+  A value that is not a number within 0..600 s is reported with the other problems, before any hardware call.
+  `_rinse_needle` uses this value; 0 skips the rinse ("Needle rinse skipped (needle_rinsing_time = 0)"), the SD
+  subclass still pauses the transfer after it. HiM_parameters.yml, '2- fluidic parameters':
+  `needle rinsing time (s)`. Class docstring updated.
+- Estimated injection times:
+  - pure functions (module level, no Qt): `estimate_sequence_time(steps)` (injection step: volume / flowrate *
+    60; incubation step: its time; steps with a missing or zero volume / flowrate or a missing incubation time
+    count as 0), `ignored_sequence_steps(steps)` (numbers of those steps), `experiment_time_estimates(...)`
+    (hybridization, photobleaching, rinse, per-cycle total, number of probes, experiment total, ignored steps);
+    steps given as sequence model items or as injections file entries;
+  - logic: `time_estimates()` and signal `sigTimeEstimatesChanged`, emitted when a list, the probes or the
+    rinsing time change and after `load_injections`;
+  - GUI: read-only `hybridization_time_lineEdit`, `photobleaching_time_lineEdit`, `injection_time_lineEdit`
+    (per cycle: hybridization + photobleaching + rinse), seconds rounded to the second, updated on every change;
+    tooltip of the per-cycle value: whole experiment (<n> probes) in s and h / min, minimum-time note (valve
+    switching, needle moves and the flow regulation ramp not included); '*' and the ignored steps in the tooltip
+    when a step has no volume or flowrate.
+- `ui_injection_setup.ui` (Qt Designer): `rinsing_time_spinBox`, `rinsing_time_label`,
+  `hybridization_time_lineEdit`, `photobleaching_time_lineEdit`, `injection_time_lineEdit` and the labels
+  `hybridization_time_label`, `label_12`, `label_13`. Range, suffix and tooltips are set in the GUI code (the
+  .ui spin box range 0..200 is replaced at activation).
+- Test data: `needle_rinsing_time: 1` in tests/data/him_injections.yml. No Hi-M injections file in
+  custom_config/custom_experiments_config/*/ outside yet_to_be_used/ (dummy/fluidics_test_injections.yml is the
+  fluidics task example): no example file changed.
+- Tests:
+  - tests/test_fluidics.py, new block "injections configurator: needle rinsing time and time estimates":
+    estimate functions (480 s, 600 s, ignored step reported, per-cycle and experiment totals with 3 probes),
+    logic (default, refused values, signal, save / load, file without the key, estimates after load), GUI
+    (spin box, read-only line edits, update after adding steps / changing the rinse / load / delete, '*').
+  - tests/test_him.py, cycles block: the rinse uses the file value (1 s) and not the option (5 s), info line,
+    HiM_parameters.yml value; file without the key -> option; 0 -> no start_rinsing call; 601, -1 and a
+    text -> error before any hardware call.
 
 ### Imaging modality recorded for the Hi-M and ROI scan experiments
 
