@@ -723,6 +723,14 @@ check('step without flowrate (and step with volume 0) ignored (0 s) and reported
       and icl.estimate_sequence_time([{'product': 'SSC', 'volume': 2000, 'flowrate': 250, 'time': None}]) == 480.0
       and icl.ignored_sequence_steps([('Hybridization', 'SSC: 1', 2000, 250, None)]) == [],
       (icl.estimate_sequence_time(mixed), icl.ignored_sequence_steps(mixed)))
+check('format_minutes: 480 s -> "8.0 min", 90 s -> "1.5 min", 0 -> "0.0 min"',
+      (icl.format_minutes(480), icl.format_minutes(90), icl.format_minutes(0)) == ('8.0 min', '1.5 min', '0.0 min'),
+      (icl.format_minutes(480), icl.format_minutes(90), icl.format_minutes(0)))
+check('format_hours_minutes: 4320 s -> "1 h 12 min", 600 s -> "10 min", 3510 s -> "59 min" (half a minute rounds up), '
+      '7200 s -> "2 h 0 min"',
+      (icl.format_hours_minutes(4320), icl.format_hours_minutes(600), icl.format_hours_minutes(3510),
+       icl.format_hours_minutes(7200)) == ('1 h 12 min', '10 min', '59 min', '2 h 0 min'),
+      (icl.format_hours_minutes(4320), icl.format_hours_minutes(600), icl.format_hours_minutes(3510)))
 est3 = icl.experiment_time_estimates([('Hybridization', 'SSC: 1', 2000, 250, None)],
                                      [('Photobleaching', None, None, None, 600)], 30, 3)
 check('experiment_time_estimates: hybridization 480 + photobleaching 600 + rinse 30 = 1110 s per cycle; 3 probes -> '
@@ -793,8 +801,9 @@ check('rinsing_time_spinBox: range 0..600, suffix " s", tooltip, value of the lo
       and spin.toolTip() == 'Needle rinsing after each Hi-M cycle (0 = no rinse)' and spin.value() == 30,
       (spin.minimum(), spin.maximum(), spin.suffix(), spin.value()))
 edits = (gmw.hybridization_time_lineEdit, gmw.photobleaching_time_lineEdit, gmw.injection_time_lineEdit)
-check('time line edits read-only; empty sequence: 0, 0, 30 (rinse only)',
-      all(e.isReadOnly() for e in edits) and [e.text() for e in edits] == ['0', '0', '30'], [e.text() for e in edits])
+check('time line edits read-only, in minutes; empty sequence: 0.0, 0.0, 0.5 min (rinse 30 s only)',
+      all(e.isReadOnly() for e in edits) and [e.text() for e in edits] == ['0.0 min', '0.0 min', '0.5 min'],
+      [e.text() for e in edits])
 conf_gui.add_probe('RT1', 1)
 conf_gui.add_probe('RT2', 2)
 conf_gui.add_probe('RT3', 3)
@@ -802,42 +811,43 @@ conf_gui.add_injection_step('Hybridization', 'SSC: 1', 2000, 250)
 conf_gui.add_incubation_step('Photobleaching', 600)
 app.processEvents()
 tip = gmw.injection_time_lineEdit.toolTip()
-check('after adding steps: hybridization 480, photobleaching 600, per cycle 1110; tooltip: whole experiment '
-      '(3 probes) 3330 s (~0 h 55 min) and the minimum-time note',
-      [e.text() for e in edits] == ['480', '600', '1110']
-      and tip.startswith('Per cycle: hybridization + photobleaching + needle rinse. Whole experiment (3 probes): '
-                         '3330 s (~0 h 55 min). Minimum times: valve switching, needle moves and the flow regulation '
+check('after adding steps: hybridization 8.0 min (480 s), photobleaching 10.0 min (600 s), per cycle 18.5 min '
+      '(1110 s); tooltip: per cycle 18.5 min, whole experiment (3 probes) 56 min (3330 s) and the minimum-time note',
+      [e.text() for e in edits] == ['8.0 min', '10.0 min', '18.5 min']
+      and tip.startswith('Per cycle: hybridization + photobleaching + needle rinse = 18.5 min. Whole experiment '
+                         '(3 probes): 56 min. Minimum times: valve switching, needle moves and the flow regulation '
                          'ramp are not included.'), ([e.text() for e in edits], tip))
 spin.setValue(90)
 app.processEvents()
-check('spin box 90 s -> logic 90, per cycle 1170, whole experiment 3510 s',
-      conf_gui.needle_rinsing_time == 90 and gmw.injection_time_lineEdit.text() == '1170'
-      and '3510 s (~0 h 58 min)' in gmw.injection_time_lineEdit.toolTip(),
+check('spin box 90 s (still in seconds) -> logic 90, per cycle 19.5 min (1170 s), whole experiment 59 min (3510 s)',
+      conf_gui.needle_rinsing_time == 90 and spin.suffix() == ' s' and gmw.injection_time_lineEdit.text() == '19.5 min'
+      and 'Whole experiment (3 probes): 59 min.' in gmw.injection_time_lineEdit.toolTip(),
       (conf_gui.needle_rinsing_time, gmw.injection_time_lineEdit.text()))
 conf_gui.set_needle_rinsing_time(10)
 app.processEvents()
-check('logic set_needle_rinsing_time(10) -> spin box 10, per cycle 1090',
-      spin.value() == 10 and gmw.injection_time_lineEdit.text() == '1090', (spin.value(), gmw.injection_time_lineEdit.text()))
+check('logic set_needle_rinsing_time(10) -> spin box 10, per cycle 18.2 min (1090 s)',
+      spin.value() == 10 and gmw.injection_time_lineEdit.text() == '18.2 min', (spin.value(), gmw.injection_time_lineEdit.text()))
 conf_gui.add_injection_step('Hybridization', 'SSC: 1', 500, 0)
 app.processEvents()
 check("step without flowrate: '*' after the hybridization and per-cycle values, ignored step named in the tooltips",
-      gmw.hybridization_time_lineEdit.text() == '480*' and gmw.injection_time_lineEdit.text() == '1090*'
-      and gmw.photobleaching_time_lineEdit.text() == '600'
+      gmw.hybridization_time_lineEdit.text() == '8.0 min*' and gmw.injection_time_lineEdit.text() == '18.2 min*'
+      and gmw.photobleaching_time_lineEdit.text() == '10.0 min'
       and 'Ignored step(s)' in gmw.hybridization_time_lineEdit.toolTip() and '2' in gmw.hybridization_time_lineEdit.toolTip()
       and 'hybridization 2' in gmw.injection_time_lineEdit.toolTip(),
       ([e.text() for e in edits], gmw.injection_time_lineEdit.toolTip()))
 conf_gui.load_injections(inj_rt)
 app.processEvents()
 check('load (rinse 45, 2 probes) -> spin box 45 and the estimates of the file',
-      spin.value() == 45 and gmw.injection_time_lineEdit.text() == str(int(round(expected_hyb + 45)))
+      spin.value() == 45 and gmw.injection_time_lineEdit.text() == icl.format_minutes(expected_hyb + 45)
       and '(2 probes)' in gmw.injection_time_lineEdit.toolTip(), (spin.value(), gmw.injection_time_lineEdit.text()))
 conf_gui.delete_hybr_all()
 app.processEvents()
 check('delete the hybridization list -> hybridization 0, per cycle = rinse only',
-      gmw.hybridization_time_lineEdit.text() == '0' and gmw.injection_time_lineEdit.text() == '45',
+      gmw.hybridization_time_lineEdit.text() == '0.0 min' and gmw.injection_time_lineEdit.text() == '0.8 min',
       [e.text() for e in edits])
-check('the .ui keeps the labels of the new widgets (rinsing time, hybridization time)',
-      gmw.rinsing_time_label.text() == 'rinsing time (s)' and gmw.hybridization_time_label.text() == 'hybridization time (s)')
+check('labels of the .ui: rinsing time (s), hybridization time (min)',
+      gmw.rinsing_time_label.text() == 'rinsing time (s)' and gmw.hybridization_time_label.text() == 'hybridization time (min)',
+      (gmw.rinsing_time_label.text(), gmw.hybridization_time_label.text()))
 inj_gui._mw.hide()
 
 print(f'\n{sum(ok for _, ok in results)}/{len(results)} passed', flush=True)

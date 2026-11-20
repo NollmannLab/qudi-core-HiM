@@ -14,6 +14,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
 You should have received a copy of the GNU General Public License along with Qudi. If not, see <http://www.gnu.org/licenses/>.
 """
 
+import math
 import yaml
 import re
 from pathlib import Path
@@ -81,6 +82,19 @@ def ignored_sequence_steps(steps) -> list:
     """Numbers (1-based) of the steps that estimate_sequence_time ignores (missing or zero volume or flowrate,
     missing incubation time)."""
     return [number for number, step in enumerate(steps, 1) if _step_time(step) is None]
+
+
+def format_minutes(seconds) -> str:
+    """Duration in minutes, one decimal, with the unit: 480 -> '8.0 min', 90 -> '1.5 min'."""
+    return f'{float(seconds) / 60.:.1f} min'
+
+
+def format_hours_minutes(seconds) -> str:
+    """Duration rounded to the minute, in hours and minutes: 4320 -> '1 h 12 min', 600 -> '10 min' (no hours
+    below one hour)."""
+    total_min = int(math.floor(float(seconds) / 60. + 0.5))  # half a minute rounds up
+    hours, minutes = divmod(total_min, 60)
+    return f'{hours} h {minutes} min' if hours else f'{minutes} min'
 
 
 def experiment_time_estimates(hybridization_steps, photobleaching_steps, needle_rinsing_time, number_of_probes) -> dict:
@@ -193,8 +207,9 @@ class InjectionsLogic(LogicBase):
     the default (info line). set_needle_rinsing_time refuses values outside the range; sigRinsingTimeChanged(int)
     is emitted when the value changes and by load_injections.
 
-    Time estimates (time_estimates(), see experiment_time_estimates): hybridization and photobleaching lists,
-    per-cycle total (+ needle rinse) and whole experiment (one cycle per probe). sigTimeEstimatesChanged is
+    Time estimates (time_estimates(), see experiment_time_estimates; computed in seconds, shown by the GUI in
+    minutes with format_minutes / format_hours_minutes): hybridization and photobleaching lists, per-cycle total
+    (+ needle rinse) and whole experiment (one cycle per probe). sigTimeEstimatesChanged is
     emitted whenever a list, the probes or the rinsing time change (and after load_injections).
     """
     # define connectors to logic modules

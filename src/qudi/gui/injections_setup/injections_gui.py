@@ -20,6 +20,7 @@ from qtpy import QtWidgets
 from qtpy import uic
 
 from qudi.core.module import GuiBase
+from qudi.logic.injections_configurator_logic import format_hours_minutes, format_minutes
 from qudi.core.connector import Connector
 from qudi.core.configoption import ConfigOption
 
@@ -50,9 +51,10 @@ class InjectionsGUI(GuiBase):
             injections_logic: 'injections_logic'
 
     Needle rinsing time (rinsing_time_spinBox, 0..600 s): rinse of the needle after each Hi-M cycle, saved in
-    the injections file. Time estimates (read-only, seconds rounded to the second, updated on every change):
-    hybridization_time_lineEdit and photobleaching_time_lineEdit (each list), injection_time_lineEdit (per cycle:
-    hybridization + photobleaching + rinse; whole experiment in its tooltip). A '*' marks a value with ignored
+    the injections file. Time estimates (read-only, in minutes with one decimal, e.g. '8.0 min', updated on every
+    change): hybridization_time_lineEdit and photobleaching_time_lineEdit (each list), injection_time_lineEdit (per
+    cycle: hybridization + photobleaching + rinse; whole experiment in hours and minutes in its tooltip). The logic
+    computes in seconds; the conversion is done by format_minutes / format_hours_minutes. A '*' marks a value with ignored
     steps (missing volume or flowrate), listed in the tooltip.
 
     The load and save dialogs start in the folder of the injections files, option injections_directory of
@@ -313,36 +315,31 @@ class InjectionsGUI(GuiBase):
         with QtCore.QSignalBlocker(self._mw.rinsing_time_spinBox):
             self._mw.rinsing_time_spinBox.setValue(int(value))
 
-    @staticmethod
-    def _duration_text(seconds) -> str:
-        """ '<s> s (~<h> h <m> min)' for a duration in seconds. """
-        total = int(round(seconds))
-        return f'{total} s (~{total // 3600} h {total % 3600 // 60} min)'
-
     def update_time_estimates(self):
         """ Callback of sigTimeEstimatesChanged (and used at activation): time estimates of the hybridization list,
-        the photobleaching list and one cycle (hybridization + photobleaching + rinse), seconds rounded to the second.
-        A '*' marks a value with ignored steps (missing volume or flowrate), listed in the tooltip. """
+        the photobleaching list and one cycle (hybridization + photobleaching + rinse), in minutes with one decimal
+        ('8.0 min'); whole experiment in hours and minutes in the tooltip of the per-cycle value. A '*' marks a value
+        with ignored steps (missing volume or flowrate), listed in the tooltip. """
         est = self._injections_logic.time_estimates()
-        ignored_note = 'Ignored step(s) (missing volume or flowrate, counted as 0 s): '
+        ignored_note = 'Ignored step(s) (missing volume or flowrate, counted as 0 min): '
 
         def show(line_edit, seconds, ignored, tooltip):
             mark = '*' if ignored else ''
-            line_edit.setText(f'{int(round(seconds))}{mark}')
+            line_edit.setText(f'{format_minutes(seconds)}{mark}')
             line_edit.setToolTip(tooltip)
 
         hyb_ignored, pb_ignored = est['hybridization_ignored'], est['photobleaching_ignored']
         show(self._mw.hybridization_time_lineEdit, est['hybridization_s'], hyb_ignored,
-             'Hybridization list (s). ' + self.MINIMUM_TIME_NOTE
+             'Hybridization list (min). ' + self.MINIMUM_TIME_NOTE
              + (f'\n{ignored_note}{", ".join(map(str, hyb_ignored))}' if hyb_ignored else ''))
         show(self._mw.photobleaching_time_lineEdit, est['photobleaching_s'], pb_ignored,
-             'Photobleaching list (s). ' + self.MINIMUM_TIME_NOTE
+             'Photobleaching list (min). ' + self.MINIMUM_TIME_NOTE
              + (f'\n{ignored_note}{", ".join(map(str, pb_ignored))}' if pb_ignored else ''))
         ignored = [f'hybridization {", ".join(map(str, hyb_ignored))}'] if hyb_ignored else []
         ignored += [f'photobleaching {", ".join(map(str, pb_ignored))}'] if pb_ignored else []
         show(self._mw.injection_time_lineEdit, est['cycle_s'], ignored,
-             f'Per cycle: hybridization + photobleaching + needle rinse. Whole experiment '
-             f'({est["number_of_probes"]} probes): {self._duration_text(est["experiment_s"])}. '
+             f'Per cycle: hybridization + photobleaching + needle rinse = {format_minutes(est["cycle_s"])}. '
+             f'Whole experiment ({est["number_of_probes"]} probes): {format_hours_minutes(est["experiment_s"])}. '
              + self.MINIMUM_TIME_NOTE + (f'\n{ignored_note}{"; ".join(ignored)}' if ignored else ''))
 
     def update_buffer_listview(self):

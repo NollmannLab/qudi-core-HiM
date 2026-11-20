@@ -41,6 +41,10 @@ Last updated: 2026-11-20
     tooltip of the per-cycle value: whole experiment (<n> probes) in s and h / min, minimum-time note (valve
     switching, needle moves and the flow regulation ramp not included); '*' and the ignored steps in the tooltip
     when a step has no volume or flowrate.
+- Estimated times shown in minutes (one decimal, e.g. "8.0 min", '*' kept for ignored steps); tooltip of the
+  per-cycle value: per-cycle total in minutes, whole experiment in hours and minutes ("1 h 12 min"). The logic
+  still computes in seconds; display helpers `format_minutes` / `format_hours_minutes` (module level, no Qt);
+  rinsing time spin box unchanged (seconds); .ui labels "(min)" (Qt Designer).
 - `ui_injection_setup.ui` (Qt Designer): `rinsing_time_spinBox`, `rinsing_time_label`,
   `hybridization_time_lineEdit`, `photobleaching_time_lineEdit`, `injection_time_lineEdit` and the labels
   `hybridization_time_label`, `label_12`, `label_13`. Range, suffix and tooltips are set in the GUI code (the
