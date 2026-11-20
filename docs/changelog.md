@@ -6,6 +6,29 @@ This file records the main changes made to the project.
 
 Last updated: 2026-11-20
 
+### Hi-M SD: ZEN autofocus images sent to the server with the acquisitions
+
+#### Changed
+
+- `HiMSDTask` (transfer_data on): the ZEN autofocus images (`*_AcquisitionBlock1_pt*.czi`,
+  `autofocus_check.AUTOFOCUS_IMAGE_PATTERN`) are copied to the server too, with the same rules as the acquisitions
+  (`*_AcquisitionBlock2_pt*.czi`): same moments (start of each fluidics step; cleanup after a normal end only, not
+  after an interrupt, an error or an autofocus stop), same destination (`<save_network_path>/<ZEN folder name>/`,
+  path relative to the ZEN folder kept), only the images of the ROIs already imaged.
+  - `_TRANSFER_PATTERN` replaced by `_TRANSFER_PATTERNS`: (pattern, counter, what is counted) pairs -
+    acquisitions <- `_acquisitions_done`, autofocus images <- `_af_checks_done` (new counter, incremented in
+    `_check_autofocus` once ZEN has finished writing the image, whatever the score). For each pattern the files
+    are sorted by pt number and only the first <counter> are queued, so the image ZEN creates in advance for the
+    next ROI is never sent.
+  - One info line per pattern ("Data transfer: <found> file(s) (<pattern>) in <ZEN folder>, <n> newly queued,
+    ...") and one "no ZEN file matches <pattern>" warning per pattern when files were expected; the
+    "run not completed" line says "ZEN images". Class docstring and comments updated.
+- Tests (tests/test_him.py): `transfer` block - 3 ROIs imaged, 4 Block1 + 4 Block2 files: the 3 first of each in
+  pt order queued (mocked transfer helper); cleanup: normal end queues and flushes both kinds, interrupt and
+  autofocus stop queue none; queue checks and warnings per pattern. `sd_zen_folder` block: the fake SD run with
+  transfer_data now finds the N autofocus images on the server (identical copies); log check of the 2-cycle run
+  updated to the new wording.
+
 ### Fluidics timing: needle rinsing time in the injections file, estimated injection times
 
 #### Added

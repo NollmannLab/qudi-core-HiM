@@ -66,7 +66,7 @@ One suite per component in `tests/`, one section per feature inside a suite (a
 - `test_him.py` - Hi-M task: run files (experiment copy, metadata.yml), number of z planes (not
   used on the SD, still required by the dummy; also the configurator field), SD folder named after
   the ZEN data folder and HiM_task.log, autofocus check of the SD (score, abort rule, wait loop), online
-  data transfer (DataTransfer; Hi-M SD transfer cases in the `sd_zen_folder` block) - the words
+  data transfer (DataTransfer, ZEN acquisitions and autofocus images; Hi-M SD transfer cases in the `sd_zen_folder` block) - the words
   `metadata` / `sd_z_planes` / `sd_zen_folder` / `autofocus` / `transfer` run only these blocks -, cycles, progress, interrupt, errors, needle modes, SD (fake ZEN),
   RAMM placeholder, probe valve read from the injections file, needle rinsing time.
 

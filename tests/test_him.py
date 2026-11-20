@@ -928,24 +928,28 @@ if selected('sd_zen_folder'):
     def server_files(server):
         return sorted(os.path.relpath(os.path.join(d, n), server) for d, _, fs in os.walk(server) for n in fs)
 
-    acquired_before = len(zen_trigger.acquired)
+    acquired_before, written_before = len(zen_trigger.acquired), len(zen_trigger.written)
     task, result, err, t0, _, server, local, *_ = zen_case('tr_ok', transfer_data=True)
     zen_name = os.path.basename(zen.created[-1])
     folder = sd_folder(local, zen.created[-1])
     on_server = server_files(server)
     acquired = [os.path.join(zen_name, os.path.relpath(p, zen.created[-1])) for p in zen_trigger.acquired[acquired_before:]]
     metadata = sorted(os.path.join(zen_name, 'metadata', f) for f in server_files(folder))  # recursive
+    af_images = [os.path.join(zen_name, os.path.relpath(p, zen.created[-1]))
+                 for p in zen_trigger.written[written_before:]]
     check(f'(transfer, server reachable) metadata folder local (<save_path>/<YYYY-MM-DD>/...); on the server '
-          f'<save_network_path>/<ZEN folder name>/: the {N} *_AcquisitionBlock2_pt*.czi with their relative path, '
-          f'every metadata file incl. metadata/autofocus/ and HiM_task.log (metadata/...), no autofocus image '
-          f'(Block1), no .part file',
-          err is None and result and result['directory'] == folder and len(acquired) == N
-          and on_server == sorted(acquired + metadata) and os.path.join(zen_name, 'metadata', 'HiM_task.log') in on_server
+          f'<save_network_path>/<ZEN folder name>/: the {N} *_AcquisitionBlock2_pt*.czi and the {N} autofocus images '
+          f'*_AcquisitionBlock1_pt*.czi with their relative path, every metadata file incl. metadata/autofocus/ and '
+          f'HiM_task.log (metadata/...), no .part file',
+          err is None and result and result['directory'] == folder and len(acquired) == N and len(af_images) == N
+          and on_server == sorted(acquired + af_images + metadata)
+          and os.path.join(zen_name, 'metadata', 'HiM_task.log') in on_server
           and os.path.join(zen_name, 'metadata', 'autofocus', 'correlation.npy') in on_server
-          and not any('AcquisitionBlock1' in f or f.endswith('.part') for f in on_server),
-          (err, on_server, acquired, metadata))
+          and not any(f.endswith('.part') for f in on_server),
+          (err, on_server, acquired, af_images, metadata))
     check('(transfer, server reachable) the copies are identical to the local files',
-          all(open(os.path.join(server, f), 'rb').read() == open(os.path.join(zen.root, f), 'rb').read() for f in acquired)
+          all(open(os.path.join(server, f), 'rb').read() == open(os.path.join(zen.root, f), 'rb').read()
+              for f in acquired + af_images)
           and open(os.path.join(server, zen_name, 'metadata', 'experiment_parameters', 'HiM_parameters.yml'), 'rb').read()
           == open(os.path.join(folder, 'experiment_parameters', 'HiM_parameters.yml'), 'rb').read())
     end_state_ok('transfer, server reachable', t0)
@@ -1044,7 +1048,7 @@ if selected('sd_zen_folder'):
     check(f'(transfer, 2 cycles) after the imaging of cycle 1 and the hybridization of cycle 2, the {N} Block2 files of '
           f'cycle 1 are on the server (start of the imaging of cycle 2); each listing logged with the counts',
           result and result['cycles_done'] == 2 and seen_at.get('RT2', {}).get('on_server') == sorted(cycle1_files)
-          and any(m.startswith('Data transfer: ') and 'acquisition file(s) (*_AcquisitionBlock2_pt*.czi)' in m
+          and any(m.startswith('Data transfer: ') and ' file(s) (*_AcquisitionBlock2_pt*.czi)' in m
                   and f', {N} newly queued, ' in m for m in msgs), (result, seen_at.get('RT2'), cycle1_files))
     end_state_ok('transfer, 2 cycles', t0)
 
@@ -1666,7 +1670,8 @@ if selected('transfer'):
           and any(lvl == logging.WARNING and m.startswith('Metadata copy: 5 of 5 file(s) not sent')
                   and m.endswith(f'they are in {meta_src}') for lvl, m in msgs), (raised, left, msgs[-2:]))
 
-    # HiMSDTask._queue_acquisitions: Block2 files only, the first N (acquisitions done) in pt order, logs
+    # HiMSDTask._queue_acquisitions: Block2 files, the first N (acquisitions done) in pt order, logs; the Block1
+    # file is not queued while no autofocus check was done
     q_zen = os.path.join(TMP, 'q_zen', '2026-11-05_HiM_q')
     os.makedirs(os.path.join(q_zen, 'acquisition'))
     os.makedirs(os.path.join(q_zen, 'autofocus'))
@@ -1682,17 +1687,21 @@ if selected('transfer'):
     q_task._queue_acquisitions()
     queued = [os.path.basename(p) for p in q_task._transfer.pending()]
     msgs = [(lvl, m) for t, lvl, m in LOGS if t >= t0]
-    check('(queue acquisitions) 3 acquisitions done, 5 Block2 files: only pt1..pt3 queued (pt order), no Block1 file; '
-          'info "5 acquisition file(s) (*_AcquisitionBlock2_pt*.czi) in <ZEN folder>, 3 newly queued, 3 waiting, 0 sent"',
+    check('(queue acquisitions) 3 acquisitions done, 5 Block2 files: only pt1..pt3 queued (pt order); no autofocus '
+          'check done: no Block1 file; info "5 file(s) (*_AcquisitionBlock2_pt*.czi) in <ZEN folder>, 3 newly queued, '
+          '3 waiting, 0 sent", then one line for the Block1 pattern',
           sorted(queued) == [f'experiment_AcquisitionBlock2_pt{k}.czi' for k in (1, 2, 3)]
-          and (logging.INFO, f'Data transfer: 5 acquisition file(s) (*_AcquisitionBlock2_pt*.czi) in {q_zen}, 3 newly '
+          and (logging.INFO, f'Data transfer: 5 file(s) (*_AcquisitionBlock2_pt*.czi) in {q_zen}, 3 newly '
+                             f'queued, 3 waiting, 0 sent') in msgs
+          and (logging.INFO, f'Data transfer: 1 file(s) (*_AcquisitionBlock1_pt*.czi) in {q_zen}, 0 newly '
                              f'queued, 3 waiting, 0 sent') in msgs, (queued, msgs))
     q_task._acquisitions_done = 5
     t0 = monotonic()
     q_task._queue_acquisitions()
     msgs = [m for t, lvl, m in LOGS if t >= t0]
     check('(queue acquisitions) 5 done: pt4 and pt5 added ("2 newly queued, 5 waiting"); files already queued are not '
-          'counted again', any(m.endswith(', 2 newly queued, 5 waiting, 0 sent') for m in msgs), msgs)
+          'counted again', any('(*_AcquisitionBlock2_pt*.czi)' in m and m.endswith(', 2 newly queued, 5 waiting, 0 sent')
+                               for m in msgs), msgs)
     q_task._transfer.stop()
     empty_zen = os.path.join(TMP, 'q_zen', 'empty')
     os.makedirs(empty_zen)
@@ -1702,11 +1711,99 @@ if selected('transfer'):
     t0 = monotonic()
     q_task._queue_acquisitions()
     warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
-    check('(queue acquisitions) 2 acquisitions done and no Block2 file: one warning "no ZEN acquisition file matches '
-          '... check the ZEN block numbers"',
-          warnings == [f'Data transfer: no ZEN acquisition file matches *_AcquisitionBlock2_pt*.czi in {empty_zen} '
+    check('(queue acquisitions) 2 acquisitions done and no Block2 file: one warning "no ZEN file matches '
+          '... check the ZEN block numbers" (no autofocus check done: no warning for Block1)',
+          warnings == [f'Data transfer: no ZEN file matches *_AcquisitionBlock2_pt*.czi in {empty_zen} '
                        f'although 2 acquisition(s) were done - check the ZEN block numbers'], warnings)
+    q_task._af_checks_done = 2
+    t0 = monotonic()
+    q_task._queue_acquisitions()
+    warnings = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.WARNING]
+    check('(queue acquisitions) 2 autofocus checks done and no Block1 file: one warning per pattern',
+          warnings[-1:] == [f'Data transfer: no ZEN file matches *_AcquisitionBlock1_pt*.czi in {empty_zen} '
+                            f'although 2 autofocus check(s) were done - check the ZEN block numbers']
+          and len(warnings) == 2, warnings)
     q_task._transfer.stop()
+
+    # autofocus images sent with the acquisitions: 3 ROIs imaged, 4 Block1 + 4 Block2 files (the 4th of each: the
+    # file ZEN creates in advance for the next ROI) -> the 3 first of each kind, in pt order; mocked transfer helper
+    class FakeTransfer:
+        def __init__(self):
+            self.added, self.discarded, self.flushed = [], [], []
+
+        def add(self, path, relative_dest, update=False):
+            if any(path == p for p, _ in self.added):
+                return False
+            self.added.append((path, relative_dest))
+            return True
+
+        @property
+        def pending_count(self):
+            return len(self.added)
+
+        sent_count = 0
+
+        def pending(self):
+            return [p for p, _ in self.added]
+
+        def discard(self, paths):
+            self.discarded.extend(paths)
+            return list(paths)
+
+        def flush(self, timeout):
+            self.flushed.append(timeout)
+            return []
+
+    af_zen = os.path.join(TMP, 'q_zen', '2026-11-20_HiM_af')
+    for sub in ('acquisition', 'autofocus'):
+        os.makedirs(os.path.join(af_zen, sub))
+    for k in (4, 2, 1, 3):  # created out of order
+        open(os.path.join(af_zen, 'acquisition', f'experiment_AcquisitionBlock2_pt{k}.czi'), 'wb').write(b'x')
+        open(os.path.join(af_zen, 'autofocus', f'experiment_AcquisitionBlock1_pt{k}.czi'), 'wb').write(b'a')
+    af_task = him.HiMSDTask()
+    af_task._zen_directory = af_zen
+    af_task._transfer = FakeTransfer()
+    af_task._acquisitions_done, af_task._af_checks_done = 3, 3
+    t0 = monotonic()
+    af_task._queue_acquisitions()
+    zen_name_af = os.path.basename(af_zen)
+    added = [(os.path.basename(p), rel) for p, rel in af_task._transfer.added]
+    expected = ([(f'experiment_AcquisitionBlock2_pt{k}.czi',
+                  os.path.join(zen_name_af, 'acquisition', f'experiment_AcquisitionBlock2_pt{k}.czi')) for k in (1, 2, 3)]
+                + [(f'experiment_AcquisitionBlock1_pt{k}.czi',
+                    os.path.join(zen_name_af, 'autofocus', f'experiment_AcquisitionBlock1_pt{k}.czi')) for k in (1, 2, 3)])
+    msgs = [m for t, lvl, m in LOGS if t >= t0 and lvl == logging.INFO]
+    check('(transfer of the autofocus images) 3 ROIs imaged, 4 Block2 + 4 Block1 files: Block2 pt1..pt3 then Block1 '
+          'pt1..pt3 queued in pt order, with their path relative to the ZEN folder; the 4th file of each (next ROI) '
+          'not queued; one info line per pattern',
+          added == expected
+          and sum(m.startswith('Data transfer: 4 file(s) (*_AcquisitionBlock2_pt*.czi)') for m in msgs) == 1
+          and sum(m.startswith('Data transfer: 4 file(s) (*_AcquisitionBlock1_pt*.czi)') for m in msgs) == 1,
+          (added, msgs))
+    check('(transfer of the autofocus images) one pattern list per kind: acquisitions <- _acquisitions_done, '
+          'autofocus images (AUTOFOCUS_IMAGE_PATTERN) <- _af_checks_done',
+          [(p, c) for p, c, _ in him.HiMSDTask._TRANSFER_PATTERNS]
+          == [('*_AcquisitionBlock2_pt*.czi', '_acquisitions_done'),
+              (him.autofocus_check.AUTOFOCUS_IMAGE_PATTERN, '_af_checks_done')]
+          and him.autofocus_check.AUTOFOCUS_IMAGE_PATTERN == '*_AcquisitionBlock1_pt*.czi')
+    # cleanup: normal end -> the remaining images of both kinds queued and flushed; interrupt or autofocus stop -> none
+    for label, completed, aborted in (('normal end', True, False), ('interrupt', False, False),
+                                      ('autofocus stop', False, True)):
+        end_task = him.HiMSDTask()
+        end_task._zen_directory = af_zen
+        end_task._transfer = FakeTransfer()
+        end_task._acquisitions_done, end_task._af_checks_done = 4, 4
+        end_task._run_completed, end_task._af_aborted = completed, aborted
+        end_task.directory = None  # no metadata copy in this check
+        end_task._end_of_run_files()
+        names = [os.path.basename(p) for p, _ in end_task._transfer.added]
+        if completed:
+            check('(cleanup, normal end) the 4 Block2 and the 4 Block1 files queued, then flushed',
+                  sorted(names) == sorted([f'experiment_AcquisitionBlock{b}_pt{k}.czi' for b in (1, 2)
+                                           for k in (1, 2, 3, 4)]) and end_task._transfer.flushed, names)
+        else:
+            check(f'(cleanup, {label}) no image of either kind queued (acquisitions and autofocus images left in the '
+                  f'ZEN folder)', names == [] and not end_task._transfer.flushed, names)
 
     # DataTransfer.add(update=True): modified file sent again, unchanged one not, no duplicate in the queue
     up_src = os.path.join(TMP, 'up_src')
